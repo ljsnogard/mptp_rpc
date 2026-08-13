@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rpc_core",
+]
+
+[workspace.package]
+edition = "2024"
+authors = ["lino <lino_snsalias@outlook.com>"]
