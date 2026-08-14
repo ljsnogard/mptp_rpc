@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/rpc_core",
+    "crates/rpc_iroh",
 ]
 
 [workspace.package]

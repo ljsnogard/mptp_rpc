@@ -4,63 +4,108 @@ use std::{
     collections::btree_map::{self, BTreeMap},
     fmt::Debug,
     iter::IntoIterator,
-    str::FromStr,
 };
 
 use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum AccessMethod {
-    /// 查看资源的元信息
-    Head = 0,
+use abs_buff::x_deps::funty;
 
-    /// 查看资源本体内容
-    View = 0b_0000_0001,
+use crate::access_method::AccessMethod;
 
-    /// 上传资源
-    Post = 0b_0000_0010,
+type HeaderStrType = String;
 
-    /// 删除资源
-    Drop = 0b_0000_0100,
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// StrOrU16
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
-    /// 向资源端推送数据
-    Push = 0b_0001_0000,
-
-    /// 从资源端拉取数据
-    Pull = 0b_0010_0000,
-
-    /// 调用功能，参数由请求头来传递
-    Call = 0b_0100_0000,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+enum StrOrNum<S, N>
+where
+    S: Borrow<str> + Clone + Debug,
+    N: funty::Unsigned,
+{
+    Str(S),
+    Num(N),
 }
 
+impl<S, N> PartialEq for StrOrNum<S, N>
+where
+    S: Borrow<str> + Clone + Debug,
+    N: funty::Unsigned,
+{
+    fn eq(&self, other: &Self) -> bool {
+        match (&self, &other) {
+            (StrOrNum::Num(this), StrOrNum::Num(that)) => N::eq(this, that),
+            (StrOrNum::Str(this), StrOrNum::Str(that)) => str::eq(this.borrow(), that.borrow()),
+            _ => false,
+        }
+    }
+}
+
+impl<S, N> Eq for StrOrNum<S, N>
+where
+    S: Borrow<str> + Clone + Debug,
+    N: funty::Unsigned,
+{ }
+
+impl<S, N> PartialOrd for StrOrNum<S, N>
+where
+    S: Borrow<str> + Clone + Debug,
+    N: funty::Unsigned,
+{
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Option::Some(self.cmp(other))
+    }
+}
+
+impl<S, N> Ord for StrOrNum<S, N>
+where
+    S: Borrow<str> + Clone + Debug,
+    N: funty::Unsigned,
+{
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (&self, &other) {
+            (StrOrNum::Num(this), StrOrNum::Num(that)) => this.cmp(that),
+            (StrOrNum::Str(this), StrOrNum::Str(that)) => str::cmp(this.borrow(), that.borrow()),
+            (StrOrNum::Num(_), StrOrNum::Str(_)) => Ordering::Less,
+            (StrOrNum::Str(_), StrOrNum::Num(_)) => Ordering::Greater,
+        }
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// StdHeaderKey
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// The standard key in header that both client and the server should
+/// understand.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub struct StdHeaderKey(u16);
 
 #[allow(non_upper_case_globals)]
 impl StdHeaderKey {
-    //------------------------------------------------------------------------
-    // 两端端常用的标准响应头
-    //------------------------------------------------------------------------
+    //-------------------------------------------------------------------------
+    // 两端端常用的标准响应头 0x00-0x9F 是用户自定义的，0xA0 后是协议保留的
+    //-------------------------------------------------------------------------
 
     /// 保留
-    pub const Reserved      : StdHeaderKey = StdHeaderKey::new(0x00);
+    pub const Reserved  : StdHeaderKey = StdHeaderKey::new(0xA0);
 
     /// 请求体或者回复体中的数据长度，值类型应该是能转成数字的字符串
-    pub const Content_Length: StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x01);
+    pub const Body_Size : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x01);
 
     /// 请求体或者回复体中的数据 MIME 类型
-    pub const Content_Type  : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x02);
+    pub const Body_Type : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x02);
 
-    /// 指明报文创建的日期和时间，值类型应该是关于日期的字符串
-    pub const Date          : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x03);
+    /// 指明本报文创建的日期和时间，值类型应该是关于日期的字符串
+    pub const Created_At: StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x03);
 
-    //------------------------------------------------------------------------
-    // 客户端常用的标准请求头
-    //------------------------------------------------------------------------
+    //-------------------------------------------------------------------------
+    // 客户端常用的标准请求头 0xB0 - 0xCF 保留了 32 个位置供扩展
+    //-------------------------------------------------------------------------
 
     /// 标识客户端的应用程序类型、操作系统、浏览器版本等信息。
-    pub const User_Agent    : StdHeaderKey = StdHeaderKey::new(0x20);
+    pub const User_Agent    : StdHeaderKey = StdHeaderKey::new(0xB0);
 
     /// 告知服务器客户端能够处理的内容类型（MIME 类型），例如 application/json。
     pub const Accept        : StdHeaderKey = StdHeaderKey::new(Self::User_Agent.0 + 0x01);
@@ -71,24 +116,32 @@ impl StdHeaderKey {
     /// 携带服务器之前通过 Set-Cookie 指令存储在客户端的状态信息
     pub const Cookie        : StdHeaderKey = StdHeaderKey::new(Self::User_Agent.0 + 0x03);
 
-    //------------------------------------------------------------------------
-    // 服务端常用的标准响应头
-    //------------------------------------------------------------------------
+    pub const Forwarded     : StdHeaderKey = StdHeaderKey::new(Self::User_Agent.0 + 0x04);
+
+    //-------------------------------------------------------------------------
+    // 服务端常用的标准响应头，0xD0 - 0xFF 保留了 48 个位置供扩展
+    //-------------------------------------------------------------------------
 
     /// 标识服务器软件的名称和版本信息
-    pub const Server        : StdHeaderKey = StdHeaderKey::new(0x40);
+    pub const Server       : StdHeaderKey = StdHeaderKey::new(0xD0);
 
     /// 用于重定向，告知客户端新的资源地址，值类型应该是路径或者 URI
-    pub const Location      : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x01);
+    pub const Location     : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x01);
 
     /// 指明所请求资源的最后修改时间，值类型应该是关于日期的字符串
-    pub const Last_Modified : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x02);
+    pub const Last_Modified: StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x02);
 
     /// 服务器通过此字段向客户端设置 Cookie
-    pub const Set_Cookie    : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x03);
+    pub const Set_Cookie   : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x03);
 
     /// 资源的唯一标识符（实体标签），用于缓存验证
-    pub const ETag          : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x04);
+    pub const ETag         : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x04);
+
+    /// 控制缓存行为（如缓存时长、是否可缓存），如：`Cache-Control: max-age=3600`
+    pub const Cache_Ctrl   : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x05);
+
+    /// 指明响应内容的过期日期和时间，如：`Expires: Wed, 21 Oct 2023 07:28:00 GMT`
+    pub const Expires      : StdHeaderKey = StdHeaderKey::new(Self::Server.0 + 0x06);
 }
 
 impl StdHeaderKey {
@@ -109,25 +162,52 @@ impl From<StdHeaderKey> for u16 {
     }
 }
 
-type HeaderStrType = String;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum HeaderKey {
-    Std(StdHeaderKey),
-    Str(HeaderStrType),
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+pub struct StdHeaderVal(u16);
+
+#[allow(non_upper_case_globals)]
+impl StdHeaderVal {
+
+    pub const Mime_Body_Type_MsgPack: StdHeaderVal = StdHeaderVal(0x01);
+    pub const Mime_Body_Type_Json   : StdHeaderVal = StdHeaderVal(0x02);
+
+    pub const User_Rpc_Client: StdHeaderVal = StdHeaderVal(0x10);
 }
 
-impl PartialEq for HeaderKey {
-    fn eq(&self, other: &Self) -> bool {
-        match (&self, &other) {
-            (HeaderKey::Std(this), HeaderKey::Std(that)) => StdHeaderKey::eq(this, that),
-            (HeaderKey::Str(this), HeaderKey::Str(that)) => str::eq(this.as_str(), that.as_str()),
-            _ => false,
-        }
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+//  HeaderKey, HeaderVal, wrapping StrOrNum
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HeaderKey(StrOrNum<HeaderStrType, u16>);
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HeaderVal(StrOrNum<HeaderStrType, u16>);
+
+impl From<StdHeaderKey> for HeaderKey {
+    fn from(value: StdHeaderKey) -> Self {
+        HeaderKey(StrOrNum::Num(value.0))
     }
 }
 
-impl Eq for HeaderKey { }
+impl From<StdHeaderVal> for HeaderVal {
+    fn from(value: StdHeaderVal) -> Self {
+        HeaderVal(StrOrNum::Num(value.0))
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+//  HeaderKey, HeaderVal, boilderplate
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+impl PartialEq for HeaderKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl Eq for HeaderKey {}
 
 impl PartialOrd for HeaderKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -137,20 +217,40 @@ impl PartialOrd for HeaderKey {
 
 impl Ord for HeaderKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        match (&self, &other) {
-            (HeaderKey::Std(this), HeaderKey::Std(that)) => this.cmp(that),
-            (HeaderKey::Str(this), HeaderKey::Str(that)) => str::cmp(this.borrow(), that.borrow()),
-            (HeaderKey::Std(_), HeaderKey::Str(_)) => Ordering::Less,
-            (HeaderKey::Str(_), HeaderKey::Std(_)) => Ordering::Greater,
-        }
+        self.0.cmp(&other.0)
     }
 }
 
+impl PartialEq for HeaderVal {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+
+impl Eq for HeaderVal {}
+
+impl PartialOrd for HeaderVal {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Option::Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeaderVal {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// Headers
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// A map storing `HeaderKey` as key and some kind of string as value.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Headers {
     /// The btree map to store some header entries. Do not expose it even any
     /// type-specific information. Keep it opaque to users.
-    map_: BTreeMap<HeaderKey, HeaderStrType>,
+    map_: BTreeMap<HeaderKey, HeaderVal>,
 }
 
 impl Headers {
@@ -158,24 +258,20 @@ impl Headers {
         Headers { map_: BTreeMap::new() }
     }
 
-    pub fn try_get_header<'a>(&'a self, key: &HeaderKey) -> Option<&'a str> {
-        self.map_
-            .get(key)
-            .map(|s| s.as_str())
+    pub fn try_get_header<'a>(&'a self, key: &HeaderKey) -> Option<&'a HeaderVal> {
+        self.map_.get(key)
     }
 
-    pub fn iter_headers<'f>(&'f self) -> impl IntoIterator<Item = (&'f HeaderKey, &'f str)> {
-        self.map_
-            .iter()
-            .map(|t| (t.0, t.1.as_str()))
+    pub fn iter_headers<'f>(&'f self) -> impl IntoIterator<Item = (&'f HeaderKey, &'f HeaderVal)> {
+        self.map_.iter()
     }
 
     /// 如果没有键冲突，返回 Ok 以及成功添加的值，否则返回 Err 和冲突键对应的值
     pub fn try_add_header<'f>(
         &'f mut self,
         key: &'f HeaderKey,
-        factory: impl FnOnce(&HeaderKey) -> HeaderStrType,
-    ) -> Result<&'f mut HeaderStrType, &'f HeaderKey> {
+        factory: impl FnOnce(&HeaderKey) -> HeaderVal,
+    ) -> Result<&'f mut HeaderVal, &'f HeaderKey> {
         let entry = self.map_.entry(key.clone());
         match entry {
             btree_map::Entry::Occupied(_) => {
@@ -193,22 +289,21 @@ impl Headers {
     pub fn add_or_set_header<'f>(
         &'f mut self,
         key: &'f HeaderKey,
-        val: &'f str,
-    ) -> Option<impl Borrow<str>> {
-        self.map_
-            .insert(key.clone(), HeaderStrType::from_str(val).unwrap())
+        val: &'f HeaderVal,
+    ) -> Option<HeaderVal> {
+        self.map_.insert(key.clone(), val.clone())
     }
 
     pub fn remove_header<'f>(
         &'f mut self,
         key: &'f HeaderKey,
-    ) -> Option<(HeaderKey, impl Borrow<str>)> {
+    ) -> Option<(HeaderKey, HeaderVal)> {
         self.map_.remove_entry(key)
     }
 }
 
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub struct Status(u16);
 
 #[allow(non_upper_case_globals)]

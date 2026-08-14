@@ -1,0 +1,18 @@
+[package]
+edition = "2024"
+name = "msgpk_rpc_iroh"
+version = "0.1.0"
+
+description = "MsgPk RPC over IROH networks."
+repository = "https://github.com/ljsnogard/msgpk_rpc_core"
+keywords = ["rpc"]
+
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+msgpk_rpc_core = { path = "../rpc_core" }
+
+anyhow = "1"
+iroh = "1.0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
