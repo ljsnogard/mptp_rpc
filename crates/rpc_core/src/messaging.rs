@@ -1,4 +1,4 @@
-use std::mem::MaybeUninit;
+use core::mem::MaybeUninit;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -26,9 +26,14 @@ use crate::{
 pub trait TrRpcMessage {
     fn headers(&self) -> Option<&Headers>;
 
+    /// 获取报文体的 MIME 类型（`Body_Type` 标准头）。
+    ///
+    /// 意图：`Body_Type` 才是声明报文体 MIME 类型的标准头（见 specs.rs）；
+    /// 原来这里误用了 `Body_Size`，会导致调用方永远读不到回复体的类型，
+    /// 客户端据此决定是否读取并解析回复体的逻辑将失效。
     fn try_get_body_type<'f>(&'f self) -> Option<&'f HeaderVal> {
         self.headers()?
-            .try_get_header(&StdHeaderKey::Body_Size.into())
+            .try_get_header(&StdHeaderKey::Body_Type.into())
     }
 
     fn try_get_body_size_str<'f>(&'f self) -> Option<&'f HeaderVal> {
@@ -138,6 +143,15 @@ impl Response {
     #[inline]
     pub fn try_get_body_size_str<'f>(&'f self) -> Option<&'f HeaderVal> {
         <Self as TrRpcMessage>::try_get_body_size_str(self)
+    }
+
+    #[inline]
+    pub fn try_get_body_size<'f>(&'f self) -> Option<usize> {
+        let val = self.try_get_body_size_str()?;
+        match val.try_as_header_val() {
+            Result::Ok(n) => Option::Some(n.into_inner() as usize),
+            Result::Err(s) => s.parse::<usize>().ok(),
+        }
     }
 }
 

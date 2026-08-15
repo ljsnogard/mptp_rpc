@@ -1,16 +1,15 @@
-use std::{
+use core::{
     borrow::Borrow,
     cmp::Ordering,
-    collections::btree_map::{self, BTreeMap},
     fmt::Debug,
     iter::IntoIterator,
 };
 
+use std::collections::btree_map::{self, BTreeMap};
+
 use serde::{Serialize, Deserialize};
 
 use abs_buff::x_deps::funty;
-
-use crate::access_method::AccessMethod;
 
 type HeaderStrType = String;
 
@@ -26,6 +25,32 @@ where
 {
     Str(S),
     Num(N),
+}
+
+impl<S, N> StrOrNum<S, N>
+where
+    S: Borrow<str> + Clone + Debug,
+    N: funty::Unsigned,
+{
+    /// 取出其中的字符串形态（`StrOrNum::Str`）。
+    ///
+    /// 意图：客户端在读取回复体时，需要把 `Body_Size` 之类的数字型头值
+    /// 取出来解析；`StrOrNum` 的两种形态（字符串 / 数字）都要有访问途径，
+    /// 否则 `HeaderVal` 内部对调用方完全不透明，无法据此决定回复体长度。
+    pub fn try_as_str(&self) -> Result<&str, N> {
+        match self {
+            StrOrNum::Str(s) => Result::Ok(s.borrow()),
+            StrOrNum::Num(n) => Result::Err(*n),
+        }
+    }
+
+    /// 取出其中的数字形态（`StrOrNum::Num`）。
+    pub fn try_as_u16(&self) -> Result<N, &str> {
+        match &self {
+            StrOrNum::Num(n) => Result::Ok(*n),
+            StrOrNum::Str(s) => Result::Err(s.borrow()),
+        }
+    }
 }
 
 impl<S, N> PartialEq for StrOrNum<S, N>
@@ -175,6 +200,12 @@ impl StdHeaderVal {
     pub const User_Rpc_Client: StdHeaderVal = StdHeaderVal(0x10);
 }
 
+impl StdHeaderVal {
+    pub const fn into_inner(self) -> u16 {
+        self.0
+    }
+}
+
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 //  HeaderKey, HeaderVal, wrapping StrOrNum
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -194,6 +225,31 @@ impl From<StdHeaderKey> for HeaderKey {
 impl From<StdHeaderVal> for HeaderVal {
     fn from(value: StdHeaderVal) -> Self {
         HeaderVal(StrOrNum::Num(value.0))
+    }
+}
+
+impl HeaderVal {
+    /// 取出其中的字符串形态（`StrOrNum::Str`）。
+    ///
+    /// 意图：客户端在读取回复体时，需要把 `Body_Size` 之类的数字型头值
+    /// 取出来解析；`StrOrNum` 的两种形态（字符串 / 数字）都要有访问途径，
+    /// 否则 `HeaderVal` 内部对调用方完全不透明，无法据此决定回复体长度。
+    /// 取出其中的字符串形态（`StrOrNum::Str`）。
+    pub fn try_as_str(&self) -> Result<&str, StdHeaderVal> {
+        self.0
+            .try_as_str()
+            .map_err(Self::to_header_val)
+    }
+
+    /// 取出其中的数字形态（`StrOrNum::Num`）。
+    pub fn try_as_header_val(&self) -> Result<StdHeaderVal, &str> {
+        self.0
+            .try_as_u16()
+            .map(Self::to_header_val)
+    }
+
+    fn to_header_val(v: u16) -> StdHeaderVal {
+        StdHeaderVal(v)
     }
 }
 

@@ -7,7 +7,6 @@ pub mod client;
 pub mod conn;
 pub mod messaging;
 pub mod specs;
-// pub mod internal_str;
 
 // mod out_;
 
