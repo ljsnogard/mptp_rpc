@@ -1,15 +1,8 @@
-use core::{
-    borrow::Borrow,
-    cmp::Ordering,
-    fmt::Debug,
-    iter::IntoIterator,
-};
-
+use core::{borrow::Borrow, cmp::Ordering, fmt::Debug, iter::IntoIterator};
 use std::collections::btree_map::{self, BTreeMap};
 
-use serde::{Serialize, Deserialize};
-
 use abs_buff::x_deps::funty;
+use serde::{Deserialize, Serialize};
 
 type HeaderStrType = String;
 
@@ -71,7 +64,8 @@ impl<S, N> Eq for StrOrNum<S, N>
 where
     S: Borrow<str> + Clone + Debug,
     N: funty::Unsigned,
-{ }
+{
+}
 
 impl<S, N> PartialOrd for StrOrNum<S, N>
 where
@@ -188,7 +182,6 @@ impl From<StdHeaderKey> for u16 {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub struct StdHeaderVal(u16);
 
@@ -208,10 +201,10 @@ impl StdHeaderVal {
     }
 }
 
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub struct Status(u16);
 
+#[rustfmt::skip]
 #[allow(non_upper_case_globals)]
 impl Status {
     pub const Ok     : Status = Status(200);
@@ -283,16 +276,12 @@ impl HeaderVal {
     /// 否则 `HeaderVal` 内部对调用方完全不透明，无法据此决定回复体长度。
     /// 取出其中的字符串形态（`StrOrNum::Str`）。
     pub fn try_as_str(&self) -> Result<&str, StdHeaderVal> {
-        self.0
-            .try_as_str()
-            .map_err(Self::to_header_val)
+        self.0.try_as_str().map_err(Self::to_header_val)
     }
 
     /// 取出其中的数字形态（`StrOrNum::Num`）。
     pub fn try_as_header_val(&self) -> Result<StdHeaderVal, &str> {
-        self.0
-            .try_as_u16()
-            .map(Self::to_header_val)
+        self.0.try_as_u16().map(Self::to_header_val)
     }
 
     fn to_header_val(v: u16) -> StdHeaderVal {
@@ -358,7 +347,9 @@ pub struct Headers {
 
 impl Headers {
     pub fn new() -> Self {
-        Headers { map_: BTreeMap::new() }
+        Headers {
+            map_: BTreeMap::new(),
+        }
     }
 
     pub fn try_get_header<'a>(&'a self, key: &HeaderKey) -> Option<&'a HeaderVal> {
@@ -397,10 +388,7 @@ impl Headers {
         self.map_.insert(key.clone(), val.clone())
     }
 
-    pub fn remove_header<'f>(
-        &'f mut self,
-        key: &'f HeaderKey,
-    ) -> Option<(HeaderKey, HeaderVal)> {
+    pub fn remove_header<'f>(&'f mut self, key: &'f HeaderKey) -> Option<(HeaderKey, HeaderVal)> {
         self.map_.remove_entry(key)
     }
 }

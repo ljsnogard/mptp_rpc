@@ -34,8 +34,7 @@ mod private_sealed_ {
 }
 
 /// The method to access the resource on the remote end (server).
-pub trait TrAccessMethod: private_sealed_::TrSealedAccessMethod
-{}
+pub trait TrAccessMethod: private_sealed_::TrSealedAccessMethod {}
 
 pub enum Head {}
 

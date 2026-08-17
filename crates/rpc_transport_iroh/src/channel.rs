@@ -107,7 +107,7 @@ fn new_send_ring() -> (SendTx, SendRx) {
         RingBuffer::try_new(Box::from(vec![0u8; RING_CAPACITY]))
             .expect("send ring capacity must be valid"),
     );
-    RingBuffer::try_split_shared(ring, |r| Arc::strong_count(r), |r| Arc::weak_count(r))
+    RingBuffer::try_split_shared(ring, Arc::strong_count,  Arc::weak_count)
         .expect("send ring must be uniquely owned before split")
 }
 
@@ -116,7 +116,7 @@ fn new_recv_ring() -> (RecvTx, RecvRx) {
         RingBuffer::try_new(Box::from(vec![0u8; RING_CAPACITY]))
             .expect("recv ring capacity must be valid"),
     );
-    RingBuffer::try_split_shared(ring, |r| Arc::strong_count(r), |r| Arc::weak_count(r))
+    RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)
         .expect("recv ring must be uniquely owned before split")
 }
 

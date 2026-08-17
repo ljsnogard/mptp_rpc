@@ -1,18 +1,13 @@
-use core::{
-    borrow::Borrow,
-    marker::PhantomData,
-    mem::MaybeUninit,
-};
-
-use thiserror::Error;
-
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-
-use abs_cancel::{TrCancellationToken, TrMayCancel};
+use core::{borrow::Borrow, marker::PhantomData, mem::MaybeUninit};
 
 use abs_buff::{
-    TrBuffRead, x_deps::{abs_cancel, abs_iter::TrAsSliceMut},
+    TrBuffRead,
+    x_deps::{abs_cancel, abs_iter},
 };
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_iter::TrAsSliceMut;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use thiserror::Error;
 
 use crate::{
     access_method::{AccessMethod, TrAccessMethod},
@@ -67,7 +62,7 @@ where
 struct ReqBuilderInner {
     method: Option<AccessMethod>,
     path: Option<String>,
-    headers: Option<Headers>
+    headers: Option<Headers>,
 }
 
 impl ReqBuilderInner {
@@ -88,8 +83,7 @@ impl RequestBuilder {
     }
 
     pub fn builder<M: TrAccessMethod>() -> Self {
-        Self::new()
-            .method(M::method())
+        Self::new().method(M::method())
     }
 
     pub fn method(mut self, access_method: AccessMethod) -> Self {
@@ -117,7 +111,6 @@ impl RequestBuilder {
 struct HdrBuilderInner;
 
 pub struct HeadersBuilder(Box<HdrBuilderInner>);
-
 
 /// 在一条信道上发送一个“无请求体”的请求，并接收回复。
 ///
@@ -147,7 +140,7 @@ where
     };
     let send_res = task.may_cancel_with(cancel).await;
     if let Result::Err(err) = send_res {
-        return Result::Err(ClientError::ReqErr(err.to_string()))
+        return Result::Err(ClientError::ReqErr(err.to_string()));
     };
     let mut m_resp = MaybeUninit::<messaging::Response>::uninit();
     let resp_res = messaging::decode_msg_async_(&mut m_resp, &mut rx, cancel).await;
@@ -169,8 +162,7 @@ where
     // 残留的回复体字节不再消费，但信道被丢弃后不会影响其它信道的流对齐。
     if resp.try_get_body_type().is_some() || resp.try_get_body_size_str().is_some() {
         return Result::Err(ClientError::RespErr(
-            "protocol violation: response declares a body for a request type that must not have one"
-                .to_string(),
+            "protocol violation: response declares a body for a request type that must not have one".to_string(),
         ));
     }
     Result::Ok((resp, Option::None))
@@ -195,10 +187,7 @@ where
 ///    - View / Pull / Call：回复体就是客户端索要的结果 → 声明了就读取并解析；
 ///    - Post / Push：正常路径不期待回复体，但服务端可能附带错误详情等
 ///      附加内容 → 声明了就读取并解析，由调用方决定是否使用。
-pub fn should_read_response_body(
-    request: &messaging::Request,
-    resp: &messaging::Response,
-) -> bool {
+pub fn should_read_response_body(request: &messaging::Request, resp: &messaging::Response) -> bool {
     // 服务端未在回复头中声明回复体 → 一定没有回复体
     if resp.try_get_body_type().is_none() && resp.try_get_body_size_str().is_none() {
         return false;

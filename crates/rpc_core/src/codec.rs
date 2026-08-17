@@ -42,32 +42,32 @@ pub enum BodyCodec {
 }
 
 impl BodyCodec {
-    /// 将 `value` 编码为 body 字节。
-    pub fn encode<T>(&self, value: &T) -> Result<Vec<u8>, CodecError>
+    /// 将 `value` 编码为 body 字节，并写入到输出流
+    pub fn encode<T, W>(&self, value: &T, write: &mut W) -> Result<(), CodecError>
     where
         T: Serialize,
+        W: std::io::Write,
     {
         match self {
-            BodyCodec::MsgPack => {
-                rmp_serde::encode::to_vec(value).map_err(|e| CodecError::Encode(e.to_string()))
-            }
-            BodyCodec::Json => {
-                serde_json::to_vec(value).map_err(|e| CodecError::Encode(e.to_string()))
-            }
+            BodyCodec::MsgPack => rmp_serde::encode::write(write, value)
+                .map_err(|e| CodecError::Encode(e.to_string())),
+            BodyCodec::Json => serde_json::ser::to_writer(write, value)
+                .map_err(|e| CodecError::Encode(e.to_string())),
         }
     }
 
-    /// 从 body 字节解码出 `T`。
-    pub fn decode<T>(&self, data: &[u8]) -> Result<T, CodecError>
+    /// 从输入流中解码出 `T`。
+    pub fn decode<T, R>(&self, read: &mut R) -> Result<T, CodecError>
     where
         T: DeserializeOwned,
+        R: std::io::Read,
     {
         match self {
             BodyCodec::MsgPack => {
-                rmp_serde::decode::from_slice(data).map_err(|e| CodecError::Decode(e.to_string()))
+                rmp_serde::decode::from_read(read).map_err(|e| CodecError::Decode(e.to_string()))
             }
             BodyCodec::Json => {
-                serde_json::from_slice(data).map_err(|e| CodecError::Decode(e.to_string()))
+                serde_json::de::from_reader(read).map_err(|e| CodecError::Decode(e.to_string()))
             }
         }
     }
@@ -120,6 +120,8 @@ impl CodecRegistry {
 
 #[cfg(test)]
 mod tests_ {
+    use std::vec::Vec;
+
     use serde::Deserialize;
 
     use super::*;
@@ -150,16 +152,20 @@ mod tests_ {
             id: 7,
             name: "mptp".to_string(),
         };
-        let bytes = BodyCodec::MsgPack.encode(&item).unwrap();
-        let decoded: Item = BodyCodec::MsgPack.decode(&bytes).unwrap();
+        let mut bytes = Vec::new();
+        BodyCodec::MsgPack.encode(&item, &mut bytes).unwrap();
+        let mut read: &[u8] = bytes.as_ref();
+        let decoded: Item = BodyCodec::MsgPack.decode(&mut read).unwrap();
         assert_eq!(decoded, item);
     }
 
     #[test]
     fn json_roundtrip() {
         let value = serde_json::json!({ "ok": true, "n": 42 });
-        let bytes = BodyCodec::Json.encode(&value).unwrap();
-        let decoded: serde_json::Value = BodyCodec::Json.decode(&bytes).unwrap();
+        let mut bytes = Vec::new();
+        BodyCodec::Json.encode(&value, &mut bytes).unwrap();
+        let mut read: &[u8] = bytes.as_ref();
+        let decoded: serde_json::Value = BodyCodec::Json.decode(&mut read).unwrap();
         assert_eq!(decoded, value);
     }
 }

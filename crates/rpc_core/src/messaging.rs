@@ -1,19 +1,19 @@
 use core::mem::MaybeUninit;
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-
-use thiserror::Error;
-
-use abs_cancel::TrCancellationToken;
-
 use abs_buff::{
+    TrBuffRead,
+    TrBuffTryRead,
+    TrBuffTryWrite,
+    TrBuffWrite,
     // as_std_read::AsStdRead,
     as_std_write::AsStdWrite,
     gen_may_cancel_future,
     pipelining::{PipeJoin, PipeJoinIoResult},
     x_deps::abs_cancel::{self, TrMayCancel},
-    TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
 };
+use abs_cancel::TrCancellationToken;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use thiserror::Error;
 
 use crate::{
     access_method::AccessMethod,
@@ -33,18 +33,18 @@ pub trait TrRpcMessage {
     /// 意图：`Body_Type` 才是声明报文体 MIME 类型的标准头（见 specs.rs）；
     /// 原来这里误用了 `Body_Size`，会导致调用方永远读不到回复体的类型，
     /// 客户端据此决定是否读取并解析回复体的逻辑将失效。
-    fn try_get_body_type<'f>(&'f self) -> Option<&'f HeaderVal> {
+    fn try_get_body_type(&self) -> Option<&HeaderVal> {
         self.headers()?
             .try_get_header(&StdHeaderKey::Body_Type.into())
     }
 
-    fn try_get_body_size_str<'f>(&'f self) -> Option<&'f HeaderVal> {
+    fn try_get_body_size_str(&self) -> Option<&HeaderVal> {
         self.headers()?
             .try_get_header(&StdHeaderKey::Body_Size.into())
     }
 
     #[inline]
-    fn try_get_body_size<'f>(&'f self) -> Option<usize> {
+    fn try_get_body_size(&self) -> Option<usize> {
         let val = self.try_get_body_size_str()?;
         match val.try_as_header_val() {
             Result::Ok(n) => Option::Some(n.into_inner() as usize),
@@ -99,12 +99,12 @@ impl Request {
     }
 
     #[inline]
-    pub fn try_get_content_type<'f>(&'f self) -> Option<&'f HeaderVal> {
+    pub fn try_get_content_type(&self) -> Option<&HeaderVal> {
         <Self as TrRpcMessage>::try_get_body_type(self)
     }
 
     #[inline]
-    pub fn try_get_content_length_str<'f>(&'f self) -> Option<&'f HeaderVal> {
+    pub fn try_get_content_length_str(&self) -> Option<&HeaderVal> {
         <Self as TrRpcMessage>::try_get_body_size_str(self)
     }
 }
@@ -147,12 +147,12 @@ impl Response {
     }
 
     #[inline]
-    pub fn try_get_body_type<'f>(&'f self) -> Option<&'f HeaderVal> {
+    pub fn try_get_body_type(&self) -> Option<&HeaderVal> {
         <Self as TrRpcMessage>::try_get_body_type(self)
     }
 
     #[inline]
-    pub fn try_get_body_size_str<'f>(&'f self) -> Option<&'f HeaderVal> {
+    pub fn try_get_body_size_str(&self) -> Option<&HeaderVal> {
         <Self as TrRpcMessage>::try_get_body_size_str(self)
     }
 }
@@ -206,7 +206,9 @@ where
     M: TrRpcMessage + Serialize,
 {
     pub(crate) const fn new(message: &'a M) -> Self {
-        EncoderNilBody { message_: Option::Some(message) }
+        EncoderNilBody {
+            message_: Option::Some(message),
+        }
     }
 
     pub fn try_write<'f, W>(
@@ -222,7 +224,6 @@ where
         } else {
             Option::None
         }
-
     }
 }
 
@@ -231,7 +232,9 @@ where
     M: TrRpcMessage + Serialize,
 {
     pub(crate) const fn new(message: &'a mut M) -> Self {
-        EncoderWithBody { message_: Option::Some(message) }
+        EncoderWithBody {
+            message_: Option::Some(message),
+        }
     }
 
     pub fn try_write<'f, R, W>(
@@ -244,7 +247,7 @@ where
         W: TrBuffTryWrite,
     {
         if let Option::Some(message) = self.message_.take() {
-            let t =EncoderWithBodyWriteMessageAsync(message, body, buf_write);
+            let t = EncoderWithBodyWriteMessageAsync(message, body, buf_write);
             Option::Some(t)
         } else {
             Option::None
@@ -256,7 +259,7 @@ where
 async fn encoder_nil_body_write_message_async_<'m, 'w, 'c, M, W, C>(
     message: &'m M,
     buf_write: &'w mut W,
-    cancel: &'c mut C
+    cancel: &'c mut C,
 ) -> Result<(), <W as TrBuffWrite>::Err>
 where
     'm: 'c,
@@ -278,7 +281,7 @@ async fn encoder_with_body_write_message_async_<'f, M, R, W, C>(
     message: &'f M,
     body_cont: &'f mut R,
     buf_write: &'f mut W,
-    cancel: &'f mut C
+    cancel: &'f mut C,
 ) -> Result<PipeJoinIoResult<W, R, u8>, Option<EncoderError<R, W>>>
 where
     M: TrRpcMessage + Serialize,
@@ -359,8 +362,7 @@ where
 {
     let _ = cancel;
     let mut rx = abs_buff::as_std_read::AsStdRead::new(buff_r, cancel);
-    rmp_serde::from_read(&mut rx)
-        .map_err(|e| DecodeError::BadContent(e.to_string()))
+    rmp_serde::from_read(&mut rx).map_err(|e| DecodeError::BadContent(e.to_string()))
 }
 
 #[gen_may_cancel_future(DecodeRequest)]
