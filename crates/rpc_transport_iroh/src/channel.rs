@@ -57,8 +57,6 @@ const PUMP_CHUNK: usize = 32 * 1024;
 pub struct IrohChannel {
     send_tx_: SendTx,
     recv_rx_: RecvRx,
-    send_pump_: tokio::task::JoinHandle<()>,
-    recv_pump_: tokio::task::JoinHandle<()>,
 }
 
 impl IrohChannel {
@@ -69,23 +67,12 @@ impl IrohChannel {
         // 接收方向：pump 从网络读并写入 recv_tx，调用方从 recv_rx_ 读。
         let (recv_tx, recv_rx_) = new_recv_ring();
 
-        let send_pump_ = tokio::spawn(send_pump(send, send_rx));
-        let recv_pump_ = tokio::spawn(recv_pump(recv, recv_tx));
+        // 后台任务持有 ring 的另一半；channel 被 drop 时，发送 ring 的 tx 会关闭，
+        // send pump 会在排空数据后自然结束，从而让对端读到 EOF。
+        tokio::spawn(send_pump(send, send_rx));
+        tokio::spawn(recv_pump(recv, recv_tx));
 
-        IrohChannel {
-            send_tx_,
-            recv_rx_,
-            send_pump_,
-            recv_pump_,
-        }
-    }
-}
-
-impl Drop for IrohChannel {
-    fn drop(&mut self) {
-        // 主动 abort，避免后台 pump 在 channel 已废弃后仍停留在 iroh 流上。
-        self.send_pump_.abort();
-        self.recv_pump_.abort();
+        IrohChannel { send_tx_, recv_rx_ }
     }
 }
 

@@ -1,10 +1,9 @@
 use core::{borrow::Borrow, cmp::Ordering, fmt::Debug, iter::IntoIterator};
 use std::collections::btree_map::{self, BTreeMap};
 
-use serde::{Deserialize, Serialize};
-
 use abs_buff::x_deps::funty;
 use buffex::x_deps::abs_buff;
+use serde::{Deserialize, Serialize};
 
 type HeaderStrType = String;
 
@@ -209,6 +208,11 @@ pub struct Status(u16);
 #[rustfmt::skip]
 #[allow(non_upper_case_globals)]
 impl Status {
+    /// 返回状态码数值。
+    pub const fn inner(self) -> u16 {
+        self.0
+    }
+
     pub const Ok     : Status = Status(200);
     pub const Created: Status = Status(201);
 

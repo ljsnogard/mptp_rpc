@@ -6,3 +6,8 @@ edition = "2024"
 [dependencies]
 mptp_rpc_core = { path = "../rpc_core" }
 mptp_rpc_transport_iroh = { path = "../rpc_transport_iroh" }
+
+anyhow = "1"
+rmp-serde = "1.3.*"
+iroh = "1.0.3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
