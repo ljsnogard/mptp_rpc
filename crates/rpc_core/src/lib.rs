@@ -4,9 +4,10 @@
 
 pub mod access_method;
 pub mod client;
-pub mod transport;
+pub mod codec;
 pub mod messaging;
 pub mod specs;
+pub mod transport;
 
 // mod out_;
 
