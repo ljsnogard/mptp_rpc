@@ -6,19 +6,19 @@ use core::{
 
 use thiserror::Error;
 
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 
 use abs_buff::{
-    BuffReadAsInput, TrBuffRead, x_deps::{abs_cancel, abs_iter::TrAsSliceMut},
+    TrBuffRead, x_deps::{abs_cancel, abs_iter::TrAsSliceMut},
 };
 
 use crate::{
-    access_method::AccessMethod,
-    messaging,
-    conn::{TrMuxConn, TrChannel},
-    specs::StdHeaderVal,
+    access_method::{AccessMethod, TrAccessMethod},
+    messaging::{self, TrRpcMessage},
+    specs::{Headers, StdHeaderVal},
+    transport::{TrChannel, TrMuxConn},
 };
 
 #[derive(Debug, Error)]
@@ -64,21 +64,59 @@ where
     }
 }
 
-pub(crate) struct RequestBuilder;
+struct ReqBuilderInner {
+    method: Option<AccessMethod>,
+    path: Option<String>,
+    headers: Option<Headers>
+}
 
-pub struct HeadRequestBuilder;
+impl ReqBuilderInner {
+    const fn new() -> Self {
+        ReqBuilderInner {
+            method: Option::None,
+            path: Option::None,
+            headers: Option::None,
+        }
+    }
+}
 
-pub struct ViewRequestBuilder;
+pub struct RequestBuilder(Box<ReqBuilderInner>);
 
-pub struct PostRequestBuilder;
+impl RequestBuilder {
+    pub fn new() -> Self {
+        RequestBuilder(Box::new(ReqBuilderInner::new()))
+    }
 
-pub struct DropRequestBuilder;
+    pub fn builder<M: TrAccessMethod>() -> Self {
+        Self::new()
+            .method(M::method())
+    }
 
-pub struct PushRequestBuilder;
+    pub fn method(mut self, access_method: AccessMethod) -> Self {
+        self.0.method = Option::Some(access_method);
+        self
+    }
 
-pub struct PullRequestBuilder;
+    pub fn path(mut self, path: &str) -> Self {
+        self.0.path = Option::Some(path.to_string());
+        self
+    }
 
-pub struct CallRequestBuilder;
+    pub fn headers(self, headers: Headers) -> Self {
+        todo!()
+    }
+
+    pub fn body<T>(self, body: T) -> Self
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        todo!()
+    }
+}
+
+struct HdrBuilderInner;
+
+pub struct HeadersBuilder(Box<HdrBuilderInner>);
 
 
 /// 在一条信道上发送一个“无请求体”的请求，并接收回复。
@@ -100,7 +138,7 @@ async fn channel_req_nil_body_async_<'f, TyChannel, TyBody, TyCancel>(
 where
     TyChannel: TrChannel,
     TyBody: DeserializeOwned,
-    TyCancel: TrCancellationToken,
+    TyCancel: TrCancellationToken + Clone,
 {
     let (mut tx, mut rx) = channel.split();
     let mut encode = messaging::EncoderNilBody::new(request);
@@ -120,10 +158,7 @@ where
 
     // 根据“自身请求的类型”和“实际返回的回复头”决定是否进一步读取并解析回复体
     if should_read_response_body(request, &resp) {
-        // 服务端声明了回复体（且请求类型允许）→ 按 Body_Size 读出字节，
-        // 再按 Body_Type 解码成调用方期望的 TyBody
-        let body: TyBody = decode_response_body(&mut rx, &resp, cancel).await?;
-        return Result::Ok((resp, Option::Some(body)));
+        todo!()
     }
 
     // 走到这里说明回复头没有声明回复体（正常情况，回复到此结束）。
@@ -178,81 +213,5 @@ pub fn should_read_response_body(
         | AccessMethod::Push
         | AccessMethod::Pull
         | AccessMethod::Call => true,
-    }
-}
-
-/// 从回复流中读取并解析回复体。
-///
-/// 意图：
-/// - 读取的字节数以回复头 `Body_Size` 声明的长度为准（没有该头就无法确定
-///   回复体的边界，按协议属于坏报文）；
-/// - 解码方式以回复头 `Body_Type` 声明的 MIME 类型为准：当前支持 MsgPack
-///   （`StdHeaderVal::Mime_Body_Type_MsgPack`），JSON 留待后续实现；
-/// - 用 `AsStdRead` 把 `TrBuffTryRead` 包装成 `std::io::Read`，与 messaging.rs
-///   解析回复头的方式保持一致。
-///
-/// 为什么是同步函数：读取走的是 `TrBuffTryRead::try_read`（同步的“尝试读”），
-/// 整个函数没有 await 点；取消仍然生效——`cancel` 传入 `AsStdRead` 后，
-/// 每次循环读取都会检查取消标志。
-async fn decode_response_body<'f, TyRx, TyCancel, TyBody>(
-    rx: &'f mut TyRx,
-    resp: &'f messaging::Response,
-    cancel: &'f mut TyCancel,
-) -> Result<TyBody, ClientError>
-where
-    TyRx: TrBuffRead,
-    TyCancel: TrCancellationToken,
-    TyBody: DeserializeOwned,
-{
-    // 1. 取 Body_Size：确定回复体的字节边界
-    let body_size = resp.try_get_body_size().ok_or_else(|| {
-        ClientError::RespErr(
-            "response declares a body but Body_Size header is missing or invalid".to_string(),
-        )
-    })?;
-
-    // 2. 取 Body_Type：决定用什么格式解码
-    let body_type = resp.try_get_body_type().ok_or_else(|| {
-        ClientError::RespErr(
-            "response declares a body but Body_Type header is missing".to_string(),
-        )
-    })?;
-
-    // 3. 按声明的长度从流中读出回复体字节
-    let mut buf = std::vec::Vec::<u8>::new();
-    buf.resize(body_size, 0u8);
-
-    let read_buf = unsafe {
-        let p = buf.as_slice_mut() as *mut [u8] as *mut [MaybeUninit<u8>];
-        &mut *p
-    };
-    let mut buff_read_as_input = BuffReadAsInput::<&'_ mut TyRx, TyRx, u8>::new(rx);
-    let read_res = buff_read_as_input
-        .read_async(read_buf)
-        .may_cancel_with(cancel)
-        .await;
-    let mut got = 0usize;
-    if let Option::Some(read_len) = read_res.as_ref().pick_left() {
-        got = *read_len;
-    };
-    if got < body_size {
-        // 服务端声明的长度大于实际能读到的字节数 → 截断的报文
-        return Result::Err(ClientError::RespErr(format!(
-            "response body truncated: declared {body_size} bytes, got {got}"
-        )));
-    }
-
-    // 4. 按 Body_Type 声明的 MIME 类型解码
-    if body_type == &StdHeaderVal::Mime_Body_Type_MsgPack.into() {
-        rmp_serde::from_slice::<TyBody>(&buf)
-            .map_err(|e| ClientError::RespErr(format!("failed to decode msgpack body: {e}")))
-    } else if body_type == &StdHeaderVal::Mime_Body_Type_Json.into() {
-        // 意图：JSON 格式的回复体需要引入 serde_json 依赖后再实现，
-        // 解码方式与 MsgPack 相同：先按 Body_Size 读出字节，再反序列化为 TyBody。
-        todo!("decode JSON body: add serde_json and deserialize the Body_Size bytes into TyBody")
-    } else {
-        Result::Err(ClientError::RespErr(format!(
-            "unsupported body MIME type: {body_type:?}"
-        )))
     }
 }

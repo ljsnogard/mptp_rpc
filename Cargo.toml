@@ -2,7 +2,8 @@
 resolver = "3"
 members = [
     "crates/rpc_core",
-    "crates/rpc_iroh",
+    "crates/rpc_transport_iroh",
+    "crates/rpc_cs_demo",
 ]
 
 [workspace.package]
@@ -12,5 +13,5 @@ authors = ["lino <lino_snsalias@outlook.com>"]
 # segm_buff 依赖的 abs_buff 指向 github 镜像（ljsnogard/abs_buff），
 # 而本工作区使用 gitee 源（lino_snsalias/abs_buff）。两者若各自解析会形成
 # 两个不同的 crate 实例，导致 trait 无法统一；这里把 github 源统一改指到 gitee。
-[patch."https://github.com/ljsnogard/abs_buff.git"]
-abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0" }
+# [patch."https://github.com/ljsnogard/abs_buff.git"]
+# abs_buff = { path = "../cantare/crates/abs_buff" }

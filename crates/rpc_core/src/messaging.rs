@@ -7,10 +7,12 @@ use thiserror::Error;
 use abs_cancel::TrCancellationToken;
 
 use abs_buff::{
-    chaining::{Chain, ChainingIoResult},
+    // as_std_read::AsStdRead,
+    as_std_write::AsStdWrite,
     gen_may_cancel_future,
+    pipelining::{PipeJoin, PipeJoinIoResult},
     x_deps::abs_cancel::{self, TrMayCancel},
-    BuffWriteAsOutput, TrBuffRead, TrBuffTryRead, TrBuffWrite,
+    TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
 };
 
 use crate::{
@@ -39,6 +41,15 @@ pub trait TrRpcMessage {
     fn try_get_body_size_str<'f>(&'f self) -> Option<&'f HeaderVal> {
         self.headers()?
             .try_get_header(&StdHeaderKey::Body_Size.into())
+    }
+
+    #[inline]
+    fn try_get_body_size<'f>(&'f self) -> Option<usize> {
+        let val = self.try_get_body_size_str()?;
+        match val.try_as_header_val() {
+            Result::Ok(n) => Option::Some(n.into_inner() as usize),
+            Result::Err(s) => s.parse::<usize>().ok(),
+        }
     }
 
     fn encode(&mut self) -> Encode<'_, Self>
@@ -144,15 +155,6 @@ impl Response {
     pub fn try_get_body_size_str<'f>(&'f self) -> Option<&'f HeaderVal> {
         <Self as TrRpcMessage>::try_get_body_size_str(self)
     }
-
-    #[inline]
-    pub fn try_get_body_size<'f>(&'f self) -> Option<usize> {
-        let val = self.try_get_body_size_str()?;
-        match val.try_as_header_val() {
-            Result::Ok(n) => Option::Some(n.into_inner() as usize),
-            Result::Err(s) => s.parse::<usize>().ok(),
-        }
-    }
 }
 
 impl TrRpcMessage for Response {
@@ -212,7 +214,7 @@ where
         buf_write: &'f mut W,
     ) -> Option<EncoderNilBodyWriteMessageAsync<'f, M, W>>
     where
-        W: TrBuffWrite,
+        W: TrBuffTryWrite,
     {
         if let Option::Some(message) = self.message_.take() {
             let t = EncoderNilBodyWriteMessageAsync(message, buf_write);
@@ -239,7 +241,7 @@ where
     ) -> Option<EncoderWithBodyWriteMessageAsync<'f, M, R, W>>
     where
         R: TrBuffRead,
-        W: TrBuffWrite,
+        W: TrBuffTryWrite,
     {
         if let Option::Some(message) = self.message_.take() {
             let t =EncoderWithBodyWriteMessageAsync(message, body, buf_write);
@@ -255,32 +257,20 @@ async fn encoder_nil_body_write_message_async_<'m, 'w, 'c, M, W, C>(
     message: &'m M,
     buf_write: &'w mut W,
     cancel: &'c mut C
-) -> Result<usize, <W as TrBuffWrite>::Err>
+) -> Result<(), <W as TrBuffWrite>::Err>
 where
     'm: 'c,
     'w: 'c,
     M: TrRpcMessage + Serialize,
-    W: Sized + TrBuffWrite,
+    W: Sized + TrBuffTryWrite,
     C: TrCancellationToken,
 {
-    let mut buf = std::vec::Vec::new();
-    let mut ser = rmp_serde::Serializer::new(&mut buf);
-    let Result::Ok(_) = <M as Serialize>::serialize(message, &mut ser) else {
+    let mut std_write = AsStdWrite::new(buf_write, cancel);
+    let encode = rmp_serde::encode::write(&mut std_write, &message);
+    if encode.is_err() {
         todo!("handle serializer error");
     };
-    let mut c = 0usize;
-    let mut output = BuffWriteAsOutput::<&'_ mut W, W, u8>::new(buf_write);
-    let x = output
-        .write_cloned_async(&buf)
-        .may_cancel_with(cancel)
-        .await;
-    if let Option::Some(head_size) = x.as_ref().pick_left() {
-        c += head_size;
-    }
-    if let Option::Some(err) = x.pick_right() {
-        return Result::Err(err);
-    }
-    Result::Ok(c)
+    Result::Ok(())
 }
 
 #[gen_may_cancel_future(EncoderWithBodyWriteMessage)]
@@ -289,35 +279,20 @@ async fn encoder_with_body_write_message_async_<'f, M, R, W, C>(
     body_cont: &'f mut R,
     buf_write: &'f mut W,
     cancel: &'f mut C
-) -> Result<ChainingIoResult<W, R, u8>, Option<EncoderError<R, W>>>
+) -> Result<PipeJoinIoResult<W, R, u8>, Option<EncoderError<R, W>>>
 where
     M: TrRpcMessage + Serialize,
     R: TrBuffRead,
-    W: TrBuffWrite,
-    C: TrCancellationToken,
+    W: TrBuffTryWrite,
+    C: TrCancellationToken + Clone,
 {
-    let mut buf = std::vec::Vec::new();
-    let mut ser = rmp_serde::Serializer::new(&mut buf);
-    let Result::Ok(_) = <M as Serialize>::serialize(message, &mut ser) else {
-        return Result::Err(Option::None);
+    let mut std_write = AsStdWrite::new(buf_write, cancel);
+    let encode = rmp_serde::encode::write(&mut std_write, &message);
+    if encode.is_err() {
+        todo!("handle serializer error");
     };
-    let mut c = 0usize;
-    if true {
-        let mut output = BuffWriteAsOutput::<&'_ mut W, W, u8>::new(buf_write);
-        let x = output
-            .write_cloned_async(&buf)
-            .may_cancel_with(cancel)
-            .await;
-        if let Option::Some(head_size) = x.as_ref().pick_left() {
-            c += head_size;
-        }
-        if let Option::Some(err) = x.pick_right() {
-            return Result::Err(Option::Some(EncoderError::WriteErr(err)));
-        }
-    }
-
-    let mut chain = Chain::new(buf_write, body_cont);
-    let res: ChainingIoResult<_, _, _> = chain.chain_io_async().may_cancel_with(cancel).await;
+    let mut pipe_join = PipeJoin::new(buf_write, body_cont);
+    let res: PipeJoinIoResult<_, _, _> = pipe_join.pipe_async().may_cancel_with(cancel).await;
     Result::Ok(res)
 }
 

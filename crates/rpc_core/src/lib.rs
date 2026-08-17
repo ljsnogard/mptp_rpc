@@ -4,7 +4,7 @@
 
 pub mod access_method;
 pub mod client;
-pub mod conn;
+pub mod transport;
 pub mod messaging;
 pub mod specs;
 

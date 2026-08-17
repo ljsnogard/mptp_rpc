@@ -29,10 +29,11 @@ mod private_sealed_ {
     use super::AccessMethod;
 
     pub trait TrSealedAccessMethod {
-        fn access_method() -> AccessMethod;
+        fn method() -> AccessMethod;
     }
 }
 
+/// The method to access the resource on the remote end (server).
 pub trait TrAccessMethod: private_sealed_::TrSealedAccessMethod
 {}
 
@@ -51,43 +52,43 @@ pub enum Pull {}
 pub enum Call {}
 
 impl private_sealed_::TrSealedAccessMethod for Head {
-    fn access_method() -> AccessMethod {
+    fn method() -> AccessMethod {
         AccessMethod::Head
     }
 }
 
 impl private_sealed_::TrSealedAccessMethod for View {
-    fn access_method() -> AccessMethod {
+    fn method() -> AccessMethod {
         AccessMethod::View
     }
 }
 
 impl private_sealed_::TrSealedAccessMethod for Post {
-    fn access_method() -> AccessMethod {
+    fn method() -> AccessMethod {
         AccessMethod::Post
     }
 }
 
 impl private_sealed_::TrSealedAccessMethod for Drop {
-    fn access_method() -> AccessMethod {
+    fn method() -> AccessMethod {
         AccessMethod::Drop
     }
 }
 
 impl private_sealed_::TrSealedAccessMethod for Push {
-    fn access_method() -> AccessMethod {
+    fn method() -> AccessMethod {
         AccessMethod::Push
     }
 }
 
 impl private_sealed_::TrSealedAccessMethod for Pull {
-    fn access_method() -> AccessMethod {
+    fn method() -> AccessMethod {
         AccessMethod::Pull
     }
 }
 
 impl private_sealed_::TrSealedAccessMethod for Call {
-    fn access_method() -> AccessMethod {
+    fn method() -> AccessMethod {
         AccessMethod::Call
     }
 }

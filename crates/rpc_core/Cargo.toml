@@ -1,9 +1,9 @@
 [package]
 edition = "2024"
-name = "msgpk_rpc_core"
+name = "mptp_rpc_core"
 version = "0.1.0"
 
-description = "Core crate for MsgPk RPC."
+description = "Core definition for RPC over Message Packing and Transportation Protocol."
 repository = "https://github.com/ljsnogard/msgpk_rpc_core"
 keywords = ["rpc"]
 categories = ["no-std"]
@@ -12,7 +12,6 @@ readme = "README.md"
 
 [dependencies]
 abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0", features = ["std_io"] }
-# abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git" }
 
 serde = { version = "1.0.*", features = ["derive"] }
 rmp-serde = { version = "1.3.*" }

@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-name = "msgpk_rpc_iroh"
+name = "mptp_rpc_transport_iroh"
 version = "0.1.0"
 
 description = "MsgPk RPC over IROH networks."
@@ -11,11 +11,8 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-msgpk_rpc_core = { path = "../rpc_core" }
-
-abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0", features = ["std_io"] }
-abs_cancel = { git = "https://gitee.com/lino_snsalias/abs_cancel-rs.git" }
-segm_buff = { git = "https://gitee.com/lino_snsalias/segm_buff.git", branch = "dev/0.3.0" }
+mptp_rpc_core = { path = "../rpc_core" }
+buffex = { path = "../../../cantare/crates/buffex", features = ["tokio"], abs_buff = ["std_io"] }
 
 anyhow = "1"
 thiserror = "2"

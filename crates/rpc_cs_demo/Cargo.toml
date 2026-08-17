@@ -1,0 +1,8 @@
+[package]
+name = "mptp_rpc_cs_demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mptp_rpc_core = { path = "../rpc_core" }
+mptp_rpc_transport_iroh = { path = "../rpc_transport_iroh" }
