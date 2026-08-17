@@ -17,12 +17,18 @@
 
 use std::sync::Arc;
 
-use buffex::ring_buffer::{RingBuffer, RingRx, RingTx};
-use buffex::x_deps::abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite};
-use buffex::x_deps::abs_cancel::TrMayCancel;
-use buffex::x_deps::anylr::SomeOf;
 use iroh::endpoint::{RecvStream, SendStream};
-use mptp_rpc_core::transport::TrChannel;
+use mptp_rpc_core::{
+    transport::TrChannel,
+    x_deps::buffex::{
+        ring_buffer::{RingBuffer, RingRx, RingTx},
+        x_deps::{
+            abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite},
+            abs_cancel::TrMayCancel,
+            anylr::SomeOf,
+        },
+    },
+};
 
 use crate::conn::IrohConnError;
 
@@ -107,7 +113,7 @@ fn new_send_ring() -> (SendTx, SendRx) {
         RingBuffer::try_new(Box::from(vec![0u8; RING_CAPACITY]))
             .expect("send ring capacity must be valid"),
     );
-    RingBuffer::try_split_shared(ring, Arc::strong_count,  Arc::weak_count)
+    RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)
         .expect("send ring must be uniquely owned before split")
 }
 
@@ -326,10 +332,10 @@ impl TrBuffTryRead for IrohRecv<'_> {
 mod tests_ {
     use std::net::{Ipv4Addr, SocketAddrV4};
 
-    use buffex::x_deps::abs_cancel::NonCancellableToken;
-    use iroh::endpoint::presets::N0;
-    use iroh::{Endpoint, EndpointAddr, TransportAddr};
-    use mptp_rpc_core::transport::TrMuxConn;
+    use iroh::{Endpoint, EndpointAddr, TransportAddr, endpoint::presets::N0};
+    use mptp_rpc_core::{
+        transport::TrMuxConn, x_deps::buffex::x_deps::abs_cancel::NonCancellableToken,
+    };
 
     use super::*;
     use crate::IrohConnection;

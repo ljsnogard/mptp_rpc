@@ -13,12 +13,15 @@
 //! - [`IrohConnection::connect_by_addr`]：通过具体地址直连，不依赖 relay；
 //! - [`IrohConnection::accept`]：服务端接受一条入站连接。
 
-use buffex::x_deps::abs_buff::gen_may_cancel_future;
-use buffex::x_deps::abs_cancel;
-use buffex::x_deps::abs_cancel::{TrCancellationToken, TrMayCancel};
-use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr, EndpointId};
-use mptp_rpc_core::transport::TrMuxConn;
+use iroh::{Endpoint, EndpointAddr, EndpointId, endpoint::Connection};
+use mptp_rpc_core::{
+    transport::TrMuxConn,
+    x_deps::buffex::x_deps::{
+        abs_buff::gen_may_cancel_future,
+        abs_cancel,
+        abs_cancel::{TrCancellationToken, TrMayCancel},
+    },
+};
 use thiserror::Error;
 
 use crate::channel::IrohChannel;

@@ -344,13 +344,13 @@ impl Ord for HeaderVal {
 pub struct Headers {
     /// The btree map to store some header entries. Do not expose it even any
     /// type-specific information. Keep it opaque to users.
-    map_: Box<BTreeMap<HeaderKey, HeaderVal>>,
+    map_: BTreeMap<HeaderKey, HeaderVal>,
 }
 
 impl Headers {
     pub fn new() -> Self {
         Headers {
-            map_: Box::new(BTreeMap::new()),
+            map_: BTreeMap::new(),
         }
     }
 
