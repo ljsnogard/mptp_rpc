@@ -36,6 +36,13 @@ mod private_sealed_ {
 /// The method to access the resource on the remote end (server).
 pub trait TrAccessMethod: private_sealed_::TrSealedAccessMethod {}
 
+/// 返回编译期方法标记 `M` 对应的 `AccessMethod`。
+///
+/// 这个函数与 `TrSealedAccessMethod::method` 等价，但可以被 crate 外部安全调用。
+pub fn method_of<M: TrAccessMethod>() -> AccessMethod {
+    M::method()
+}
+
 pub enum Head {}
 
 pub enum View {}

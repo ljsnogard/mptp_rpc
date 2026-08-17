@@ -86,6 +86,30 @@ pub struct Request {
 }
 
 impl Request {
+    /// 创建一个请求头。
+    ///
+    /// 服务端测试和客户端 builder 都可以使用这个基础构造器；
+    /// 更完整的 body / headers 组装可以在上层继续封装。
+    pub fn new(method: AccessMethod, path: impl Into<String>) -> Self {
+        Request {
+            method_: method,
+            path_: path.into(),
+            headers_: Option::None,
+        }
+    }
+
+    /// 给请求附加一组头。
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers_ = Option::Some(headers);
+        self
+    }
+
+    /// 仅供 crate 内部测试使用：直接构造请求头。
+    #[cfg(test)]
+    pub(crate) fn new_for_test(method: AccessMethod, path: &str) -> Self {
+        Request::new(method, path)
+    }
+
     pub const fn access_method(&self) -> AccessMethod {
         self.method_
     }
@@ -138,6 +162,23 @@ pub struct Response {
 }
 
 impl Response {
+    /// 创建一个只有状态码、没有额外头的回复。
+    ///
+    /// 服务端 handler 通常会先构造 `Response`，再通过 `headers_` 设置
+    /// `Body_Type` / `Body_Size` 等标准头，然后把回复头写入输出流。
+    pub const fn new(status: Status) -> Self {
+        Response {
+            status_: status,
+            headers_: Option::None,
+        }
+    }
+
+    /// 给回复附加一组头。
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers_ = Option::Some(headers);
+        self
+    }
+
     pub const fn status(&self) -> Status {
         self.status_
     }
