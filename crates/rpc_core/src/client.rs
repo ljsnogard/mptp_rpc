@@ -1,13 +1,13 @@
 use core::{borrow::Borrow, marker::PhantomData, mem::MaybeUninit};
 
-use abs_buff::{
-    TrBuffRead,
-    x_deps::{abs_cancel, abs_iter},
-};
-use abs_cancel::{TrCancellationToken, TrMayCancel};
-use abs_iter::TrAsSliceMut;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
+
+use abs_buff::{TrBuffRead, gen_may_cancel_future, x_deps::abs_iter};
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_iter::TrAsSliceMut;
+use buffex::x_deps::{abs_buff, abs_cancel};
+
 
 use crate::{
     access_method::{AccessMethod, TrAccessMethod},
@@ -118,23 +118,18 @@ pub struct HeadersBuilder(Box<HdrBuilderInner>);
 /// - `Option::Some(body)`：回复头声明了回复体（且请求类型允许），
 ///   已按 `Body_Type` 解码为 `TyBody`；
 /// - `Option::None`：回复没有声明回复体，或按协议不该有回复体。
-///
-/// 为什么不用 `#[gen_may_cancel_future]`：该宏要求最后一个泛型参数是
-/// 取消令牌类型，并且无法表达“只出现在返回类型里的泛型”——而 `TyBody`
-/// 正是这样的泛型（见 gen_mcf_macro 的约定）。这里直接写成普通 async
-/// 函数，await 点仍然通过 `may_cancel_with(cancel)` 支持取消。
-async fn channel_req_nil_body_async_<'f, TyChannel, TyBody, TyCancel>(
+#[gen_may_cancel_future(ChannelRequesNilBody)]
+async fn channel_req_nil_body_async_<'f, TyChannel, TyCancel>(
     channel: &'f mut TyChannel,
     request: &'f messaging::Request,
     cancel: &'f mut TyCancel,
-) -> Result<(messaging::Response, Option<TyBody>), ClientError>
+) -> Result<messaging::Response, ClientError>
 where
     TyChannel: TrChannel,
-    TyBody: DeserializeOwned,
     TyCancel: TrCancellationToken + Clone,
 {
     let (mut tx, mut rx) = channel.split();
-    let mut encode = messaging::EncoderNilBody::new(request);
+    let mut encode = messaging::Encode::new(request);
     let Option::Some(task) = encode.try_write(&mut tx) else {
         todo!()
     };
@@ -165,7 +160,8 @@ where
             "protocol violation: response declares a body for a request type that must not have one".to_string(),
         ));
     }
-    Result::Ok((resp, Option::None))
+    // This is just to please the compiler. This function is not completed.
+    Result::Err(ClientError::Cancelled)
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -193,7 +189,7 @@ pub fn should_read_response_body(request: &messaging::Request, resp: &messaging:
         return false;
     }
     // 服务端声明了回复体 → 再按自身请求的类型决定
-    match request.access_method() {
+    match request.method() {
         // 按协议这两个方法不带本体内容；若服务端仍声明了回复体，视为协议违规
         AccessMethod::Head | AccessMethod::Drop => false,
         // 其余方法：声明了回复体就读取并解析

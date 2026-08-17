@@ -12,6 +12,7 @@ readme = "README.md"
 
 [dependencies]
 abs_buff = { path = "../../../cantare/crates/abs_buff", features = ["std_io"] }
+buffex = { path = "../../../cantare/crates/buffex" }
 
 serde = { version = "1.0.*", features = ["derive"] }
 rmp-serde = { version = "1.3.*" }

@@ -1,8 +1,10 @@
 use core::{borrow::Borrow, cmp::Ordering, fmt::Debug, iter::IntoIterator};
 use std::collections::btree_map::{self, BTreeMap};
 
-use abs_buff::x_deps::funty;
 use serde::{Deserialize, Serialize};
+
+use abs_buff::x_deps::funty;
+use buffex::x_deps::abs_buff;
 
 type HeaderStrType = String;
 
@@ -338,17 +340,17 @@ impl Ord for HeaderVal {
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// A map storing `HeaderKey` as key and some kind of string as value.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Headers {
     /// The btree map to store some header entries. Do not expose it even any
     /// type-specific information. Keep it opaque to users.
-    map_: BTreeMap<HeaderKey, HeaderVal>,
+    map_: Box<BTreeMap<HeaderKey, HeaderVal>>,
 }
 
 impl Headers {
     pub fn new() -> Self {
         Headers {
-            map_: BTreeMap::new(),
+            map_: Box::new(BTreeMap::new()),
         }
     }
 

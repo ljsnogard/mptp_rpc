@@ -2,6 +2,7 @@ use core::error;
 
 use abs_buff::{TrBuffTryRead, TrBuffTryWrite, x_deps::abs_cancel};
 use abs_cancel::TrMayCancel;
+use buffex::x_deps::abs_buff;
 
 /// 可提供双向双工流复用，并且携带通信双方身份信息的连接
 pub trait TrMuxConn {

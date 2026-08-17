@@ -12,7 +12,6 @@ readme = "README.md"
 
 [dependencies]
 mptp_rpc_core = { path = "../rpc_core" }
-buffex = { path = "../../../cantare/crates/buffex", features = ["tokio"] }
 
 anyhow = "1"
 thiserror = "2"

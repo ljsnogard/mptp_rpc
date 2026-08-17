@@ -1,19 +1,17 @@
 use core::mem::MaybeUninit;
 
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use thiserror::Error;
+
 use abs_buff::{
-    TrBuffRead,
-    TrBuffTryRead,
-    TrBuffTryWrite,
-    TrBuffWrite,
-    // as_std_read::AsStdRead,
+    TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+    as_std_read::AsStdRead,
     as_std_write::AsStdWrite,
     gen_may_cancel_future,
     pipelining::{PipeJoin, PipeJoinIoResult},
-    x_deps::abs_cancel::{self, TrMayCancel},
 };
-use abs_cancel::TrCancellationToken;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use thiserror::Error;
+use abs_cancel::{TrMayCancel, TrCancellationToken};
+use buffex::x_deps::{abs_buff, abs_cancel};
 
 use crate::{
     access_method::AccessMethod,
@@ -56,11 +54,7 @@ pub trait TrRpcMessage {
     where
         Self: Sized + Serialize,
     {
-        if self.try_get_body_type().is_some() {
-            Encode::WithBody(EncoderWithBody::new(self))
-        } else {
-            Encode::WithoutBody(EncoderNilBody::new(self))
-        }
+        Encode::new(self)
     }
 }
 
@@ -86,7 +80,7 @@ pub struct Request {
 }
 
 impl Request {
-    /// 创建一个请求头。
+    /// 创建一个请求。
     ///
     /// 服务端测试和客户端 builder 都可以使用这个基础构造器；
     /// 更完整的 body / headers 组装可以在上层继续封装。
@@ -99,22 +93,16 @@ impl Request {
     }
 
     /// 给请求附加一组头。
-    pub fn with_headers(mut self, headers: Headers) -> Self {
-        self.headers_ = Option::Some(headers);
+    pub fn with_headers(mut self, headers: impl Into<Headers>) -> Self {
+        self.headers_ = Option::Some(headers.into());
         self
     }
 
-    /// 仅供 crate 内部测试使用：直接构造请求头。
-    #[cfg(test)]
-    pub(crate) fn new_for_test(method: AccessMethod, path: &str) -> Self {
-        Request::new(method, path)
-    }
-
-    pub const fn access_method(&self) -> AccessMethod {
+    pub const fn method(&self) -> AccessMethod {
         self.method_
     }
 
-    pub const fn access_path(&self) -> &str {
+    pub const fn location(&self) -> &str {
         self.path_.as_str()
     }
 
@@ -122,14 +110,18 @@ impl Request {
         self.headers_.as_ref()
     }
 
-    #[inline]
-    pub fn try_get_content_type(&self) -> Option<&HeaderVal> {
-        <Self as TrRpcMessage>::try_get_body_type(self)
+    pub const fn headers_mut(&mut self) -> Option<&mut Headers> {
+        self.headers_.as_mut()
     }
 
     #[inline]
-    pub fn try_get_content_length_str(&self) -> Option<&HeaderVal> {
-        <Self as TrRpcMessage>::try_get_body_size_str(self)
+    pub fn try_get_body_type(&self) -> Option<&HeaderVal> {
+        TrRpcMessage::try_get_body_type(self)
+    }
+
+    #[inline]
+    pub fn try_get_body_size_str(&self) -> Option<&HeaderVal> {
+        TrRpcMessage::try_get_body_size_str(self)
     }
 }
 
@@ -211,22 +203,7 @@ impl TrRpcMessage for Response {
 
 /// To regulate the behaviour of sending request and response. This will
 /// check the header and body to determine how to operate the TX stream.
-pub enum Encode<'a, M>
-where
-    M: TrRpcMessage + Serialize,
-{
-    WithoutBody(EncoderNilBody<'a, M>),
-    WithBody(EncoderWithBody<'a, M>),
-}
-
-pub struct EncoderNilBody<'a, M>
-where
-    M: TrRpcMessage + Serialize,
-{
-    message_: Option<&'a M>,
-}
-
-pub struct EncoderWithBody<'a, M>
+pub struct Encode<'a, M>
 where
     M: TrRpcMessage + Serialize,
 {
@@ -242,12 +219,12 @@ where
     WriteErr(<W as TrBuffWrite>::Err),
 }
 
-impl<'a, M> EncoderNilBody<'a, M>
+impl<'a, M> Encode<'a, M>
 where
     M: TrRpcMessage + Serialize,
 {
     pub(crate) const fn new(message: &'a M) -> Self {
-        EncoderNilBody {
+        Encode {
             message_: Option::Some(message),
         }
     }
@@ -261,34 +238,6 @@ where
     {
         if let Option::Some(message) = self.message_.take() {
             let t = EncoderNilBodyWriteMessageAsync(message, buf_write);
-            Option::Some(t)
-        } else {
-            Option::None
-        }
-    }
-}
-
-impl<'a, M> EncoderWithBody<'a, M>
-where
-    M: TrRpcMessage + Serialize,
-{
-    pub(crate) const fn new(message: &'a mut M) -> Self {
-        EncoderWithBody {
-            message_: Option::Some(message),
-        }
-    }
-
-    pub fn try_write<'f, R, W>(
-        &'f mut self,
-        body: &'f mut R,
-        buf_write: &'f mut W,
-    ) -> Option<EncoderWithBodyWriteMessageAsync<'f, M, R, W>>
-    where
-        R: TrBuffRead,
-        W: TrBuffTryWrite,
-    {
-        if let Option::Some(message) = self.message_.take() {
-            let t = EncoderWithBodyWriteMessageAsync(message, body, buf_write);
             Option::Some(t)
         } else {
             Option::None
@@ -381,6 +330,23 @@ impl<'a> RequestDecode<'a> {
     }
 }
 
+impl<'a> ResponseDecode<'a> {
+    pub const fn new(m: &'a mut MaybeUninit<Response>) -> Self {
+        ResponseDecode(Option::Some(MessageDecode::<Response>::new(m)))
+    }
+
+    pub fn try_decode<'f, R>(
+        &'f mut self,
+        rx: &'f mut R,
+    ) -> Option<DecodeMessageAsync<'f, R, Response>>
+    where
+        R: TrBuffTryRead,
+    {
+        let m = self.0.as_mut()?;
+        Option::Some(DecodeMessageAsync(&mut m.0, rx))
+    }
+}
+
 impl<'a, M> MessageDecode<'a, M>
 where
     M: TrRpcMessage,
@@ -421,7 +387,7 @@ where
         Result::Err(e) => return Result::Err(e),
         Result::Ok(req) => req,
     };
-    let am = req.access_method();
+    let am = req.method();
     if matches!(am, AccessMethod::Push) {
         todo!()
     }
