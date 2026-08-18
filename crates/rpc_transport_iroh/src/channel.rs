@@ -124,8 +124,8 @@ async fn send_pump(mut send: SendStream, mut rx: SendRx) {
         if rx.ring().data_size() == 0 && rx.ring().is_tx_closed() {
             break;
         }
-
-        let mut segm = match rx.read_async(PUMP_CHUNK).await.pick_left() {
+        let r_res = rx.read_async(&Demand::less_than(PUMP_CHUNK)).await;
+        let mut segm = match r_res.pick_left() {
             Some(segm) => segm,
             None => break,
         };
@@ -169,7 +169,7 @@ async fn recv_pump(mut recv: RecvStream, mut tx: RecvTx) {
         let mut written = 0usize;
         while written < n {
             // 等待 ring 有可写空间。若返回错误（例如调用方已关闭读端），退出。
-            let segm_opt = tx.write_async(n - written).await.pick_left();
+            let segm_opt = tx.write_async(&Demand::less_than(n - written)).await.pick_left();
             let mut segm = match segm_opt {
                 Some(segm) => segm,
                 None => {
@@ -178,14 +178,18 @@ async fn recv_pump(mut recv: RecvStream, mut tx: RecvTx) {
                 }
             };
 
-            let take = segm.least_count().min(n - written);
-            let mut child = segm.as_segm_mut();
-            let moved = child.clone_items_from_buff(&buf[written..written + take]);
-            debug_assert_eq!(moved, take);
-            drop(child);
-            // drop segm 提交 `take` 字节到接收 ring。
+            // 和发送方向一样，跨末端环绕时一个逻辑段包含两段物理空间，
+            // 需要循环写入每一段。
+            while !segm.is_empty() && written < n {
+                let mut child = segm.as_segm_mut();
+                let take = child.least_count().min(n - written);
+                let moved = child.clone_items_from_buff(&buf[written..written + take]);
+                debug_assert_eq!(moved, take);
+                drop(child);
+                written += take;
+            }
+            // drop segm 提交已消费字节到接收 ring。
             drop(segm);
-            written += take;
         }
     }
 }
@@ -203,21 +207,21 @@ impl IrohSend<'_> {
     /// 这个方法会处理 ring 可能只提供部分连续空间的情况，适合 Demo 和测试直接使用。
     pub async fn write_all(&mut self, mut data: &[u8]) -> Result<(), IrohConnError> {
         while !data.is_empty() {
-            let mut segm = self
-                .0
-                .write_async(data.len())
-                .await
+            let w_res = self.0.write_async(&Demand::less_than(data.len())).await;
+            let mut segm = w_res
                 .pick_left()
                 .ok_or_else(|| IrohConnError::StreamIo("send ring closed".to_string()))?;
-            let take = segm.least_count().min(data.len());
-            // 通过 as_segm_mut + clone_items_from_buff 写入并推进 offset，
-            // 这样 drop 父 segment 时才会把 take 字节真正提交到 ring。
-            let mut child = segm.as_segm_mut();
-            let moved = child.clone_items_from_buff(&data[..take]);
-            debug_assert_eq!(moved, take);
-            drop(child);
+            // RingBuffer 的段可能由两段物理空间组成（跨缓冲区末端）。
+            // 因此要反复取“当前物理段”写入，直到整个逻辑段都被填满。
+            while !segm.is_empty() && !data.is_empty() {
+                let mut child = segm.as_segm_mut();
+                let take = child.least_count().min(data.len());
+                let moved = child.clone_items_from_buff(&data[..take]);
+                debug_assert_eq!(moved, take);
+                drop(child);
+                data = &data[take..];
+            }
             drop(segm);
-            data = &data[take..];
         }
         Ok(())
     }
@@ -233,14 +237,12 @@ impl IrohSend<'_> {
 }
 
 impl TrBuffWrite for IrohSend<'_> {
-    type SegmMut<'a>
-        = <SendTx as TrBuffWrite>::SegmMut<'a>
-    where
-        Self: 'a;
+    type SegmMut<'a> = <SendTx as TrBuffWrite>::SegmMut<'a> where Self: 'a;
+
     type Err = <SendTx as TrBuffWrite>::Err;
 
-    fn is_blocked(&self) -> bool {
-        self.0.is_blocked()
+    fn is_blocked_closing(&self) -> bool {
+        self.0.is_blocked_closing()
     }
 
     fn write_async<'f>(
@@ -269,10 +271,10 @@ impl IrohRecv<'_> {
     pub async fn read_to_end(&mut self, out: &mut Vec<u8>) -> Result<usize, IrohConnError> {
         let mut total = 0usize;
         loop {
-            if self.is_drained() {
+            if self.is_drained_closing() {
                 break;
             }
-            let mut segm = match self.0.read_async(PUMP_CHUNK).await.pick_left() {
+            let mut segm = match self.0.read_async(&Demand::less_than(PUMP_CHUNK)).await.pick_left() {
                 Some(segm) => segm,
                 None => break,
             };
@@ -295,7 +297,7 @@ impl TrBuffRead for IrohRecv<'_> {
         Self: 'a;
     type Err = <RecvRx as TrBuffRead>::Err;
 
-    fn is_drained(&self) -> bool {
+    fn is_drained_closing(&self) -> bool {
         // 对调用方而言，“不会再有数据”= 接收 ring 的写入端（recv pump）已关闭，
         // 且 ring 中的数据已经全部被读走。
         self.0.ring().data_size() == 0 && self.0.ring().is_tx_closed()

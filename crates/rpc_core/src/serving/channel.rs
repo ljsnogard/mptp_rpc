@@ -122,14 +122,13 @@ pub struct ServiceTx<'f>(&'f mut TxHalf);
 pub struct ServiceRx<'f>(&'f mut RxHalf);
 
 impl TrBuffWrite for ServiceTx<'_> {
-    type SegmMut<'a>
-        = <TxHalf as TrBuffWrite>::SegmMut<'a>
+    type SegmMut<'a> = <TxHalf as TrBuffWrite>::SegmMut<'a>
     where
         Self: 'a;
     type Err = <TxHalf as TrBuffWrite>::Err;
 
-    fn is_blocked(&self) -> bool {
-        self.0.is_blocked()
+    fn is_blocked_closing(&self) -> bool {
+        self.0.is_blocked_closing()
     }
 
     fn write_async<'f>(
@@ -147,14 +146,13 @@ impl TrBuffTryWrite for ServiceTx<'_> {
 }
 
 impl TrBuffRead for ServiceRx<'_> {
-    type SegmRef<'a>
-        = <RxHalf as TrBuffRead>::SegmRef<'a>
+    type SegmRef<'a> = <RxHalf as TrBuffRead>::SegmRef<'a>
     where
         Self: 'a;
     type Err = <RxHalf as TrBuffRead>::Err;
 
-    fn is_drained(&self) -> bool {
-        self.0.is_drained()
+    fn is_drained_closing(&self) -> bool {
+        self.0.is_drained_closing()
     }
 
     fn read_async<'f>(
@@ -182,14 +180,13 @@ pub struct ClientTx<'f>(&'f mut TxHalf);
 pub struct ClientRx<'f>(&'f mut RxHalf);
 
 impl TrBuffWrite for ClientTx<'_> {
-    type SegmMut<'a>
-        = <TxHalf as TrBuffWrite>::SegmMut<'a>
+    type SegmMut<'a> = <TxHalf as TrBuffWrite>::SegmMut<'a>
     where
         Self: 'a;
     type Err = <TxHalf as TrBuffWrite>::Err;
 
-    fn is_blocked(&self) -> bool {
-        self.0.is_blocked()
+    fn is_blocked_closing(&self) -> bool {
+        self.0.is_blocked_closing()
     }
 
     fn write_async<'f>(
@@ -207,14 +204,13 @@ impl TrBuffTryWrite for ClientTx<'_> {
 }
 
 impl TrBuffRead for ClientRx<'_> {
-    type SegmRef<'a>
-        = <RxHalf as TrBuffRead>::SegmRef<'a>
+    type SegmRef<'a> = <RxHalf as TrBuffRead>::SegmRef<'a>
     where
         Self: 'a;
     type Err = <RxHalf as TrBuffRead>::Err;
 
-    fn is_drained(&self) -> bool {
-        self.0.is_drained()
+    fn is_drained_closing(&self) -> bool {
+        self.0.is_drained_closing()
     }
 
     fn read_async<'f>(
