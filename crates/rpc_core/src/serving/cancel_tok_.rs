@@ -1,12 +1,13 @@
-use std::{
-    future,
-    ops::Try,
-    sync::Arc,
-};
+use std::{future, ops::Try};
 
 use abs_cancel::TrCancellationToken;
 use buffex::x_deps::abs_cancel;
 
+/// 服务端内部使用的取消令牌。
+///
+/// 当前实现是一个“不可取消”的占位令牌，主要让 `HandlerChain` 可以在还没有
+/// 接入真实连接级取消机制前正常工作。后续可以替换为基于共享状态的取消令牌，
+/// 例如由连接断开事件驱动取消。
 #[derive(Clone, Debug)]
 pub struct ServiceCancelToken();
 
@@ -17,15 +18,15 @@ impl ServiceCancelToken {
     }
 
     pub fn can_be_cancelled(&self) -> bool {
-        todo!()
+        false
     }
 
     pub fn is_cancelled(&self) -> bool {
-        todo!()
+        false
     }
 
     pub fn cancellation(&mut self) -> impl IntoFuture {
-        // this is just a dummy implementation
+        // 当前不可取消，因此返回一个永远不会完成的 future。
         future::pending::<()>()
     }
 }
@@ -47,9 +48,4 @@ impl TrCancellationToken for ServiceCancelToken {
     fn try_spawn_child_token(&mut self) -> impl Try<Output: TrCancellationToken> {
         Option::Some(self.clone())
     }
-}
-
-#[derive(Debug)]
-struct SvcCanTokInner {
-
 }

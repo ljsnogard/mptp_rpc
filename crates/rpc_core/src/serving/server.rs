@@ -12,11 +12,10 @@
 
 use std::{io, mem::MaybeUninit};
 
-use thiserror::Error;
-
+use abs_buff_stdio_adapt::AsStdWrite;
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-// use abs_buff_stdio_adapt::{AsStdWrite, x_deps::abs_buff};
 use buffex::x_deps::abs_cancel;
+use thiserror::Error;
 
 use super::{channel::ServiceChannel, handler::HandlerChain};
 use crate::{
@@ -126,6 +125,13 @@ impl Server {
             .may_cancel_with(cancel)
             .await
             .map_err(|_| ServeError::Handler("handler error".to_string()))?;
+
+        // 4. 如果 handler 通过 FlowCtrl 返回了 Response，则写回客户端。
+        if let Some(resp) = ctrl.response() {
+            let (mut tx, mut _rx) = channel.split();
+            let mut writer = AsStdWrite::new(&mut tx, cancel);
+            write_response_head(resp, &mut writer)?;
+        }
 
         Ok(())
     }
