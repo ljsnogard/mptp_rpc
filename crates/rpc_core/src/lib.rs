@@ -14,4 +14,5 @@ pub mod transport;
 
 pub mod x_deps {
     pub use buffex;
+    pub use abs_buff_stdio_adapt;
 }

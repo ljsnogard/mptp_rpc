@@ -22,7 +22,10 @@ use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
     x_deps::{abs_cancel::TrMayCancel, anylr::SomeOf},
 };
-use buffex::ring_buffer::{RingBuffer, RingRx, RingTx};
+use buffex::{
+    ring_buffer::{RingBuffer, RingRx, RingTx},
+    x_deps::abs_buff,
+};
 
 use crate::transport::TrChannel;
 

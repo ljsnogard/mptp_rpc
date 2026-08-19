@@ -77,14 +77,9 @@ impl IrohChannel {
 }
 
 impl TrChannel for IrohChannel {
-    type Tx<'f>
-        = IrohSend<'f>
-    where
-        Self: 'f;
-    type Rx<'f>
-        = IrohRecv<'f>
-    where
-        Self: 'f;
+    type Tx<'f> = IrohSend<'f> where Self: 'f;
+
+    type Rx<'f> = IrohRecv<'f> where Self: 'f;
 
     fn split(&mut self) -> (Self::Tx<'_>, Self::Rx<'_>) {
         (IrohSend(&mut self.send_tx_), IrohRecv(&mut self.recv_rx_))

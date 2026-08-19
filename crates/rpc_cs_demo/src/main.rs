@@ -24,6 +24,12 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, TransportAddr, endpoint::presets::N0};
+
+use abs_buff::gen_may_cancel_future;
+use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
+use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
+use buffex::x_deps::{abs_buff, abs_cancel};
+
 use mptp_rpc_core::{
     access_method::AccessMethod,
     messaging::{Request, Response},
@@ -35,11 +41,7 @@ use mptp_rpc_core::{
     },
     specs::Status,
     transport::{TrChannel, TrMuxConn},
-    x_deps::buffex::x_deps::{
-        abs_buff::{as_std_read::AsStdRead, as_std_write::AsStdWrite, gen_may_cancel_future},
-        abs_cancel,
-        abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel},
-    },
+    x_deps::{buffex, abs_buff_stdio_adapt},
 };
 use mptp_rpc_transport_iroh::{IrohChannel, IrohConnection};
 

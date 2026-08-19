@@ -18,8 +18,9 @@ use std::{
     vec::Vec,
 };
 
-use abs_buff::{gen_may_cancel_future, x_deps::abs_cancel};
+use abs_buff::gen_may_cancel_future;
 use abs_cancel::{TrCancellationToken, TrMayCancel};
+use buffex::x_deps::{abs_buff, abs_cancel};
 
 use crate::{
     access_method::AccessMethod,

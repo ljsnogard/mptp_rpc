@@ -1,24 +1,19 @@
 use std::io::Write;
 
-use abs_buff::{
-    as_std_read::AsStdRead,
-    as_std_write::AsStdWrite,
-    gen_may_cancel_future,
-    x_deps::{
-        abs_cancel,
-        abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel},
-    },
-};
+use abs_buff::gen_may_cancel_future;
+use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
+use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
+use buffex::x_deps::{abs_buff, abs_cancel};
 
-use super::{
-    channel::ServiceChannel,
-    server::{Server, SessionContext, write_response_head},
-};
 use crate::{
     access_method::AccessMethod,
     messaging::{Request, Response},
     serving::handler::{FlowCtrl, HandlerChain, HandlerError, TrReqHandler},
     specs::{Headers, Status},
+};
+use super::{
+    channel::ServiceChannel,
+    server::{Server, SessionContext, write_response_head},
 };
 
 type Router = crate::routing::prefix_router::Router<HandlerChain>;

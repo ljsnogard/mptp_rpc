@@ -5,11 +5,10 @@ use thiserror::Error;
 
 use abs_buff::{
     TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
-    as_std_read::AsStdRead,
-    as_std_write::AsStdWrite,
     gen_may_cancel_future,
     pipelining::{PipeJoin, PipeJoinIoResult},
 };
+use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
 use abs_cancel::{TrMayCancel, TrCancellationToken};
 use buffex::x_deps::{abs_buff, abs_cancel};
 
@@ -368,7 +367,7 @@ where
     C: TrCancellationToken,
 {
     let _ = cancel;
-    let mut rx = abs_buff::as_std_read::AsStdRead::new(buff_r, cancel);
+    let mut rx = AsStdRead::new(buff_r, cancel);
     rmp_serde::from_read(&mut rx).map_err(|e| DecodeError::BadContent(e.to_string()))
 }
 
