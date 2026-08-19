@@ -14,11 +14,9 @@ use std::{io, mem::MaybeUninit};
 
 use thiserror::Error;
 
-use abs_buff::{
-    as_std_write::AsStdWrite,
-    x_deps::abs_cancel,
-};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
+// use abs_buff_stdio_adapt::{AsStdWrite, x_deps::abs_buff};
+use buffex::x_deps::abs_cancel;
 
 use super::{channel::ServiceChannel, handler::HandlerChain};
 use crate::{

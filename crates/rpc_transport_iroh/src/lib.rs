@@ -37,3 +37,7 @@ pub mod conn;
 
 pub use channel::{IrohChannel, IrohRecv, IrohSend};
 pub use conn::{IrohConnError, IrohConnection};
+
+pub mod x_deps {
+    pub use mptp_rpc_core;
+}
