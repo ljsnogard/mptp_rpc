@@ -32,6 +32,44 @@
 //! 更上层的 MPTP 消息解析（Request / Response / body）应该只依赖
 //! `TrChannel` / `TrBuffTryRead` / `TrBuffTryWrite`，不依赖本 crate 的具体类型。
 
+//! # 外部库限制测试
+//!
+//! 下面的 doctest 用于“测出”当前 `abs_buff` 的 segment 异步搬移 future
+//! 不是 `Send` 的问题：`SegmMut::move_items_from_input_async` /
+//! `SegmRef::move_items_to_output_async` 生成的 future 无法放进
+//! `tokio::spawn`，因此不能直接作为 IrohChannel 的后台 pump 使用。
+//!
+//! ```compile_fail
+//! use std::{mem::MaybeUninit, pin::Pin};
+//!
+//! use abs_buff::{
+//!     Demand,
+//!     buffer::{SegmMut, SegmReclaim},
+//!     x_deps::abs_cancel::{NonCancellableToken, TrMayCancel},
+//! };
+//! use abs_buff_tokio_adapt::ReadAsInput;
+//!
+//! fn main() {
+//!     let (mut a, _b) = tokio::io::duplex(64);
+//!     let a: &'static mut tokio::io::DuplexStream = Box::leak(Box::new(a));
+//!     let mut input = ReadAsInput::new(a);
+//!     let storage: &'static mut [MaybeUninit<u8>; 8] =
+//!         Box::leak(Box::new([MaybeUninit::uninit(); 8]));
+//!     let consumed: &'static mut usize = Box::leak(Box::new(0usize));
+//!     let mut segm = SegmMut::new(
+//!         &mut storage[..],
+//!         SegmReclaim::new(Pin::new(consumed)),
+//!     );
+//!
+//!     tokio::spawn(async move {
+//!         let _ = segm
+//!             .move_items_from_input_async(&mut input, &Demand::less_than(8))
+//!             .may_cancel_with(NonCancellableToken::shared_mut())
+//!             .await;
+//!     });
+//! }
+//! ```
+//!
 pub mod channel;
 pub mod conn;
 
