@@ -12,7 +12,7 @@ use abs_buff::{
 
 use super::{
     channel::ServiceChannel,
-    server::{Server, ServiceContext, write_response_head},
+    server::{Server, SessionContext, write_response_head},
 };
 use crate::{
     access_method::AccessMethod,
@@ -33,7 +33,7 @@ async fn handle_any_request_async_<'f, C>(
     _location: &'f str,
     _headers: &'f mut Headers,
     _channel: &'f mut ServiceChannel,
-    _context: &'f mut ServiceContext,
+    _context: &'f mut SessionContext,
     _cancel: &'f mut C,
 ) -> Result<FlowCtrl, HandlerError>
 where
@@ -50,7 +50,7 @@ impl TrReqHandler for AnyHandler {
         location: &'f str,
         headers: &'f mut Headers,
         channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
+        context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>> {
         HandleAnyRequestAsync(self, method, location, headers, channel, context)
     }
@@ -66,7 +66,7 @@ async fn view_handler_handle_async_<'f, C>(
     _location: &'f str,
     _headers: &'f mut Headers,
     _channel: &'f mut ServiceChannel,
-    _context: &'f mut ServiceContext,
+    _context: &'f mut SessionContext,
     _cancel: &'f mut C,
 ) -> Result<FlowCtrl, HandlerError>
 where
@@ -83,7 +83,7 @@ impl TrReqHandler for ViewHandler {
         location: &'f str,
         headers: &'f mut Headers,
         channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
+        context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>> {
         ViewHandlerHandleAsync(self, method, location, headers, channel, context)
     }

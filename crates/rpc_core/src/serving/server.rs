@@ -29,8 +29,9 @@ use crate::{
 
 type Router = crate::routing::prefix_router::Router<HandlerChain>;
 
-/// 服务端上下文，后续可以存放连接信息、鉴权结果、日志等。
-pub struct ServiceContext;
+/// 会话上下文，后续可以存放连接信息、鉴权结果、日志等。
+/// 在客户端连接到服务器时被创建，判定断线后被回收。
+pub struct SessionContext;
 
 /// 服务端处理过程中可能出现的错误。
 #[derive(Debug, Error)]
@@ -121,19 +122,12 @@ impl Server {
 
         // 3. 调用 HandlerChain。
         let mut headers = request.headers().cloned().unwrap_or_else(Headers::new);
-        let mut context = ServiceContext;
+        let mut context = SessionContext; // a dummy context currently
         let ctrl = handler
             .handle_async(method, &location, &mut headers, channel, &mut context)
             .may_cancel_with(cancel)
             .await
             .map_err(|_| ServeError::Handler("handler error".to_string()))?;
-
-        // 4. 如果 handler 通过 FlowCtrl 返回了 Response，则写回客户端。
-        if let Some(resp) = ctrl.response() {
-            let (mut tx, mut _rx) = channel.split();
-            let mut writer = AsStdWrite::new(&mut tx, cancel);
-            write_response_head(resp, &mut writer)?;
-        }
 
         Ok(())
     }

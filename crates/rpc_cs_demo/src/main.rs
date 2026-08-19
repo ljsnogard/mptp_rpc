@@ -31,7 +31,7 @@ use mptp_rpc_core::{
     serving::{
         channel::ServiceChannel,
         handler::{FlowCtrl, HandlerChain, HandlerError, TrReqHandler},
-        server::{Server, ServiceContext},
+        server::{Server, SessionContext},
     },
     specs::Status,
     transport::{TrChannel, TrMuxConn},
@@ -59,7 +59,7 @@ async fn handle_hello_async_<'f, C>(
     _location: &'f str,
     _headers: &'f mut mptp_rpc_core::specs::Headers,
     _channel: &'f mut ServiceChannel,
-    _context: &'f mut ServiceContext,
+    _context: &'f mut SessionContext,
     _cancel: &'f mut C,
 ) -> Result<FlowCtrl, HandlerError>
 where
@@ -75,7 +75,7 @@ impl TrReqHandler for HelloHandler {
         location: &'f str,
         headers: &'f mut mptp_rpc_core::specs::Headers,
         channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
+        context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>> {
         HandleHelloAsync(self, method, location, headers, channel, context)
     }

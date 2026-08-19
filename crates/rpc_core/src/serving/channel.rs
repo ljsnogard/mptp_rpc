@@ -40,7 +40,7 @@ fn new_ring() -> Ring {
 
 fn split_ring() -> (TxHalf, RxHalf) {
     let ring = Arc::new(new_ring());
-    RingBuffer::try_split_shared(ring, |r| Arc::strong_count(r), |r| Arc::weak_count(r))
+    RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)
         .expect("new ring must be uniquely owned")
 }
 

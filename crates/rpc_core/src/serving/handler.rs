@@ -12,23 +12,31 @@
 //!   负责把该回复写回客户端；
 //! - [`FlowCtrl::Ceased`]：立即终止整个链，不再执行任何 handler。
 
-use core::{future::Future, pin::Pin};
-use std::vec::Vec;
-
-use abs_buff::x_deps::{
-    abs_cancel,
-    abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel},
+use std::{
+    future::Future,
+    pin::Pin,
+    vec::Vec,
 };
-use buffex::x_deps::abs_buff::gen_may_cancel_future;
 
-use super::{channel::ServiceChannel, server::ServiceContext};
-use crate::{access_method::AccessMethod, messaging::Response, specs::Headers};
+use abs_buff::{gen_may_cancel_future, x_deps::abs_cancel};
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+
+use crate::{
+    access_method::AccessMethod,
+    messaging::Response,
+    specs::Headers,
+};
+use super::{
+    cancel_tok_::ServiceCancelToken,
+    channel::ServiceChannel,
+    server::SessionContext,
+};
 
 /// Handler 返回的异步 future 类型。
 ///
 /// 这里使用 `BoxFuture` 作为内部擦除后的返回类型，让 `HandlerChain` 可以把
 /// 不同类型的 `TrReqHandler` 统一保存成 `Box<dyn ErasedHandler>`。
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+pub type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// 给处理链条发送信号，告知 HandlerChain 打算如何处理 request 本身在链条内的流动。
 #[derive(Debug)]
@@ -84,54 +92,61 @@ pub trait TrReqHandler {
         location: &'f str,
         headers: &'f mut Headers,
         channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
+        context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>>;
 }
 
+type TySvcCanTok = ServiceCancelToken;
+
 /// 内部擦除 trait：让 `HandlerChain` 可以保存任意 `TrReqHandler` 的具体类型。
-trait ErasedHandler: Send + Sync {
-    fn handle<'f>(
+trait TrDynReqDispatch: Send + Sync {
+    /// 封装 TrReqHandler 的调用方法，使得可以动态分派。将会被 HandlerChain 调用
+    fn dispatch_async<'f>(
         &'f self,
         method: AccessMethod,
         location: &'f str,
         headers: &'f mut Headers,
         channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
-    ) -> BoxFuture<'f, Result<FlowCtrl, HandlerError>>;
+        context: &'f mut SessionContext,
+        cancel: &'f mut TySvcCanTok,
+    ) -> BoxedFuture<'f, Result<FlowCtrl, HandlerError>>;
 }
 
-impl<H> ErasedHandler for H
+impl<H> TrDynReqDispatch for H
 where
     H: TrReqHandler + Send + Sync,
 {
-    fn handle<'f>(
+    fn dispatch_async<'f>(
         &'f self,
-        method: AccessMethod,
+        method  : AccessMethod,
         location: &'f str,
-        headers: &'f mut Headers,
-        channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
-    ) -> BoxFuture<'f, Result<FlowCtrl, HandlerError>> {
-        Box::pin(async move {
+        headers : &'f mut Headers,
+        channel : &'f mut ServiceChannel,
+        context : &'f mut SessionContext,
+        cancel  : &'f mut TySvcCanTok,
+    ) -> BoxedFuture<'f, Result<FlowCtrl, HandlerError>> {
+        Box::pin(
             // 链内部暂时使用不可取消令牌驱动单个 handler；
             // 整个 HandlerChain 仍然可以由上层通过 `may_cancel_with` 取消。
-            let fut = TrReqHandler::handle_async(self, method, location, headers, channel, context);
-            fut.may_cancel_with(NonCancellableToken::shared_mut()).await
-        })
+            // 这里的 cancel 类型只可能是 TySvcCanTok 但由于 Rust 不能偏特化。
+            TrReqHandler::handle_async(self, method, location, headers, channel, context)
+                .may_cancel_with(cancel)
+                .into_future()
+        )
     }
 }
 
 /// HandlerChain 保存一个 handler 链条，被路由器匹配到的请求会进入这个 handler
 /// 链条，被一个或者多个 handler 依次处理。
 pub struct HandlerChain {
-    handlers_: Vec<Box<dyn ErasedHandler>>,
+    dispatchers_: Vec<Box<dyn TrDynReqDispatch>>,
 }
 
 impl HandlerChain {
     /// 创建空链。
     pub const fn new() -> Self {
         HandlerChain {
-            handlers_: Vec::new(),
+            dispatchers_: Vec::new(),
         }
     }
 
@@ -140,17 +155,17 @@ impl HandlerChain {
     where
         H: TrReqHandler + Send + Sync + 'static,
     {
-        self.handlers_.push(Box::new(handler));
+        self.dispatchers_.push(Box::new(handler));
     }
 
     /// 当前链中的 handler 数量。
     pub fn len(&self) -> usize {
-        self.handlers_.len()
+        self.dispatchers_.len()
     }
 
     /// 链是否为空。
     pub fn is_empty(&self) -> bool {
-        self.handlers_.is_empty()
+        self.dispatchers_.is_empty()
     }
 
     /// 开始按顺序处理请求。
@@ -160,9 +175,10 @@ impl HandlerChain {
         location: &'f str,
         headers: &'f mut Headers,
         channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
-    ) -> ChainHandleRequestAsync<'f> {
-        ChainHandleRequestAsync(self, method, location, headers, channel, context)
+        context: &'f mut SessionContext,
+    ) -> DispatchRequestAsync<'f> {
+        let tok = TySvcCanTok::dummy_new();
+        DispatchRequestAsync(self, method, location, headers, channel, context, tok)
     }
 }
 
@@ -174,36 +190,41 @@ impl TrReqHandler for HandlerChain {
         location: &'f str,
         headers: &'f mut Headers,
         channel: &'f mut ServiceChannel,
-        context: &'f mut ServiceContext,
+        context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>> {
+        // Simply called the
         HandlerChain::handle_async(self, method, location, headers, channel, context)
     }
 }
 
-#[gen_may_cancel_future(ChainHandleRequest)]
-async fn chain_handle_request_async_<'f, C>(
+#[allow(clippy::too_many_arguments)]
+#[gen_may_cancel_future(DispatchRequest)]
+async fn dispatch_request_async_<'f, C>(
     chain: &'f HandlerChain,
     method: AccessMethod,
     location: &'f str,
     headers: &'f mut Headers,
     channel: &'f mut ServiceChannel,
-    context: &'f mut ServiceContext,
-    _cancel: &'f mut C,
+    context: &'f mut SessionContext,
+    mut cancel: TySvcCanTok,
+    _dummy_: &'f mut C, // This is not used by design
 ) -> Result<FlowCtrl, HandlerError>
 where
     C: TrCancellationToken + Clone,
 {
-    for handler in chain.handlers_.iter() {
-        let ctrl = handler
-            .handle(method, location, headers, channel, context)
-            .await?;
-
-        match ctrl {
-            FlowCtrl::CallNext | FlowCtrl::Review => continue,
-            FlowCtrl::SkipRest(_) | FlowCtrl::Ceased(_) => return Ok(ctrl),
+    for dispatcher in chain.dispatchers_.iter() {
+        if cancel.is_cancelled() {
+            break; // consider return FlowCtrl::Ceased
         }
-    }
-
+        let ctrl = dispatcher
+            .dispatch_async(method, location, headers, channel, context, &mut cancel)
+            .await?;
+        if matches!(ctrl, FlowCtrl::CallNext) || matches!(ctrl, FlowCtrl::Review) {
+            continue;
+        } else {
+            return Ok(ctrl)
+        }
+    };
     // 所有 handler 都放行，但没有生成最终回复。
     Ok(FlowCtrl::CallNext)
 }

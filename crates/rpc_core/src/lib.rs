@@ -1,6 +1,7 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
 #![feature(async_fn_traits)]
+#![feature(try_trait_v2)]
 
 pub mod access_method;
 pub mod client;

@@ -63,9 +63,9 @@ impl IrohChannel {
     /// 由 iroh 双向流的收发端构造 channel，并启动两个后台 pump。
     pub(crate) fn new(send: SendStream, recv: RecvStream) -> Self {
         // 发送方向：调用方写入 -> send_tx_，pump 从 send_rx 读并写到网络。
-        let (send_tx_, send_rx) = new_send_ring();
+        let (send_tx_, send_rx) = new_ring_buff_pair();
         // 接收方向：pump 从网络读并写入 recv_tx，调用方从 recv_rx_ 读。
-        let (recv_tx, recv_rx_) = new_recv_ring();
+        let (recv_tx, recv_rx_) = new_ring_buff_pair();
 
         // 后台任务持有 ring 的另一半；channel 被 drop 时，发送 ring 的 tx 会关闭，
         // send pump 会在排空数据后自然结束，从而让对端读到 EOF。
@@ -95,22 +95,13 @@ impl TrChannel for IrohChannel {
 // Ring 构造
 // ---------------------------------------------------------------------------
 
-fn new_send_ring() -> (SendTx, SendRx) {
+fn new_ring_buff_pair() -> (SendTx, SendRx) {
     let ring = Arc::new(
         RingBuffer::try_new(Box::from(vec![0u8; RING_CAPACITY]))
             .expect("send ring capacity must be valid"),
     );
     RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)
         .expect("send ring must be uniquely owned before split")
-}
-
-fn new_recv_ring() -> (RecvTx, RecvRx) {
-    let ring = Arc::new(
-        RingBuffer::try_new(Box::from(vec![0u8; RING_CAPACITY]))
-            .expect("recv ring capacity must be valid"),
-    );
-    RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)
-        .expect("recv ring must be uniquely owned before split")
 }
 
 // ---------------------------------------------------------------------------

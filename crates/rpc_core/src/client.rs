@@ -108,9 +108,9 @@ impl RequestBuilder {
     }
 }
 
-struct HdrBuilderInner;
+struct HeaderBuilderInner;
 
-pub struct HeadersBuilder(Box<HdrBuilderInner>);
+pub struct HeadersBuilder(Box<HeaderBuilderInner>);
 
 /// 在一条信道上发送一个“无请求体”的请求，并接收回复。
 ///
