@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use abs_buff_tokio_adapt::{ReadAsInput, WriteAsOutput};
 use iroh::endpoint::{RecvStream, SendStream};
 use mptp_rpc_core::{
     transport::TrChannel,
@@ -24,7 +25,7 @@ use mptp_rpc_core::{
         ring_buffer::{RingBuffer, RingRx, RingTx},
         x_deps::{
             abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite},
-            abs_cancel::TrMayCancel,
+            abs_cancel::{NonCancellableToken, TrMayCancel},
             anylr::SomeOf,
         },
     },
@@ -116,41 +117,60 @@ async fn send_pump(mut send: SendStream, mut rx: SendRx) {
             None => break,
         };
 
-        // 把 ring 中这段数据“移动”到临时缓冲，再写入 iroh。
-        // 必须通过 move_items_to_buff 推进 segment 内部 offset，
-        // 否则 drop 时 reclaim 0 字节，ring 的读位置不会前进。
-        let len = segm.least_count();
-        let mut tmp: Vec<core::mem::MaybeUninit<u8>> = Vec::with_capacity(len);
-        tmp.resize_with(len, core::mem::MaybeUninit::uninit);
-        let moved = unsafe { segm.move_items_to_buff(&mut tmp) };
-        let bytes: Vec<u8> = tmp[..moved]
-            .iter()
-            .map(|m| unsafe { m.assume_init_read() })
-            .collect();
-        if send.write_all(&bytes).await.is_err() {
-            break;
+        // 使用 abs_buff_tokio_adapt::WriteAsOutput 把 ring 段直接写到 iroh。
+        // 段可能是两段物理内存，因此按物理子段逐个交给 WriteAsOutput。
+        let mut output = WriteAsOutput::new(&mut send);
+        while !segm.is_empty() {
+            let mut child = segm.as_segm_ref();
+            let mut cancel = NonCancellableToken::new();
+            let res = child
+                .move_items_to_output_async(&mut output, &Demand::less_than(PUMP_CHUNK))
+                .may_cancel_with(&mut cancel)
+                .await;
+            if res.as_ref().pick_right().is_some() {
+                break;
+            }
+            let moved = res.pick_left().unwrap_or(0);
+            if moved == 0 {
+                break;
+            }
+            // child drop 会把消费量累计到父段，父段 drop 时提交给 ring。
         }
-        // segm 在这里 drop，通过 reclaim 提交消费，等价于从 ring 中移除这些字节。
+        drop(segm);
     }
 }
 
 /// 接收 pump：把 iroh `RecvStream` 的数据搬到接收 ring，供调用方读取。
 async fn recv_pump(mut recv: RecvStream, mut tx: RecvTx) {
-    let mut buf = vec![0u8; PUMP_CHUNK];
+    // 使用 abs_buff_tokio_adapt::ReadAsInput 从 iroh 读取到临时缓冲，
+    // 再写入接收 ring。
+    let mut input = ReadAsInput::new(&mut recv);
+    let mut buf: Vec<core::mem::MaybeUninit<u8>> =
+        (0..PUMP_CHUNK).map(|_| core::mem::MaybeUninit::uninit()).collect();
     loop {
-        let n = match recv.read(&mut buf).await {
-            Ok(None) => {
+        let mut cancel = NonCancellableToken::new();
+        let n = match input
+            .read_async(&mut buf)
+            .may_cancel_with(&mut cancel)
+            .await
+            .pick_left()
+        {
+            Some(0) => {
                 // iroh 对端 finish：关闭接收 ring 的写入端，调用方读到 EOF。
                 tx.close();
                 break;
             }
-            Ok(Some(n)) => n,
-            Err(_) => {
+            Some(n) => n,
+            None => {
                 // 网络错误同样按 EOF 处理，保证调用方不会永久等待。
                 tx.close();
                 break;
             }
         };
+        let bytes: Vec<u8> = buf[..n]
+            .iter()
+            .map(|m| unsafe { m.assume_init_read() })
+            .collect();
 
         let mut written = 0usize;
         while written < n {
@@ -169,7 +189,7 @@ async fn recv_pump(mut recv: RecvStream, mut tx: RecvTx) {
             while !segm.is_empty() && written < n {
                 let mut child = segm.as_segm_mut();
                 let take = child.least_count().min(n - written);
-                let moved = child.clone_items_from_buff(&buf[written..written + take]);
+                let moved = child.clone_items_from_buff(&bytes[written..written + take]);
                 debug_assert_eq!(moved, take);
                 drop(child);
                 written += take;
