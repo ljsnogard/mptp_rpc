@@ -6,7 +6,7 @@ mod tests_expanded_ {
     /// # Usage Rules:
     /// 0. Must be an `async fn`;
     /// 1. At least one lifetime and the last one must be for the cancellation token;
-    /// 2. The last argument and generic parameter type must be the cancellation token type and constrained with: `TrCancellationToken + Clone`;
+    /// 2. The last argument and generic parameter type must be the cancellation token type and constrained with: `TrCancellationToken`;
     /// 3. Use a where clause to constrain the cancel token type;
     #[gen_may_cancel_future(DoThing)]
     pub async fn do_thing_async<'a, 'b, 'x, 'c, A, B, C>(
@@ -22,7 +22,7 @@ mod tests_expanded_ {
         'x: 'c,
         A: Send,
         B: Sync,
-        C: TrCancellationToken + Clone,
+        C: TrCancellationToken,
     {
         let _ = (a, b, l, x, cancel);
         42

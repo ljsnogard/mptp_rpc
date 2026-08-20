@@ -14,16 +14,16 @@ use mptp_rpc_core::x_deps::buffex::{
 };
 use tokio::time::timeout;
 
-type Ring = RingBuffer<Box<[u8]>>;
-type Tx = RingTx<Arc<Ring>, Box<[u8]>>;
-type Rx = RingRx<Arc<Ring>, Box<[u8]>>;
+type Ring = RingBuffer<Box<[MaybeUninit<u8>]>>;
+type Tx = RingTx<Arc<Ring>, Box<[MaybeUninit<u8>]>>;
+type Rx = RingRx<Arc<Ring>, Box<[MaybeUninit<u8>]>>;
 
 const RING_CAP: usize = 64 * 1024;
 const CHUNK: usize = 32 * 1024;
 
 fn new_pair() -> (Tx, Rx) {
     let ring = Arc::new(
-        RingBuffer::try_new(Box::from(vec![0u8; RING_CAP])).expect("ring"),
+        RingBuffer::try_new(Box::new_uninit_slice(RING_CAP)).expect("ring"),
     );
     RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)
         .expect("split")

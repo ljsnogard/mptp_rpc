@@ -15,7 +15,7 @@
 //! - 两个后台任务拥有 ring 的另一半；当 channel 被 drop 时 abort 后台任务，
 //!   避免流泄漏。
 
-use std::sync::Arc;
+use std::{mem::MaybeUninit, sync::Arc};
 
 use iroh::endpoint::{RecvStream, SendStream};
 
@@ -38,15 +38,15 @@ use mptp_rpc_core::{
 
 use crate::conn::IrohConnError;
 
-/// 发送方向 ring 的类型：底层存储是 `Box<[u8]>`，通过 `Arc` 共享给前后台。
-type SendRing = RingBuffer<Box<[u8]>>;
-type SendTx = RingTx<Arc<SendRing>, Box<[u8]>>;
-type SendRx = RingRx<Arc<SendRing>, Box<[u8]>>;
+/// 发送方向 ring 的类型：底层存储是 `Box<[MaybeUninit<u8>]>`，通过 `Arc` 共享给前后台。
+type SendRing = RingBuffer<Box<[MaybeUninit<u8>]>>;
+type SendTx = RingTx<Arc<SendRing>, Box<[MaybeUninit<u8>]>>;
+type SendRx = RingRx<Arc<SendRing>, Box<[MaybeUninit<u8>]>>;
 
 /// 接收方向 ring 的类型。
-type RecvRing = RingBuffer<Box<[u8]>>;
-type RecvTx = RingTx<Arc<RecvRing>, Box<[u8]>>;
-type RecvRx = RingRx<Arc<RecvRing>, Box<[u8]>>;
+type RecvRing = RingBuffer<Box<[MaybeUninit<u8>]>>;
+type RecvTx = RingTx<Arc<RecvRing>, Box<[MaybeUninit<u8>]>>;
+type RecvRx = RingRx<Arc<RecvRing>, Box<[MaybeUninit<u8>]>>;
 
 /// ring 的默认容量。
 ///
@@ -98,7 +98,7 @@ impl TrChannel for IrohChannel {
 
 fn new_ring_buff_pair() -> (SendTx, SendRx) {
     let ring = Arc::new(
-        RingBuffer::try_new(Box::from(vec![0u8; RING_CAPACITY]))
+        RingBuffer::try_new(Box::new_uninit_slice(RING_CAPACITY))
             .expect("send ring capacity must be valid"),
     );
     RingBuffer::try_split_shared(ring, Arc::strong_count, Arc::weak_count)

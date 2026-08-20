@@ -16,7 +16,10 @@
 //! `ServiceChannel` 实现 [`TrChannel`]，因此可以像真实传输层一样 `split()` 出
 //! 服务端视角的 `Tx`（回复）和 `Rx`（请求）。
 
-use std::sync::Arc;
+use std::{
+    mem::MaybeUninit,
+    sync::Arc,
+};
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
@@ -29,15 +32,15 @@ use buffex::{
 
 use crate::transport::TrChannel;
 
-type Ring = RingBuffer<Box<[u8]>>;
-type TxHalf = RingTx<Arc<Ring>, Box<[u8]>>;
-type RxHalf = RingRx<Arc<Ring>, Box<[u8]>>;
+type Ring = RingBuffer<Box<[MaybeUninit<u8>]>>;
+type TxHalf = RingTx<Arc<Ring>, Box<[MaybeUninit<u8>]>>;
+type RxHalf = RingRx<Arc<Ring>, Box<[MaybeUninit<u8>]>>;
 
 /// 默认 ring 容量，足够测试和小型消息使用。
 const RING_CAPACITY: usize = 64 * 1024;
 
 fn new_ring() -> Ring {
-    RingBuffer::try_new(Box::from(vec![0u8; RING_CAPACITY]))
+    RingBuffer::try_new(Box::new_uninit_slice(RING_CAPACITY))
         .expect("in-memory ring capacity must be valid")
 }
 
