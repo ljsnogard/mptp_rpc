@@ -1,6 +1,18 @@
 [workspace]
 resolver = "3"
 members = [
+    "external/abs_buff",
+    "external/abs_buff_stdio_adapt",
+    "external/abs_buff_tokio_adapt",
+    "external/abs_cancel",
+    "external/abs_iter",
+    "external/abs_sync",
+    "external/atomex",
+    "external/atomic_sync",
+    "external/buffex",
+    "external/gen_mcf_macro",
+    "external/gen_mcf_test",
+
     "crates/rpc_core",
     "crates/rpc_transport_iroh",
     "crates/rpc_cs_demo",
@@ -10,8 +22,12 @@ members = [
 edition = "2024"
 authors = ["lino <lino_snsalias@outlook.com>"]
 
-# segm_buff 依赖的 abs_buff 指向 github 镜像（ljsnogard/abs_buff），
-# 而本工作区使用 gitee 源（lino_snsalias/abs_buff）。两者若各自解析会形成
-# 两个不同的 crate 实例，导致 trait 无法统一；这里把 github 源统一改指到 gitee。
-# [patch."https://github.com/ljsnogard/abs_buff.git"]
-# abs_buff = { path = "../cantare/crates/abs_buff" }
+[workspace.dependencies]
+funty = { version = "3.0.0-rc2", default-features = false }
+pin-project = { version = "1.1.*" }
+pin-utils = { version = "*" }
+env_logger = { version = "0.11.*" }
+log = { version = "0.4.*" }
+futures-lite = { version = "2" }
+compio = { version = "0.19.*", features = ["fs", "macros", "time"] }
+thiserror = { version = "2.0", default-features = false }

@@ -17,18 +17,23 @@
 
 use std::sync::Arc;
 
-use abs_buff_tokio_adapt::{ReadAsInput, WriteAsOutput};
 use iroh::endpoint::{RecvStream, SendStream};
+
+use abs_buff::{
+    Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
+    x_deps::anylr,
+};
+use abs_buff_tokio_adapt::{ReadAsInput, WriteAsOutput};
+use abs_cancel::{NonCancellableToken, TrMayCancel};
+use anylr::SomeOf;
+use buffex::{
+    ring_buffer::{RingBuffer, RingRx, RingTx},
+    x_deps::{abs_buff, abs_cancel}
+};
+
 use mptp_rpc_core::{
     transport::TrChannel,
-    x_deps::buffex::{
-        ring_buffer::{RingBuffer, RingRx, RingTx},
-        x_deps::{
-            abs_buff::{Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite},
-            abs_cancel::{NonCancellableToken, TrMayCancel},
-            anylr::SomeOf,
-        },
-    },
+    x_deps::buffex,
 };
 
 use crate::conn::IrohConnError;

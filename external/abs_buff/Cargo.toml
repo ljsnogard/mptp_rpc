@@ -1,0 +1,28 @@
+[package]
+edition = "2024"
+name = "abs_buff"
+version = "0.3.0"
+
+description = "ABStraction of BUFFered IO"
+repository = "https://github.com/ljsnogard/abs_buff"
+keywords = ["IO", "buffer"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+anylr = { git = "https://gitee.com/lino_snsalias/anylr.rs.git", branch = "dev/0.2.0" }
+
+abs_iter = { path = "../abs_iter" }
+abs_cancel = { path = "../abs_cancel" }
+gen_mcf_macro = { path = "../gen_mcf_macro" }
+
+funty = { workspace = true }
+
+[features]
+std_write = []
+std_read = []
+std_io = ["std_read", "std_write"]
+
+# 编译 `buffer::segm_tests` 泛型段测试模块，供依赖方在测试中使用。
+segm-tests = []

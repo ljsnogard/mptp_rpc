@@ -25,13 +25,15 @@ impl ServiceCancelToken {
         false
     }
 
-    pub fn cancellation(&mut self) -> impl IntoFuture {
+    pub fn cancellation(&mut self) -> future::Pending<()> {
         // 当前不可取消，因此返回一个永远不会完成的 future。
         future::pending::<()>()
     }
 }
 
 impl TrCancellationToken for ServiceCancelToken {
+    type Cancellation = future::Pending<()>;
+
     #[inline]
     fn can_be_cancelled(&self) -> bool {
         ServiceCancelToken::can_be_cancelled(self)
@@ -41,7 +43,7 @@ impl TrCancellationToken for ServiceCancelToken {
         ServiceCancelToken::is_cancelled(self)
     }
 
-    fn cancellation(&mut self) -> impl IntoFuture {
+    fn cancellation(&mut self) -> Self::Cancellation {
         ServiceCancelToken::cancellation(self)
     }
 

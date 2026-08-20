@@ -11,7 +11,7 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-abs_buff_tokio_adapt = { path = "../../../cantare/crates/abs_buff_tokio_adapt" }
+abs_buff_tokio_adapt = { path = "../../external/abs_buff_tokio_adapt" }
 mptp_rpc_core = { path = "../rpc_core" }
 
 anyhow = "1"

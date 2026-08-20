@@ -11,8 +11,8 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-abs_buff_stdio_adapt = { path = "../../../cantare/crates/abs_buff_stdio_adapt" }
-buffex = { path = "../../../cantare/crates/buffex" }
+abs_buff_stdio_adapt = { path = "../../external/abs_buff_stdio_adapt" }
+buffex = { path = "../../external/buffex" }
 
 serde = { version = "1.0.*", features = ["derive"] }
 rmp-serde = { version = "1.3.*" }
