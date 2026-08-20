@@ -75,8 +75,8 @@ impl IrohChannel {
 
         // 后台任务持有 ring 的另一半；channel 被 drop 时，发送 ring 的 tx 会关闭，
         // send pump 会在排空数据后自然结束，从而让对端读到 EOF。
-        tokio::spawn(send_pump(send, send_rx));
-        tokio::spawn(recv_pump(recv, recv_tx));
+        tokio::task::spawn_local(send_pump(send, send_rx));
+        tokio::task::spawn_local(recv_pump(recv, recv_tx));
 
         IrohChannel { send_tx_, recv_rx_ }
     }
@@ -249,8 +249,10 @@ impl IrohSend<'_> {
 
 impl TrBuffWrite for IrohSend<'_> {
     type SegmMut<'a> = <SendTx as TrBuffWrite>::SegmMut<'a> where Self: 'a;
-
     type Err = <SendTx as TrBuffWrite>::Err;
+
+    type WriteAsync<'f> = <SendTx as TrBuffWrite>::WriteAsync<'f>
+        where Self: 'f;
 
     fn is_blocked_closing(&self) -> bool {
         self.0.is_blocked_closing()
@@ -259,7 +261,7 @@ impl TrBuffWrite for IrohSend<'_> {
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmMut<'f>, Self::Err>> {
+    ) -> Self::WriteAsync<'f> {
         <SendTx as TrBuffWrite>::write_async(self.0, demand)
     }
 }
@@ -302,11 +304,10 @@ impl IrohRecv<'_> {
 }
 
 impl TrBuffRead for IrohRecv<'_> {
-    type SegmRef<'a>
-        = <RecvRx as TrBuffRead>::SegmRef<'a>
-    where
-        Self: 'a;
+    type SegmRef<'a> = <RecvRx as TrBuffRead>::SegmRef<'a> where Self: 'a;
     type Err = <RecvRx as TrBuffRead>::Err;
+
+    type ReadAsync<'f> = <RecvRx as TrBuffRead>::ReadAsync<'f> where Self: 'f;
 
     fn is_drained_closing(&self) -> bool {
         // 对调用方而言，“不会再有数据”= 接收 ring 的写入端（recv pump）已关闭，
@@ -317,7 +318,7 @@ impl TrBuffRead for IrohRecv<'_> {
     fn read_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = SomeOf<Self::SegmRef<'f>, Self::Err>> {
+    ) -> Self::ReadAsync<'f> {
         <RecvRx as TrBuffRead>::read_async(self.0, demand)
     }
 }

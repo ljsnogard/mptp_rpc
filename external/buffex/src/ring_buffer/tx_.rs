@@ -7,12 +7,7 @@ use core::{
     ops::DerefMut,
 };
 
-use anylr::SomeOf;
-
-use abs_buff::{
-    x_deps::{anylr, abs_cancel},
-    Demand, TrBuffTryWrite, TrBuffWrite,
-};
+use abs_buff::{x_deps::anylr::SomeOf, Demand, TrBuffTryWrite, TrBuffWrite};
 
 use super::{
     error_::TxError,
@@ -154,6 +149,7 @@ where
     H: Borrow<RingBuffer<B, T>>,
     B: DerefMut<Target = [T]>,
 {
+    type WriteAsync<'f> = WriteAsync<'f, H, B, T> where Self: 'f;
     type SegmMut<'a> = ReclSliceMut<'a, T> where Self: 'a;
     type Err = TxError<usize>;
 
@@ -166,9 +162,7 @@ where
     fn write_async<'f>(
         &'f mut self,
         demand: &Demand<usize>,
-    ) -> impl abs_cancel::TrMayCancel<'f, MayCancelOutput =
-        SomeOf<Self::SegmMut<'f>, Self::Err>>
-    {
+    ) -> Self::WriteAsync<'f> {
         RingTx::write_async(self, demand)
     }
 }

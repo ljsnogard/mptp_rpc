@@ -1,6 +1,6 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
-#![feature(async_fn_traits)]
+// #![feature(async_fn_traits)]
 //! MPTP over Iroh / QUIC 的传输层实现。
 //!
 //! 这个 crate 对应 README 中的 L1（通道抽象层）：
