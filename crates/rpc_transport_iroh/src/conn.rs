@@ -105,6 +105,10 @@ impl IrohConnection {
     ///
     /// 一个 `IrohConnection` 可以多次调用本方法，分别得到独立的 channel，
     /// 对应 MPTP 中并发的 stream / session。
+    ///
+    /// 注意：`IrohChannel` 的后台 pump 用 `tokio::task::spawn_local` 启动，
+    /// 因此本方法以及后续对 channel 的操作都必须在 `tokio::task::LocalSet`
+    /// 里执行（例如 `LocalSet::new().run_until(...).await`）。
     pub async fn accept_channel_async(&self) -> Result<IrohChannel, IrohConnError> {
         let (send, recv) = self
             .conn_
@@ -135,6 +139,9 @@ impl IrohConnection {
 }
 
 /// 打开一条双向流（生成宏包装的可取消未来）。
+///
+/// 注意：`IrohChannel::new` 用 `spawn_local` 启动后台 pump，因此本函数返回的
+/// future 被 `.await` 时，调用方必须在 `tokio::task::LocalSet` 上下文里。
 #[gen_may_cancel_future(IrohOpenChannel)]
 async fn iroh_open_channel_async_<'f, C>(
     conn: &'f IrohConnection,

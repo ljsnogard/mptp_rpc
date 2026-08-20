@@ -37,7 +37,13 @@
 //! 下面的 doctest 用于“测出”当前 `abs_buff` 的 segment 异步搬移 future
 //! 不是 `Send` 的问题：`SegmMut::move_items_from_input_async` /
 //! `SegmRef::move_items_to_output_async` 生成的 future 无法放进
-//! `tokio::spawn`，因此不能直接作为 IrohChannel 的后台 pump 使用。
+//! `tokio::spawn`（rustc 报 “implementation is not general enough”，参见
+//! rust-lang/rust#100013 与 #130113）。
+//!
+//! 本 crate 的解决方式是：`IrohChannel` 的后台 pump 改用
+//! `tokio::task::spawn_local`（不要求 `Send`），代价是所有用到
+//! `IrohConnection` / `IrohChannel` 的代码都必须运行在 `tokio::task::LocalSet`
+//! 里（如 `LocalSet::new().run_until(...).await`）。
 //!
 //! ```compile_fail
 //! use std::{mem::MaybeUninit, pin::Pin};
