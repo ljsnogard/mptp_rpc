@@ -65,8 +65,7 @@ impl<S, N> Eq for StrOrNum<S, N>
 where
     S: Borrow<str> + Clone + Debug,
     N: funty::Unsigned,
-{
-}
+{}
 
 impl<S, N> PartialOrd for StrOrNum<S, N>
 where
@@ -110,16 +109,19 @@ impl StdHeaderKey {
     //-------------------------------------------------------------------------
 
     /// 保留
-    pub const Reserved  : StdHeaderKey = StdHeaderKey::new(0xA0);
+    pub const Reserved    : StdHeaderKey = StdHeaderKey::new(0xA0);
 
     /// 请求体或者回复体中的数据长度，值类型应该是能转成数字的字符串
-    pub const Body_Size : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x01);
+    pub const Body_Size   : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x01);
 
     /// 请求体或者回复体中的数据 MIME 类型
-    pub const Body_Type : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x02);
+    pub const Body_Type   : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x02);
+
+    /// 进一步指明数据期待的反序列化类型，值类型应该是一个字符串，常用 UUID 或者 Hex
+    pub const Data_Type_Id: StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x03);
 
     /// 指明本报文创建的日期和时间，值类型应该是关于日期的字符串
-    pub const Created_At: StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x03);
+    pub const Created_At : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x04);
 
     //-------------------------------------------------------------------------
     // 客户端常用的标准请求头 0xB0 - 0xCF 保留了 32 个位置供扩展
@@ -193,7 +195,11 @@ impl StdHeaderVal {
     pub const Mime_Body_Type_MsgPack: StdHeaderVal = StdHeaderVal(0x01);
     pub const Mime_Body_Type_Json   : StdHeaderVal = StdHeaderVal(0x02);
 
-    pub const User_Rpc_Client: StdHeaderVal = StdHeaderVal(0x10);
+    /// 表明客户端的主要目的是调用 RPC
+    pub const User_Rpc_Client       : StdHeaderVal = StdHeaderVal(0x10);
+
+    /// 表明客户端的主要目的是代理
+    pub const User_Proxy_Client     : StdHeaderVal = StdHeaderVal(0x11);
 }
 
 impl StdHeaderVal {

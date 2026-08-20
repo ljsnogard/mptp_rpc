@@ -27,12 +27,8 @@ pub trait TrMuxConn {
 
 /// A channel is a pair of streams with opposite data flow directions.
 pub trait TrChannel {
-    type Tx<'f>: TrBuffTryWrite
-    where
-        Self: 'f;
-    type Rx<'f>: TrBuffTryRead
-    where
-        Self: 'f;
+    type Tx<'f>: TrBuffTryWrite where Self: 'f;
+    type Rx<'f>: TrBuffTryRead where Self: 'f;
 
     fn split(&mut self) -> (Self::Tx<'_>, Self::Rx<'_>);
 }

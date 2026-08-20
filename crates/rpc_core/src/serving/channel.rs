@@ -23,8 +23,9 @@ use std::{
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
-    x_deps::{abs_cancel::TrMayCancel, anylr::SomeOf},
+    x_deps::anylr,
 };
+use anylr::SomeOf;
 use buffex::{
     ring_buffer::{RingBuffer, RingRx, RingTx},
     x_deps::abs_buff,

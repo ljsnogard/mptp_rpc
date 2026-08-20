@@ -183,6 +183,12 @@ impl HandlerChain {
     }
 }
 
+impl Default for HandlerChain {
+    fn default() -> Self {
+        HandlerChain::new()
+    }
+}
+
 impl TrReqHandler for HandlerChain {
     #[inline]
     fn handle_async<'f>(

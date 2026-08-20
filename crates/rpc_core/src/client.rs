@@ -86,18 +86,22 @@ impl RequestBuilder {
         Self::new().method(M::method())
     }
 
-    pub fn method(mut self, access_method: AccessMethod) -> Self {
-        self.0.method = Option::Some(access_method);
+    pub fn method(mut self, method: AccessMethod) -> Self {
+        self.0.method = Option::Some(method);
         self
     }
 
-    pub fn path(mut self, path: &str) -> Self {
-        self.0.path = Option::Some(path.to_string());
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.0.path = Option::Some(path.into());
         self
     }
 
-    pub fn headers(self, headers: Headers) -> Self {
-        todo!()
+    pub fn headers(mut self, headers: impl TryInto<Headers>) -> Self {
+        let Result::Ok(headers) = headers.try_into() else {
+            return self;
+        };
+        self.0.headers = Option::Some(headers);
+        self
     }
 
     pub fn body<T>(self, body: T) -> Self
