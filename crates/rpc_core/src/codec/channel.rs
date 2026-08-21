@@ -1,20 +1,20 @@
-//! 服务端内存 Channel 与客户端模拟 Channel。
+//! 内存回环 Channel。
 //!
-//! 这个模块提供不依赖网络的 `ServiceChannel` / `ClientChannel` 对，用于：
+//! 这个模块提供不依赖网络的 [`RpcChannel`]，用于：
 //!
-//! - 在测试中直接模拟客户端和服务端收发请求；
+//! - 在测试中直接模拟一次请求/回复的完整收发；
 //! - 让 handler 在纯内存环境里读写请求体 / 回复体；
-//! - 后续接入真实传输层时，`ServiceChannel` 可以替换为 Iroh/QUIC Channel。
+//! - 后续接入真实传输层时，`RpcChannel` 可以替换为 Iroh/QUIC Channel。
 //!
 //! # 设计
 //!
-//! 每一对 `(ServiceChannel, ClientChannel)` 内部包含两个 ring buffer：
+//! [`RpcChannel`] 内部使用一个 ring buffer：
 //!
-//! - `request ring`：客户端 `ClientChannel.tx` 写入请求，服务端 `ServiceChannel.rx` 读取；
-//! - `response ring`：服务端 `ServiceChannel.tx` 写入回复，客户端 `ClientChannel.rx` 读取。
+//! - `split()` 返回的 `Tx` 写入数据；
+//! - `split()` 返回的 `Rx` 读回数据。
 //!
-//! `ServiceChannel` 实现 [`TrChannel`]，因此可以像真实传输层一样 `split()` 出
-//! 服务端视角的 `Tx`（回复）和 `Rx`（请求）。
+//! 这样单个 [`RpcChannel`] 就能在测试中同时扮演“发送方”和“接收方”，
+//! 适合当前请求/回复一问一答的 Demo 场景。
 
 use std::{
     mem::MaybeUninit,
@@ -51,18 +51,22 @@ fn split_ring() -> (TxHalf, RxHalf) {
         .expect("new ring must be uniquely owned")
 }
 
-/// 服务端视角的内存 Channel。
+/// 内存回环 Channel。
 pub struct RpcChannel {
-    /// 服务端 -> 客户端（回复）。
+    /// 写入半通道。
     tx_: TxHalf,
-    /// 客户端 -> 服务端（请求）。
+    /// 读取半通道。
     rx_: RxHalf,
 }
 
 impl RpcChannel {
-    /// 创建一个新的服务端/客户端内存 Channel 对。
+    /// 创建一个内存回环 Channel。
+    ///
+    /// 写入 `split()` 返回的 `Tx` 的数据，可以从同一次 `split()` 返回的 `Rx`
+    /// 读回；适合在测试和 Demo 中模拟一次请求/回复的完整收发。
     pub fn new_pair() -> RpcChannel {
-        todo!()
+        let (tx, rx) = split_ring();
+        RpcChannel { tx_: tx, rx_: rx }
     }
 }
 

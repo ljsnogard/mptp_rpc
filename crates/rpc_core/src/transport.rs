@@ -31,4 +31,10 @@ pub trait TrChannel {
     type Rx<'f>: TrBuffTryRead where Self: 'f;
 
     fn split(&mut self) -> (Self::Tx<'_>, Self::Rx<'_>);
+
+    /// 关闭当前 channel 的写入方向。
+    ///
+    /// 对于无请求体 / 无后续 push 的简单 RPC，客户端写完请求头后应调用本方法，
+    /// 让服务端能通过 EOF 感知“请求已经完整发送”。默认实现为空操作。
+    fn close_write(&mut self) {}
 }

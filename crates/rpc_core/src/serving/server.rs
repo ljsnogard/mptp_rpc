@@ -2,13 +2,13 @@
 //!
 //! [`Server`] 负责：
 //!
-//! 1. 从 [`ServiceChannel`] 解码 `Request`；
+//! 1. 从 [`RpcChannel`] 解码 `Request`；
 //! 2. 使用路由表找到对应的 [`HandlerChain`]；
 //! 3. 调用 `HandlerChain` 让请求按顺序经过感兴趣的 handler；
 //! 4. 如果 handler 通过 `FlowCtrl` 返回了一个 `Response`，则把回复头写回 channel。
 //!
 //! 当前版本面向“代码内直接模拟客户端/服务端收发”的测试场景，
-//! 因此直接操作内存 [`ServiceChannel`]，不依赖具体网络传输。
+//! 因此直接操作内存 [`RpcChannel`]，不依赖具体网络传输。
 
 use std::io;
 
@@ -54,7 +54,7 @@ impl From<io::Error> for ServeError {
 
 /// 基础服务器组件：负责“从 channel 解码请求 → 路由 → 调用 handler”。
 ///
-/// 它不关心具体网络传输，只依赖内存 [`ServiceChannel`]。
+/// 它不关心具体网络传输，只依赖内存 [`RpcChannel`]。
 /// 更高级的功能（连接管理、多路复用循环、鉴权、中间件等）可以在它之上继续构建。
 pub struct Server {
     router_: Router,
@@ -74,7 +74,7 @@ impl Server {
     /// 在一条内存 channel 上处理一个请求。
     ///
     /// 流程：
-    /// 1. 从 `ServiceChannel` 解码 `Request` 头；
+    /// 1. 从 `RpcChannel` 解码 `Request` 头；
     /// 2. 用路由表找到匹配的 `HandlerChain`；
     /// 3. 调用 `HandlerChain` 让请求依次经过 handler；
     /// 4. 若 handler 返回 `SkipRest(Some(resp))` 或 `Ceased(Some(resp))`，
@@ -88,7 +88,7 @@ impl Server {
         C: TrCancellationToken + Clone,
     {
         // 1. 解码请求头。请求体 / suffix stream 由 handler 从 channel 中读取。
-        let prefix: messaging::request::ReqPrefix = {
+        let prefix = {
             let (_tx, mut rx) = channel.split();
             let opt_prefix = messaging::request::recv_request_prefix_async(&mut rx, cancel).await;
             match opt_prefix {

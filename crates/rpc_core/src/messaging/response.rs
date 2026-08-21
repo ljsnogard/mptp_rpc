@@ -1,12 +1,14 @@
-use core:: mem::MaybeUninit;
-use std::slice;
+use std::{mem::MaybeUninit, slice};
 
 use serde::Serialize;
 
-use abs_buff::{TrBuffTryRead, TrBuffTryWrite};
+use abs_buff::{
+    Demand, TrBuffTryRead, TrBuffTryWrite,
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
+};
 use abs_buff_stdio_adapt::AsStdRead;
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-use buffex::x_deps::{abs_buff::{self, Demand, buffer::TrBuffSegmMut}, abs_cancel};
+use buffex::x_deps::{abs_buff, abs_cancel};
 
 use crate::{
     messaging,
@@ -68,6 +70,7 @@ where
 /// Receive and deserialize the request prefix from stream
 pub(crate) async fn recv_response_prefix_async<'f, TyRx, TyTok>(
     rx: &'f mut TyRx,
+    siz: usize, // 解析状态和头部的最大长度，超过就丢弃
     tok: &'f mut TyTok,
 ) -> Result<RespPrefix, std::io::Error>
 where
@@ -82,6 +85,7 @@ where
         R: TrBuffTryRead,
         C: TrCancellationToken + Clone,
     {
+        // FIXME: decoding using AsStdRead is buggy.
         let mut std_read = AsStdRead::new(r, c);
         let des_status = rmp_serde::from_read::<_, specs::Status>(&mut std_read);
         let status = match des_status {

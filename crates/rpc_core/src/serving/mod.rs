@@ -6,8 +6,8 @@
 //! - [`handler::HandlerChain`]：把多个 handler 串成链，让同一个请求有机会
 //!   按顺序被感兴趣的 handler 处理；
 //! - [`server::Server`]：基础服务器组件，负责解码请求、路由、调用链、写回回复；
-//! - [`channel::ServiceChannel`] / [`channel::ClientChannel`]：用于在代码内
-//!   模拟客户端和服务端收发请求的内存 channel。
+//! - [`crate::codec::channel::RpcChannel`]：用于在代码内模拟一次请求/回复
+//!   收发的内存回环 channel。
 //!
 //! # 与 Salvo 的对应关系
 //!

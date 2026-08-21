@@ -27,7 +27,7 @@ pub enum ClientError {
     Cancelled,
 
     #[error("no connection available for client")]
-    ConnectionLost,
+    ConnectionLost(String),
 
     #[error("Error occurs during sending request: {0}")]
     ReqErr(String),
@@ -76,18 +76,22 @@ where
     TyTok: TrCancellationToken + Clone,
 {
     let Option::Some(conn) = &client.conn_ else {
-        return Result::Err(ClientError::ConnectionLost);
+        return Result::Err(ClientError::ConnectionLost("client has no connection".to_string()));
     };
     let Result::Ok(mut channel) = conn.open_channel_async().may_cancel_with(cancel).await else {
-        return Result::Err(ClientError::ConnectionLost);
+        return Result::Err(ClientError::ConnectionLost("failed opening channel".to_string()));
     };
     let (mut tx, _) = channel.split();
     let send_prefix_res = messaging::request::send_request_prefix_async(request, &mut tx, cancel).await;
     match send_prefix_res {
-        Result::Err(_err) => return Result::Err(ClientError::ConnectionLost),
+        Result::Err(err) => {
+            let info = format!("send request err({})", err);
+            return Result::Err(ClientError::ConnectionLost(info));
+        },
         Result::Ok(_c) => (),
     };
     drop(tx);
+    channel.close_write();
     let session = Session::new(request, channel);
     Result::Ok(session)
 }

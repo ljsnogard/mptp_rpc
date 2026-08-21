@@ -90,6 +90,10 @@ impl TrChannel for IrohChannel {
     fn split(&mut self) -> (Self::Tx<'_>, Self::Rx<'_>) {
         (IrohSend(&mut self.send_tx_), IrohRecv(&mut self.recv_rx_))
     }
+
+    fn close_write(&mut self) {
+        self.send_tx_.close();
+    }
 }
 
 // ---------------------------------------------------------------------------

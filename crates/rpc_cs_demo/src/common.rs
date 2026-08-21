@@ -5,12 +5,12 @@ use std::io::Write;
 use abs_buff::gen_may_cancel_future;
 use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use buffex::x_deps::{abs_buff, abs_cancel};
 use mptp_rpc_core::{
     access_method::AccessMethod,
     client::Client,
-    codec::channel::{RpcChannel, RpcRx, RpcTx},
+    codec::channel::RpcChannel,
     messaging::{Request, Response},
     routing::prefix_router::Router,
     serving::{
@@ -18,7 +18,7 @@ use mptp_rpc_core::{
         server::{Server, SessionContext},
     },
     specs::Status,
-    transport::{TrChannel, TrMuxConn},
+    transport::TrChannel,
     x_deps::{abs_buff_stdio_adapt, buffex},
 };
 use mptp_rpc_transport_iroh::{IrohChannel, IrohConnection};
@@ -78,9 +78,9 @@ pub(crate) fn build_server() -> Server {
 ///
 /// 桥接流程：
 /// 1. 从 iroh 读半通道读取客户端发来的完整请求字节；
-/// 2. 把请求字节写入内存 `ClientChannel`；
-/// 3. 调用 core `Server` 在内存 `ServiceChannel` 上处理；
-/// 4. 从内存 `ClientChannel` 读出回复字节；
+/// 2. 把请求字节写入内存 RpcChannel；
+/// 3. 调用 core `Server` 在同一内存 RpcChannel 上处理；
+/// 4. 从同一内存 RpcChannel 读出回复字节；
 /// 5. 把回复字节写回 iroh 写半通道并关闭，让客户端读到 EOF。
 pub(crate) async fn serve_iroh_channel(server: &Server, mut channel: IrohChannel) -> Result<()> {
     // 1. 读取请求字节。
@@ -92,19 +92,19 @@ pub(crate) async fn serve_iroh_channel(server: &Server, mut channel: IrohChannel
     };
 
     // 2. 把请求交给内存 server。
-    let (mut service_channel, mut client_channel) = RpcChannel::new_pair();
+    let mut memory_channel = RpcChannel::new_pair();
     {
-        let mut client_tx = client_channel.split_tx();
+        let (mut client_tx, _client_rx) = memory_channel.split();
         let mut writer = AsStdWrite::new(&mut client_tx, NonCancellableToken::shared_mut());
         writer.write_all(&request_bytes)?;
     }
     server
-        .serve_channel_async(&mut service_channel, NonCancellableToken::shared_mut())
+        .serve_channel_async(&mut memory_channel, NonCancellableToken::shared_mut())
         .await?;
 
     // 3. 读取内存回复。
     let response_bytes = {
-        let mut client_rx = client_channel.split_rx();
+        let (_client_tx, mut client_rx) = memory_channel.split();
         let mut reader = AsStdRead::new(&mut client_rx, NonCancellableToken::shared_mut());
         // 内存 channel 没有 EOF 概念，这里按“单次读取”处理；Demo 的回复很小。
         let mut buf = [0u8; 4096];
@@ -124,21 +124,16 @@ pub(crate) async fn client_roundtrip(
     conn: IrohConnection,
     request: Request,
 ) -> Result<Response> {
-    let mut channel = conn
-        .open_channel_async()
-        .may_cancel_with(NonCancellableToken::shared_mut())
-        .await?;
-
     let client = Client::new(&conn);
-    let opt_sess = client.request_async(&request).await;
-    let Result::Ok(mut session) = opt_sess else {
-        todo!()
-    };
+    let mut session = client
+        .request_async(&request)
+        .await
+        .map_err(|e| anyhow!("send request failed: {e}"))?;
 
-    let opt_resp = session.recv_response_async().await;
-    let Result::Ok(prefix) = opt_resp else {
-        todo!()
-    };
+    let prefix = session
+        .recv_response_async()
+        .await
+        .map_err(|e| anyhow!("receive response failed: {e}"))?;
     let response = Response::new(prefix.0);
     Ok(response)
 }

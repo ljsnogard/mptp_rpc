@@ -35,13 +35,15 @@ where
     pub fn recv_response_async<'f>(
         &'f mut self,
     ) -> SessionRecvRespAsync<'a, 'f, TyReq, TyChan> {
-        SessionRecvRespAsync(self)
+        const MAX_LEN: usize = 1024;
+        SessionRecvRespAsync(self, MAX_LEN)
     }
 }
 
 #[gen_may_cancel_future(SessionRecvResp)]
 async fn sess_recv_resp_async_<'a, 'f, TyReq, TyChan, TyTok>(
     session: &'f mut Session<'a, TyReq, TyChan>,
+    max_len: usize,
     cancel: &'f mut TyTok,
 ) -> Result<RespPrefix, ClientError>
 where
@@ -50,5 +52,14 @@ where
     TyChan: TrChannel,
     TyTok: TrCancellationToken + Clone,
 {
-    Result::Err(ClientError::ConnectionLost)
+    let (_, mut rx) = session.channel_.split();
+    let recv_res = messaging::response::recv_response_prefix_async(&mut rx, max_len, cancel).await;
+    let resp = match recv_res {
+        Result::Err(err) => {
+            let info = format!("Error ({}) in receiving response", err);
+            return Result::Err(ClientError::ConnectionLost(info))
+        },
+        Result::Ok(resp) => resp,
+    };
+    Result::Ok(resp)
 }
