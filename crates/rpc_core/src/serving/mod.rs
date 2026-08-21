@@ -17,7 +17,6 @@
 //!
 //! 当前实现先面向“代码内直接模拟收发”的测试场景，后续可以再接入真实传输层。
 
-pub mod channel;
 pub mod handler;
 pub mod server;
 

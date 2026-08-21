@@ -9,10 +9,11 @@ use anyhow::Result;
 use buffex::x_deps::{abs_buff, abs_cancel};
 use mptp_rpc_core::{
     access_method::AccessMethod,
+    client::Client,
+    codec::channel::{RpcChannel, RpcRx, RpcTx},
     messaging::{Request, Response},
     routing::prefix_router::Router,
     serving::{
-        channel::ServiceChannel,
         handler::{FlowCtrl, HandlerChain, HandlerError, TrReqHandler},
         server::{Server, SessionContext},
     },
@@ -37,7 +38,7 @@ async fn handle_hello_async_<'f, C>(
     _method: AccessMethod,
     _location: &'f str,
     _headers: &'f mut mptp_rpc_core::specs::Headers,
-    _channel: &'f mut ServiceChannel,
+    _channel: &'f mut RpcChannel,
     _context: &'f mut SessionContext,
     _cancel: &'f mut C,
 ) -> Result<FlowCtrl, HandlerError>
@@ -53,7 +54,7 @@ impl TrReqHandler for HelloHandler {
         method: AccessMethod,
         location: &'f str,
         headers: &'f mut mptp_rpc_core::specs::Headers,
-        channel: &'f mut ServiceChannel,
+        channel: &'f mut RpcChannel,
         context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>> {
         HandleHelloAsync(self, method, location, headers, channel, context)
@@ -91,13 +92,12 @@ pub(crate) async fn serve_iroh_channel(server: &Server, mut channel: IrohChannel
     };
 
     // 2. 把请求交给内存 server。
-    let (mut service_channel, mut client_channel) = ServiceChannel::new_pair();
+    let (mut service_channel, mut client_channel) = RpcChannel::new_pair();
     {
         let mut client_tx = client_channel.split_tx();
         let mut writer = AsStdWrite::new(&mut client_tx, NonCancellableToken::shared_mut());
         writer.write_all(&request_bytes)?;
     }
-
     server
         .serve_channel_async(&mut service_channel, NonCancellableToken::shared_mut())
         .await?;
@@ -120,27 +120,25 @@ pub(crate) async fn serve_iroh_channel(server: &Server, mut channel: IrohChannel
 }
 
 /// 客户端通过 iroh channel 发送一个请求，并读取回复。
-pub(crate) async fn client_roundtrip(conn: IrohConnection, request: Request) -> Result<Response> {
+pub(crate) async fn client_roundtrip(
+    conn: IrohConnection,
+    request: Request,
+) -> Result<Response> {
     let mut channel = conn
         .open_channel_async()
         .may_cancel_with(NonCancellableToken::shared_mut())
         .await?;
 
-    // 发送请求并关闭发送端，让服务端读到 EOF。
-    let request_bytes = rmp_serde::to_vec(&request)?;
-    {
-        let (mut tx, _rx) = channel.split();
-        tx.write_all(&request_bytes).await?;
-        tx.close();
-    }
+    let client = Client::new(&conn);
+    let opt_sess = client.request_async(&request).await;
+    let Result::Ok(mut session) = opt_sess else {
+        todo!()
+    };
 
-    // 读取回复。
-    let mut response_bytes = Vec::new();
-    {
-        let (_tx, mut rx) = channel.split();
-        rx.read_to_end(&mut response_bytes).await?;
-    }
-
-    let response = rmp_serde::decode::from_slice(&response_bytes)?;
+    let opt_resp = session.recv_response_async().await;
+    let Result::Ok(prefix) = opt_resp else {
+        todo!()
+    };
+    let response = Response::new(prefix.0);
     Ok(response)
 }

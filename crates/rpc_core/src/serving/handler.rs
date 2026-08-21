@@ -24,12 +24,12 @@ use buffex::x_deps::{abs_buff, abs_cancel};
 
 use crate::{
     access_method::AccessMethod,
+    codec::channel::RpcChannel,
     messaging::Response,
     specs::Headers,
 };
 use super::{
     cancel_tok_::ServiceCancelToken,
-    channel::ServiceChannel,
     server::SessionContext,
 };
 
@@ -92,7 +92,7 @@ pub trait TrReqHandler {
         method: AccessMethod,
         location: &'f str,
         headers: &'f mut Headers,
-        channel: &'f mut ServiceChannel,
+        channel: &'f mut RpcChannel,
         context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>>;
 }
@@ -107,7 +107,7 @@ trait TrDynReqDispatch: Send + Sync {
         method: AccessMethod,
         location: &'f str,
         headers: &'f mut Headers,
-        channel: &'f mut ServiceChannel,
+        channel: &'f mut RpcChannel,
         context: &'f mut SessionContext,
         cancel: &'f mut TySvcCanTok,
     ) -> BoxedFuture<'f, Result<FlowCtrl, HandlerError>>;
@@ -122,7 +122,7 @@ where
         method  : AccessMethod,
         location: &'f str,
         headers : &'f mut Headers,
-        channel : &'f mut ServiceChannel,
+        channel : &'f mut RpcChannel,
         context : &'f mut SessionContext,
         cancel  : &'f mut TySvcCanTok,
     ) -> BoxedFuture<'f, Result<FlowCtrl, HandlerError>> {
@@ -175,7 +175,7 @@ impl HandlerChain {
         method: AccessMethod,
         location: &'f str,
         headers: &'f mut Headers,
-        channel: &'f mut ServiceChannel,
+        channel: &'f mut RpcChannel,
         context: &'f mut SessionContext,
     ) -> DispatchRequestAsync<'f> {
         let tok = TySvcCanTok::dummy_new();
@@ -196,7 +196,7 @@ impl TrReqHandler for HandlerChain {
         method: AccessMethod,
         location: &'f str,
         headers: &'f mut Headers,
-        channel: &'f mut ServiceChannel,
+        channel: &'f mut RpcChannel,
         context: &'f mut SessionContext,
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<FlowCtrl, HandlerError>> {
         // Simply called the
@@ -211,7 +211,7 @@ async fn dispatch_request_async_<'f, C>(
     method: AccessMethod,
     location: &'f str,
     headers: &'f mut Headers,
-    channel: &'f mut ServiceChannel,
+    channel: &'f mut RpcChannel,
     context: &'f mut SessionContext,
     mut cancel: TySvcCanTok,
     _dummy_: &'f mut C, // This is not used by design
