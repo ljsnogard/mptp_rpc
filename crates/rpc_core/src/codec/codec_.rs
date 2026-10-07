@@ -43,7 +43,11 @@ pub enum Codec {
 }
 
 impl Codec {
-    /// 将 `value` 编码为 body 字节，并写入到输出流
+    /// 将 `value` 编码为 body 字节，并写入到输出流。
+    ///
+    /// `W` 只要实现 `abs_buff::TrBuffTryWrite` 即可。`RpcChannel` 的写半通道
+    /// 和 `circular_buff` 的被动生产端都满足该 trait，因此 body codec 不依赖
+    /// 底层具体是 `ring_buffer` 还是 `circular_buff`。
     pub fn encode_async<T, W>(
         &self,
         value: &T,
@@ -62,6 +66,10 @@ impl Codec {
     }
 
     /// 从输入流中解码出 `T`。
+    ///
+    /// `R` 只要实现 `abs_buff::TrBuffTryRead` 即可。与 [`Codec::encode_async`]
+    /// 一样，底层缓冲实现被 `abs_buff` trait 屏蔽，`ring_buffer` → `circular_buff`
+    /// 的重构不需要改动这里。
     pub fn decode_async<T, R>(&self, read: &mut R) -> Result<T, CodecError>
     where
         T: DeserializeOwned,

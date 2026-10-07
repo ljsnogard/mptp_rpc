@@ -18,7 +18,11 @@ pub trait TrDecodeAsync: Any {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// 用于注册的编码函数的类型
+/// 用于注册的编码函数的类型。
+///
+/// 编码器把 `data` 序列化后写入 [`RpcTx`]——`RpcTx` 是 `RpcChannel` 的写半通道，
+/// 对外只暴露 `abs_buff` 的写接口。因此底层缓冲从 `ring_buffer` 换成
+/// `circular_buff` 后，注册的编码函数签名不需要变化。
 pub trait TrEncodeFn<T>
 where
     Self: TrEncodeAsync,
@@ -30,7 +34,11 @@ where
     ) -> CodecAsync<usize>;
 }
 
-/// 用于注册的解码函数的类型
+/// 用于注册的解码函数的类型。
+///
+/// 解码器从 [`RpcRx`] 读取 body 字节并反序列化为 `T`；与 [`TrEncodeFn`] 一样，
+/// [`RpcRx`] 的 `abs_buff` 读接口屏蔽了底层是 `ring_buffer` 还是 `circular_buff`，
+/// 所以重构不改变注册函数的签名。
 pub trait TrDecodeFn<T>
 where
     Self: TrDecodeAsync,
@@ -104,6 +112,10 @@ where
     }
 }
 
+/// 类型擦除后的编码器查找结果：指向已注册的 [`TrEncodeFn<T>`]。
+///
+/// 调用方拿到它后可以直接 [`Encode::encode_async`]，把数据写到内存 channel 的
+/// 写半通道上。
 pub struct Encode<'a, T>(&'a dyn TrEncodeFn<T>);
 
 impl<'a, T> Encode<'a, T>
@@ -119,6 +131,10 @@ where
     }
 }
 
+/// 类型擦除后的解码器查找结果：指向已注册的 [`TrDecodeFn<T>`]。
+///
+/// 调用方拿到它后可以直接 [`Decode::decode_async`]，从内存 channel 的读半通道
+/// 读取并反序列化。
 pub struct Decode<'a, T>(&'a dyn TrDecodeFn<T>);
 
 impl<'a, T> Decode<'a, T>

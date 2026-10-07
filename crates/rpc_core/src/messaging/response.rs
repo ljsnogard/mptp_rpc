@@ -48,8 +48,9 @@ where
         let err = "Zero bytes written during serialization.";
         return Result::Err(std::io::Error::other(err));
     }
+    let demand = Demand::less_than(size);
     let mut opt_segm = tx
-        .write_async(&Demand::less_than(size))
+        .write_async(&demand)
         .may_cancel_with(tok)
         .await;
     if let Option::Some(segm) = opt_segm.as_mut().pick_left() {

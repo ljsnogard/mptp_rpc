@@ -2,8 +2,8 @@
 
 use std::io::Write;
 
-use abs_buff::gen_may_cancel_future;
-use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
+use abs_buff::{Demand, TrBuffTryRead, gen_may_cancel_future};
+use abs_buff_stdio_adapt::AsStdWrite;
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use anyhow::{Result, anyhow};
 use buffex::x_deps::{abs_buff, abs_cancel};
@@ -103,13 +103,23 @@ pub(crate) async fn serve_iroh_channel(server: &Server, mut channel: IrohChannel
         .await?;
 
     // 3. 读取内存回复。
+    // 内存 channel 没有 EOF 概念，不能使用 AsStdRead 一直等到 buf 满或 EOF；
+    // 这里直接用 try_read 把当前已经写入 ring 的回复字节全部取走。
     let response_bytes = {
         let (_client_tx, mut client_rx) = memory_channel.split();
-        let mut reader = AsStdRead::new(&mut client_rx, NonCancellableToken::shared_mut());
-        // 内存 channel 没有 EOF 概念，这里按“单次读取”处理；Demo 的回复很小。
-        let mut buf = [0u8; 4096];
-        let n = reader.read(&mut buf)?;
-        buf[..n].to_vec()
+        let mut out = Vec::new();
+        loop {
+            let res = client_rx.try_read(&Demand::less_than(4096));
+            let Some(mut segm) = res.pick_left() else {
+                break;
+            };
+            let len = segm.least_count();
+            let mut tmp: Vec<core::mem::MaybeUninit<u8>> = Vec::with_capacity(len);
+            tmp.resize_with(len, core::mem::MaybeUninit::uninit);
+            let moved = unsafe { segm.move_items_to_buff(&mut tmp) };
+            out.extend(tmp[..moved].iter().map(|m| unsafe { m.assume_init_read() }));
+        }
+        out
     };
 
     // 4. 写回网络并关闭发送端。

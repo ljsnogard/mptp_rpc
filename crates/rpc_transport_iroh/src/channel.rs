@@ -19,18 +19,16 @@ use std::{mem::MaybeUninit, sync::Arc};
 
 use iroh::endpoint::{RecvStream, SendStream};
 
+use abs_art_bridge::Runtime;
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
     x_deps::anylr,
 };
-use abs_buff_tokio_adapt::{ReadAsInput, WriteAsOutput};
-use abs_cancel::{NonCancellableToken, TrMayCancel};
 use anylr::SomeOf;
 use buffex::{
     ring_buffer::{RingBuffer, RingRx, RingTx},
-    x_deps::{abs_buff, abs_cancel}
+    x_deps::abs_buff
 };
-
 use mptp_rpc_core::{
     transport::TrChannel,
     x_deps::buffex,
@@ -75,8 +73,8 @@ impl IrohChannel {
 
         // 后台任务持有 ring 的另一半；channel 被 drop 时，发送 ring 的 tx 会关闭，
         // send pump 会在排空数据后自然结束，从而让对端读到 EOF。
-        tokio::task::spawn_local(send_pump(send, send_rx));
-        tokio::task::spawn_local(recv_pump(recv, recv_tx));
+        Runtime::spawn(send_pump(send, send_rx));
+        Runtime::spawn(recv_pump(recv, recv_tx));
 
         IrohChannel { send_tx_, recv_rx_ }
     }
@@ -114,6 +112,9 @@ fn new_ring_buff_pair() -> (SendTx, SendRx) {
 // ---------------------------------------------------------------------------
 
 /// 发送 pump：把调用方写入发送 ring 的数据搬到 iroh `SendStream`。
+///
+/// 这里直接使用 tokio 的 `AsyncWriteExt::write_all` 写入 iroh `SendStream`，
+/// 避免通过 `WriteAsOutput` / `TrOutput` 引入难以满足 `Send` 的 HRTB future。
 async fn send_pump(mut send: SendStream, mut rx: SendRx) {
     loop {
         // 发送 ring 的 tx 已关闭且数据已排空 => 对端将看到 EOF。
@@ -126,60 +127,45 @@ async fn send_pump(mut send: SendStream, mut rx: SendRx) {
             None => break,
         };
 
-        // 使用 abs_buff_tokio_adapt::WriteAsOutput 把 ring 段直接写到 iroh。
-        // 段可能是两段物理内存，因此按物理子段逐个交给 WriteAsOutput。
-        let mut output = WriteAsOutput::new(&mut send);
-        while !segm.is_empty() {
-            let mut child = segm.as_segm_ref();
-            let mut cancel = NonCancellableToken::new();
-            let res = child
-                .move_items_to_output_async(&mut output, &Demand::less_than(PUMP_CHUNK))
-                .may_cancel_with(&mut cancel)
-                .await;
-            if res.as_ref().pick_right().is_some() {
-                break;
-            }
-            let moved = res.pick_left().unwrap_or(0);
-            if moved == 0 {
-                break;
-            }
-            // child drop 会把消费量累计到父段，父段 drop 时提交给 ring。
+        // 先从 ring 段搬到临时 Vec，再整体写入 iroh SendStream。
+        let len = segm.least_count();
+        let mut tmp: Vec<core::mem::MaybeUninit<u8>> = Vec::with_capacity(len);
+        tmp.resize_with(len, core::mem::MaybeUninit::uninit);
+        let moved = unsafe { segm.move_items_to_buff(&mut tmp) };
+        let bytes: Vec<u8> = tmp[..moved]
+            .iter()
+            .map(|m| unsafe { m.assume_init_read() })
+            .collect();
+
+        if tokio::io::AsyncWriteExt::write_all(&mut send, &bytes)
+            .await
+            .is_err()
+        {
+            break;
         }
-        drop(segm);
     }
 }
 
 /// 接收 pump：把 iroh `RecvStream` 的数据搬到接收 ring，供调用方读取。
+///
+/// 这里直接使用 tokio 的 `AsyncReadExt::read` 从 iroh `RecvStream` 读取，
+/// 避免通过 `ReadAsInput` / `TrInput` 引入难以满足 `Send` 的 HRTB future。
 async fn recv_pump(mut recv: RecvStream, mut tx: RecvTx) {
-    // 使用 abs_buff_tokio_adapt::ReadAsInput 从 iroh 读取到临时缓冲，
-    // 再写入接收 ring。
-    let mut input = ReadAsInput::new(&mut recv);
-    let mut buf: Vec<core::mem::MaybeUninit<u8>> =
-        (0..PUMP_CHUNK).map(|_| core::mem::MaybeUninit::uninit()).collect();
+    let mut buf = vec![0u8; PUMP_CHUNK];
     loop {
-        let mut cancel = NonCancellableToken::new();
-        let n = match input
-            .read_async(&mut buf)
-            .may_cancel_with(&mut cancel)
-            .await
-            .pick_left()
-        {
-            Some(0) => {
+        let n = match tokio::io::AsyncReadExt::read(&mut recv, &mut buf).await {
+            Ok(0) => {
                 // iroh 对端 finish：关闭接收 ring 的写入端，调用方读到 EOF。
                 tx.close();
                 break;
             }
-            Some(n) => n,
-            None => {
+            Ok(n) => n,
+            Err(_) => {
                 // 网络错误同样按 EOF 处理，保证调用方不会永久等待。
                 tx.close();
                 break;
             }
         };
-        let bytes: Vec<u8> = buf[..n]
-            .iter()
-            .map(|m| unsafe { m.assume_init_read() })
-            .collect();
 
         let mut written = 0usize;
         while written < n {
@@ -198,7 +184,7 @@ async fn recv_pump(mut recv: RecvStream, mut tx: RecvTx) {
             while !segm.is_empty() && written < n {
                 let mut child = segm.as_segm_mut();
                 let take = child.least_count().min(n - written);
-                let moved = child.clone_items_from_buff(&bytes[written..written + take]);
+                let moved = child.clone_items_from_buff(&buf[written..written + take]);
                 debug_assert_eq!(moved, take);
                 drop(child);
                 written += take;
@@ -342,6 +328,7 @@ mod tests_ {
         transport::TrMuxConn, x_deps::buffex::x_deps::abs_cancel::NonCancellableToken,
     };
 
+    use buffex::x_deps::abs_cancel::TrMayCancel;
     use super::*;
     use crate::IrohConnection;
 
@@ -361,68 +348,59 @@ mod tests_ {
 
     /// 端到端直连测试：客户端写一段数据，服务端完整读回。
     ///
-    /// `IrohChannel::new` 用 `spawn_local` 启动后台 pump（不要求 `Send`，从而绕开
-    /// rustc 对多生命周期 future 的 “implementation is not general enough” 限制，
-    /// 参见 rust-lang/rust#100013 / #130113），因此 `IrohConnection` /
-    /// `IrohChannel` 的所有操作都必须在 `LocalSet` 里运行，本测试用
-    /// `LocalSet::run_until` 包住整个测试体，服务端任务也改为 `spawn_local`。
-    #[tokio::test(flavor = "current_thread")]
+    /// `IrohChannel::new` 现在通过 `abs_art_bridge::Runtime::spawn` 启动后台 pump，
+    /// pump future 满足 `Send + 'static`，因此不再需要 `LocalSet`。
+    #[tokio::test(flavor = "multi_thread")]
     async fn direct_connect_roundtrip() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                // 找一个空闲端口，服务端只监听 localhost。
-                let free_port = {
-                    let l = std::net::TcpListener::bind("127.0.0.1:0")?;
-                    l.local_addr()?.port()
-                };
-                let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, free_port);
+        // 找一个空闲端口，服务端只监听 localhost。
+        let free_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+            l.local_addr()?.port()
+        };
+        let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, free_port);
 
-                let server_endpoint = Endpoint::builder(N0)
-                    .alpns(vec![ALPN.to_vec()])
-                    .clear_ip_transports()
-                    .clear_relay_transports()
-                    .bind_addr(server_addr)?
-                    .bind()
-                    .await?;
-                let server_id = server_endpoint.id();
+        let server_endpoint = Endpoint::builder(N0)
+            .alpns(vec![ALPN.to_vec()])
+            .clear_ip_transports()
+            .clear_relay_transports()
+            .bind_addr(server_addr)?
+            .bind()
+            .await?;
+        let server_id = server_endpoint.id();
 
-                let server_task = local.spawn_local(server_read_all(server_endpoint));
+        let server_task = tokio::spawn(server_read_all(server_endpoint));
 
-                let client_endpoint = Endpoint::builder(N0)
-                    .alpns(vec![ALPN.to_vec()])
-                    .clear_relay_transports()
-                    .bind()
-                    .await?;
-                let server_ep_addr = EndpointAddr::from_parts(
-                    server_id,
-                    vec![TransportAddr::Ip(std::net::SocketAddr::V4(server_addr))],
-                );
-                let conn =
-                    IrohConnection::connect_by_addr(client_endpoint, server_ep_addr, ALPN).await?;
-                assert_eq!(conn.remote_id(), Some(&server_id));
+        let client_endpoint = Endpoint::builder(N0)
+            .alpns(vec![ALPN.to_vec()])
+            .clear_relay_transports()
+            .bind()
+            .await?;
+        let server_ep_addr = EndpointAddr::from_parts(
+            server_id,
+            vec![TransportAddr::Ip(std::net::SocketAddr::V4(server_addr))],
+        );
+        let conn = IrohConnection::connect_by_addr(client_endpoint, server_ep_addr, ALPN).await?;
+        assert_eq!(conn.remote_id(), Some(&server_id));
 
-                let mut channel = conn
-                    .open_channel_async()
-                    .may_cancel_with(NonCancellableToken::shared_mut())
-                    .await?;
-                let (mut tx, _rx) = channel.split();
-                let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
-                tx.write_all(&payload).await?;
+        let mut channel = conn
+            .open_channel_async()
+            .may_cancel_with(NonCancellableToken::shared_mut())
+            .await?;
+        let (mut tx, _rx) = channel.split();
+        let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        tx.write_all(&payload).await?;
 
-                // 关闭发送端，让服务端读到 EOF。
-                tx.close();
-                drop(tx);
-                drop(_rx);
+        // 关闭发送端，让服务端读到 EOF。
+        tx.close();
+        drop(tx);
+        drop(_rx);
 
-                let got = server_task.await??;
-                assert_eq!(got, payload);
+        let got = server_task.await??;
+        assert_eq!(got, payload);
 
-                // channel 在服务端结束后再 drop，确保后台 pump 不会过早 abort。
-                drop(channel);
-                Ok(())
-            })
-            .await
+        // channel 在服务端结束后再 drop，确保后台 pump 不会过早 abort。
+        drop(channel);
+        Ok(())
     }
 
     /// 服务端：接受连接上的两条 channel，分别读回数据并返回。
@@ -451,75 +429,67 @@ mod tests_ {
     }
 
     /// 并发 channel 测试：同一条连接上开两条 channel，各自读写且互不串流。
-    ///
-    /// 同样必须在 `LocalSet` 里运行（见 [`direct_connect_roundtrip`]）。
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_channels_roundtrip() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let free_port = {
-                    let l = std::net::TcpListener::bind("127.0.0.1:0")?;
-                    l.local_addr()?.port()
-                };
-                let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, free_port);
+        let free_port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0")?;
+            l.local_addr()?.port()
+        };
+        let server_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, free_port);
 
-                let server_endpoint = Endpoint::builder(N0)
-                    .alpns(vec![ALPN.to_vec()])
-                    .clear_ip_transports()
-                    .clear_relay_transports()
-                    .bind_addr(server_addr)?
-                    .bind()
-                    .await?;
-                let server_id = server_endpoint.id();
+        let server_endpoint = Endpoint::builder(N0)
+            .alpns(vec![ALPN.to_vec()])
+            .clear_ip_transports()
+            .clear_relay_transports()
+            .bind_addr(server_addr)?
+            .bind()
+            .await?;
+        let server_id = server_endpoint.id();
 
-                let server_task = local.spawn_local(server_read_two_channels(server_endpoint));
+        let server_task = tokio::spawn(server_read_two_channels(server_endpoint));
 
-                let client_endpoint = Endpoint::builder(N0)
-                    .alpns(vec![ALPN.to_vec()])
-                    .clear_relay_transports()
-                    .bind()
-                    .await?;
-                let server_ep_addr = EndpointAddr::from_parts(
-                    server_id,
-                    vec![TransportAddr::Ip(std::net::SocketAddr::V4(server_addr))],
-                );
-                let conn = IrohConnection::connect_by_addr(client_endpoint, server_ep_addr, ALPN)
-                    .await?;
+        let client_endpoint = Endpoint::builder(N0)
+            .alpns(vec![ALPN.to_vec()])
+            .clear_relay_transports()
+            .bind()
+            .await?;
+        let server_ep_addr = EndpointAddr::from_parts(
+            server_id,
+            vec![TransportAddr::Ip(std::net::SocketAddr::V4(server_addr))],
+        );
+        let conn = IrohConnection::connect_by_addr(client_endpoint, server_ep_addr, ALPN).await?;
 
-                let mut ch1 = conn
-                    .open_channel_async()
-                    .may_cancel_with(NonCancellableToken::shared_mut())
-                    .await?;
-                let mut ch2 = conn
-                    .open_channel_async()
-                    .may_cancel_with(NonCancellableToken::shared_mut())
-                    .await?;
+        let mut ch1 = conn
+            .open_channel_async()
+            .may_cancel_with(NonCancellableToken::shared_mut())
+            .await?;
+        let mut ch2 = conn
+            .open_channel_async()
+            .may_cancel_with(NonCancellableToken::shared_mut())
+            .await?;
 
-                let (mut tx1, _rx1) = ch1.split();
-                let (mut tx2, _rx2) = ch2.split();
+        let (mut tx1, _rx1) = ch1.split();
+        let (mut tx2, _rx2) = ch2.split();
 
-                let payload1: Vec<u8> = (0..50_000u32).map(|i| (i % 13) as u8).collect();
-                let payload2: Vec<u8> = (0..80_000u32).map(|i| (i % 7) as u8).collect();
+        let payload1: Vec<u8> = (0..50_000u32).map(|i| (i % 13) as u8).collect();
+        let payload2: Vec<u8> = (0..80_000u32).map(|i| (i % 7) as u8).collect();
 
-                let write1 = tx1.write_all(&payload1);
-                let write2 = tx2.write_all(&payload2);
-                tokio::try_join!(write1, write2)?;
+        let write1 = tx1.write_all(&payload1);
+        let write2 = tx2.write_all(&payload2);
+        tokio::try_join!(write1, write2)?;
 
-                // 关闭两个发送端，让服务端两个 channel 都读到 EOF。
-                tx1.close();
-                tx2.close();
-                drop(tx1);
-                drop(tx2);
-                let (got1, got2) = server_task.await??;
-                assert_eq!(got1, payload1);
-                assert_eq!(got2, payload2);
+        // 关闭两个发送端，让服务端两个 channel 都读到 EOF。
+        tx1.close();
+        tx2.close();
+        drop(tx1);
+        drop(tx2);
+        let (got1, got2) = server_task.await??;
+        assert_eq!(got1, payload1);
+        assert_eq!(got2, payload2);
 
-                drop(ch1);
-                drop(ch2);
-                Ok(())
-            })
-            .await
+        drop(ch1);
+        drop(ch2);
+        Ok(())
     }
 }

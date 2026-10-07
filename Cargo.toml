@@ -1,18 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "external/abs_buff",
-    "external/abs_buff_stdio_adapt",
-    "external/abs_buff_tokio_adapt",
-    "external/abs_cancel",
-    "external/abs_iter",
-    "external/abs_sync",
-    "external/atomex",
-    "external/atomic_sync",
-    "external/buffex",
-    "external/gen_mcf_macro",
-    "external/gen_mcf_test",
-
     "crates/rpc_core",
     "crates/rpc_transport_iroh",
     "crates/rpc_cs_demo",

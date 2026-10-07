@@ -1,6 +1,6 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
-#![feature(async_fn_traits)]
+// #![feature(async_fn_traits)]
 
 //! MPTP 客户端/服务端 Demo。
 //!
@@ -25,7 +25,7 @@ use iroh::EndpointId;
 use crate::local::{run_local_client, run_local_server};
 use crate::relay::{run_relay_client, run_relay_server};
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -33,44 +33,37 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // `IrohChannel` 的后台 pump 用 `spawn_local` 启动，必须运行在 `LocalSet`
-    // 里（详见 `mptp_rpc_transport_iroh` 的文档），所以整个 main 体包一层。
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            match args[1].as_str() {
-                "local-server" => {
-                    let port = args
-                        .get(2)
-                        .map(|s| s.parse::<u16>())
-                        .transpose()
-                        .context("invalid port")?
-                        .unwrap_or(0);
-                    run_local_server(port).await
-                }
-                "local-client" => {
-                    if args.len() < 4 {
-                        return Err(anyhow!("usage: local-client <server-id> <ip:port>"));
-                    }
-                    let server_id = EndpointId::from_str(&args[2])?;
-                    let addr = SocketAddr::from_str(&args[3])?;
-                    run_local_client(server_id, addr).await
-                }
-                "relay-server" => run_relay_server().await,
-                "relay-client" => {
-                    if args.len() < 3 {
-                        return Err(anyhow!("usage: relay-client <server-id>"));
-                    }
-                    let server_id = EndpointId::from_str(&args[2])?;
-                    run_relay_client(server_id).await
-                }
-                _ => {
-                    print_usage();
-                    Err(anyhow!("unknown command: {}", args[1]))
-                }
+    match args[1].as_str() {
+        "local-server" => {
+            let port = args
+                .get(2)
+                .map(|s| s.parse::<u16>())
+                .transpose()
+                .context("invalid port")?
+                .unwrap_or(0);
+            run_local_server(port).await
+        }
+        "local-client" => {
+            if args.len() < 4 {
+                return Err(anyhow!("usage: local-client <server-id> <ip:port>"));
             }
-        })
-        .await
+            let server_id = EndpointId::from_str(&args[2])?;
+            let addr = SocketAddr::from_str(&args[3])?;
+            run_local_client(server_id, addr).await
+        }
+        "relay-server" => run_relay_server().await,
+        "relay-client" => {
+            if args.len() < 3 {
+                return Err(anyhow!("usage: relay-client <server-id>"));
+            }
+            let server_id = EndpointId::from_str(&args[2])?;
+            run_relay_client(server_id).await
+        }
+        _ => {
+            print_usage();
+            Err(anyhow!("unknown command: {}", args[1]))
+        }
+    }
 }
 
 fn print_usage() {

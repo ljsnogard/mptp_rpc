@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+abs_art-bridge = { version = "0.2.2", default-features = false, features = ["backend-tokio"] }
 mptp_rpc_core = { path = "../rpc_core" }
 mptp_rpc_transport_iroh = { path = "../rpc_transport_iroh" }
 

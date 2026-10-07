@@ -113,7 +113,7 @@ fn handler_chain_runs_in_order() {
 ///
 /// 成功判断：服务端返回的回复状态码是 `Status::Created`，说明请求被成功解码、
 /// 路由到正确 handler，并且回复被成功写回 channel。
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn end_to_end_in_memory_request_response() -> Result<(), Box<dyn std::error::Error>> {
     let mut router = Router::new();
     router.add_target("/a", {
@@ -156,7 +156,7 @@ async fn end_to_end_in_memory_request_response() -> Result<(), Box<dyn std::erro
 ///
 /// 成功判断：读回的回复头状态码为 `Status::Ok`，且 headers 为 `None`，
 /// 说明序列化/反序列化过程没有丢失或改变信息。
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn response_prefix_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
     let mut channel = RpcChannel::new_pair();
     let cancel = NonCancellableToken::shared_mut();
@@ -187,7 +187,7 @@ async fn response_prefix_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// 成功判断：调用结果返回 `Err(ServeError::NotFound(_))`，说明服务端能正确识别
 /// 未匹配路由并给出 NotFound 错误。
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn server_returns_not_found_for_unmatched_route() -> Result<(), Box<dyn std::error::Error>> {
     let server = Server::new(Router::new());
     let mut channel = RpcChannel::new_pair();
