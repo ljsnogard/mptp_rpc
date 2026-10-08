@@ -1,9 +1,10 @@
 use core::{borrow::Borrow, cmp::Ordering, fmt::Debug, iter::IntoIterator};
 use std::collections::btree_map::{self, BTreeMap};
 
-use abs_buff::x_deps::funty;
-use buffex::x_deps::abs_buff;
 use serde::{Deserialize, Serialize};
+
+use abs_buff::x_deps::funty;
+use abs_buff_stdio_adapt::x_deps::abs_buff;
 
 type HeaderStrType = String;
 
@@ -368,7 +369,7 @@ impl Headers {
         self.map_.get(key)
     }
 
-    pub fn iter_headers<'f>(&'f self) -> impl IntoIterator<Item = (&'f HeaderKey, &'f HeaderVal)> {
+    pub fn iter_headers(&self) -> impl IntoIterator<Item = (&HeaderKey, &HeaderVal)> {
         self.map_.iter()
     }
 
@@ -402,5 +403,11 @@ impl Headers {
 
     pub fn remove_header<'f>(&'f mut self, key: &'f HeaderKey) -> Option<(HeaderKey, HeaderVal)> {
         self.map_.remove_entry(key)
+    }
+}
+
+impl Default for Headers {
+    fn default() -> Self {
+        Self::new()
     }
 }

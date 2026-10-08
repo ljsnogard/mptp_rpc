@@ -19,3 +19,9 @@ impl<T> Router<T> {
         self.prefix_map_.get(prefix)
     }
 }
+
+impl<T> Default for Router<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

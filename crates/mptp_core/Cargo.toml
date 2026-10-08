@@ -12,10 +12,10 @@ readme = "README.md"
 
 [dependencies]
 abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0" }
+# abs_art-bridge = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0" }
+abs_buff_stdio_adapt = { path = "../../../abs_buff_stdio_adapt", default-features = false }
 # abs_smux = { git = "https://gitee.com/lino_snsalias/abs_smux.git", branch = "dev/0.1.0" }
 abs_smux = { path = "../../../abs_smux" }
-# abs_art-bridge = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0" }
-abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/abs_buff_stdio_adapt.git", default-features = false }
 # buffex = { git = "https://gitee.com/lino_snsalias/buffex.git", branch = "dev/0.3.0" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 

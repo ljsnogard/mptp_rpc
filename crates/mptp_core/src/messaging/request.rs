@@ -1,16 +1,20 @@
-use core:: mem::MaybeUninit;
+use core::{mem::MaybeUninit, slice};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use abs_buff::{TrBuffRead, TrBuffWrite};
-use abs_buff_stdio_adapt::AsStdRead;
+use abs_buff::{
+    Demand, TrBuffRead, TrBuffWrite,
+    buffer::{TrBuffSegmMut, TrConsumerState},
+    x_deps::abs_cancel,
+};
+use abs_buff_stdio_adapt::{AsStdRead, x_deps::abs_buff};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-use buffex::x_deps::{abs_buff::{self, Demand, buffer::TrBuffSegmMut}, abs_cancel};
 
 use crate::{
     access_method::{AccessMethod, TrAccessMethod},
     messaging,
     specs::Headers,
+    std_io_adapt_::StdReadAdapter,
 };
 
 struct ReqBuilderInner {
@@ -58,7 +62,7 @@ impl RequestBuilder {
         self
     }
 
-    pub fn body<T>(self, body: T) -> Self
+    pub fn body<T>(self, _body: T) -> Self
     where
         T: Serialize + DeserializeOwned,
     {
@@ -66,9 +70,19 @@ impl RequestBuilder {
     }
 }
 
+impl Default for RequestBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// 服务端解码路径（`serving`）当前被暂时摘除，本类型与下面的解码函数暂时无人使用；
+// 等 `serving` 按 `abs_smux` 的 channel 重做回来即可移除这几处 allow。
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReqPrefix(pub AccessMethod, pub String, pub Option<Headers>);
 
+#[allow(dead_code)]
 impl ReqPrefix {
     pub fn method(&self) -> AccessMethod {
         self.0
@@ -125,11 +139,14 @@ where
         .may_cancel_with(tok)
         .await;
     if let Option::Some(segm) = opt_segm.as_mut().pick_left() {
+        // SAFETY: `buf` 是本函数独占的 `Vec<u8>`，其前 `size` 个字节已初始化；
+        // `MaybeUninit<u8>` 与 `u8` 布局相同（同尺寸、同对齐、无 niche），因此按
+        // `size` 长度把这段已初始化内存重新解释为 `MaybeUninit<u8>` 切片是健全的。
         let buff = unsafe {
             let p = buf.as_mut_ptr() as *mut MaybeUninit<u8>;
             slice::from_raw_parts_mut(p, size)
         };
-        let sent_size = unsafe { segm.move_items_from_buff(buff) };
+        let sent_size = segm.move_items_from_buff(buff);
         return Result::Ok(sent_size);
     }
     if let Option::Some(err) = opt_segm.pick_right() {
@@ -140,23 +157,25 @@ where
 }
 
 /// Receive and deserialize the request prefix from stream
-pub(crate) async fn recv_request_prefix_async<'f, TyRx, TyTok>(
-    rx: &'f mut TyRx,
-    tok: &'f mut TyTok,
+#[allow(dead_code)]
+pub(crate) async fn recv_request_prefix_async<TyRx, TyTok>(
+    rx: &mut TyRx,
+    tok: TyTok,
 ) -> Result<ReqPrefix, std::io::Error>
 where
-    TyRx: TrBuffTryRead,
-    TyTok: TrCancellationToken + Clone,
+    TyRx: TrBuffRead<u8> + TrConsumerState,
+    TyTok: TrCancellationToken,
 {
     fn deserialize_prefix<R, C>(
         r: &mut R,
-        c: &mut C,
+        c: C,
     ) -> Result<ReqPrefix, rmp_serde::decode::Error>
     where
-        R: TrBuffTryRead,
-        C: TrCancellationToken + Clone,
+        R: TrBuffRead<u8> + TrConsumerState,
+        C: TrCancellationToken,
     {
-        let mut std_read = AsStdRead::new(r, c);
+        // `AsStdRead` 按值持有令牌；再包一层转发，就不必要求令牌可克隆。
+        let mut std_read = StdReadAdapter::new_(AsStdRead::new(r, c));
         let des_method = rmp_serde::from_read::<_, AccessMethod>(&mut std_read);
         let method = match des_method {
             Result::Err(err) => return Result::Err(err),
