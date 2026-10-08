@@ -73,19 +73,18 @@ pub async fn run_client_(conn: Shared<DemoConn, CoreAlloc>, remote_dock: u32) ->
     let client = Client::<DemoClientCfg>::new(conn, smux_v1::connection::Dock::new(remote_dock));
     let request: Request<(), ()> = Request::new(AccessMethod::View, "/hello");
 
-    eprintln!("[dbg] 客户端发起请求");
     let mut session = client
         .request_async(request)
         .may_cancel_with(NonCancellableToken::new())
         .await
         .map_err(|err| anyhow!("发起请求失败: {err}"))?;
 
-    eprintln!("[dbg] 客户端拿到会话");
     let prefix = session
         .recv_response_async()
         .may_cancel_with(NonCancellableToken::new())
         .await
         .map_err(|err| anyhow!("接收响应失败: {err}"))?;
 
+    drop(session);
     Result::Ok(prefix.0)
 }

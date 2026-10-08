@@ -118,14 +118,12 @@ pub async fn serve_one_channel_(
     binding: &mut DockBinding<DemoServingCfg>,
     context: &mut SessionContext,
 ) -> Result<()> {
-    eprintln!("[dbg] 服务端进入监听");
     let mut listener = binding
         .listen_async(K_LISTEN_RESERVE)
         .may_cancel_with(NonCancellableToken::new())
         .await
         .map_err(|err| anyhow!("进入监听失败: {err}"))?;
 
-    eprintln!("[dbg] 服务端等待入向建流");
     let mut handle = listener
         .income_async()
         .may_cancel_with(NonCancellableToken::new())
@@ -133,25 +131,21 @@ pub async fn serve_one_channel_(
         .map_err(|err| anyhow!("等待入向建流失败: {err}"))?;
 
     // 最终裁决：本端当场交出两块 ring 内存。
-    eprintln!("[dbg] 服务端拿到待决句柄");
     let (tx_buff, rx_buff) = <DemoServingAllocCfg as TrServingAllocConfig>::make_ring_buffs();
     let prepare = ServingRingPrepare::new(tx_buff, rx_buff);
     // 欢迎信息当前不由 MPTP 使用（上游按空载荷发出）。
     let mut welcome: &mut [u8] = &mut [];
-    let (mut tx, mut rx) = handle
+    let (tx, rx) = handle
         .accept_async(&mut welcome, prepare)
         .may_cancel_with(NonCancellableToken::new())
         .await
         .map_err(|err| anyhow!("裁决建流失败: {err}"))?;
 
-    eprintln!("[dbg] 服务端开始处理子流");
-    eprintln!("[dbg] 服务端进入 serve_channel_async");
     server
-        .serve_channel_async(&mut tx, &mut rx, context)
+        .serve_channel_async(tx, rx, context)
         .may_cancel_with(NonCancellableToken::new())
         .await
         .map_err(|err| anyhow!("处理子流失败: {err}"))?;
-    eprintln!("[dbg] 服务端处理子流完成");
 
     Result::Ok(())
 }

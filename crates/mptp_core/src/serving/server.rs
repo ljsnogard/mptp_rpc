@@ -19,11 +19,7 @@
 
 use std::io;
 
-use abs_buff::{
-    buffer::TrProducerState,
-    gen_may_cancel_future,
-    x_deps::abs_cancel,
-};
+use abs_buff::{TrBuffRead, buffer::TrProducerState, gen_may_cancel_future, x_deps::abs_cancel};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_smux::{
     chan::TrChannelHandle,
@@ -119,8 +115,8 @@ where
     ///    则把该回复前缀写回 `tx`。
     pub fn serve_channel_async<'f>(
         &'f self,
-        tx: &'f mut ChannelTx<C>,
-        rx: &'f mut ChannelRx<C>,
+        tx: ChannelTx<C>,
+        rx: ChannelRx<C>,
         context: &'f mut SessionContext,
     ) -> ServeChannelAsync<'f, 'f, C> {
         ServeChannelAsync::new(self, tx, rx, context)
@@ -148,8 +144,8 @@ where
 #[gen_may_cancel_future(ServeChannel, pub, new(pub(crate)))]
 async fn serve_channel_async_<'f, C, TyTok>(
     server: &'f Server<C>,
-    tx: &'f mut ChannelTx<C>,
-    rx: &'f mut ChannelRx<C>,
+    mut tx: ChannelTx<C>,
+    mut rx: ChannelRx<C>,
     context: &'f mut SessionContext,
     cancel: TyTok,
 ) -> Result<(), ServeError>
@@ -160,7 +156,7 @@ where
     TyTok: TrCancellationToken,
 {
     // 1. 解码请求前缀。请求体 / suffix stream 由 handler 自行从 `rx` 读取。
-    let prefix = messaging::request::recv_request_prefix_async(rx, cancel.child_token())
+    let prefix = messaging::request::recv_request_prefix_async(&mut rx, cancel.child_token())
         .await
         .map_err(|err| ServeError::Decode(err.to_string()))?;
 
@@ -175,19 +171,72 @@ where
     // 3. 调用 HandlerChain。
     let mut headers = headers.unwrap_or_default();
     let ctrl = handler
-        .handle_async(method, &location, &mut headers, tx, rx, context)
+        .handle_async(method, &location, &mut headers, &mut tx, &mut rx, context)
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(|err| ServeError::Handler(err.to_string()))?;
 
     // 4. 如果 handler 通过 FlowCtrl 返回了 Response，则写回客户端。
     if let Option::Some(resp) = ctrl.response() {
-        messaging::response::send_response_prefix_async(resp, tx, cancel.child_token())
+        messaging::response::send_response_prefix_async(resp, &mut tx, cancel.child_token())
             .await
             .map_err(|err| ServeError::Io(err.to_string()))?;
     }
 
+    // 收尾顺序很关键：
+    //
+    // 1. 先放掉**发送半边**——那是半关闭：写循环会把环里剩下的响应排空，然后发 `FIN`；
+    // 2. 再等对端也关闭（读到 EOF）。因为 `ChannelRx::drop` 会发 `RESET` 拆掉该方向，
+    //    解复用循环据此**静默丢弃在途数据**——若此时响应还堵在环里，就会被这一发
+    //    `RESET` 抹掉，对端只看到 EOF。
+    drop(tx);
+    drain_until_eof_(&mut rx, cancel.child_token()).await;
+
     Result::Ok(())
+}
+
+/// 有界地等到对端关闭，顺带丢弃途中收到的多余字节。
+///
+/// # 为什么等，以及为什么是**有界**的
+///
+/// `ChannelRx::drop` 会发 `RESET` 拆掉该方向，解复用循环据此**静默丢弃在途数据**。
+/// 若响应还堵在环里就被这一发抹掉，对端只会看到 EOF——所以放掉接收半边之前，要先给写
+/// 循环一点时间把响应搬走。
+///
+/// 但**不能**无界地等对端关闭：对端释放会话之后可能很快就结束，关闭信号未必来得及
+/// 传过来（实测会一直等到 smux 的空闲超时，整整 30 秒）。所以这里设一个很短的上限：
+/// 正常情形下对端关闭会立刻命中，最坏也只是多等这一小会儿——而响应只有几个字节，
+/// 远在窗口之内。
+async fn drain_until_eof_<TyRx, TyTok>(rx: &mut TyRx, _cancel: TyTok)
+where
+    TyRx: TrBuffRead<u8>,
+    TyTok: TrCancellationToken,
+{
+    use abs_buff::error::{ReadErrTag, TrTaggedError};
+
+    /// 上限：只在这段时间内尝试。
+    const K_MAX_WAIT: core::time::Duration = core::time::Duration::from_millis(50);
+    /// 每轮索要的上限（丢弃用，不关心拿到多少）。
+    const K_DEMAND: usize = 256usize;
+
+    let deadline = std::time::Instant::now() + K_MAX_WAIT;
+    loop {
+        let demand = abs_buff::Demand::no_more_than(K_DEMAND);
+        let mut outcome = rx.try_read(&demand);
+        // 借出的段 drop 即提交消费：这里只是把多余字节丢掉。
+        if outcome.as_mut().pick_left().is_none() {
+            // 对端关闭正是我们要等的信号；其它错误（暂时无数据等）继续等。
+            if let Option::Some(err) = outcome.pick_right()
+                && err.err_tag() == ReadErrTag::Closing
+            {
+                return;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(core::time::Duration::from_millis(1));
+    }
 }
 
 /// 监听并循环接受子流的 step 函数。
@@ -223,7 +272,7 @@ where
         let prepare = ServingRingPrepare::new(tx_buff, rx_buff);
         // 欢迎信息当前不由 MPTP 使用（`smux_v1` 按空载荷发出）。
         let mut welcome: &mut [u8] = &mut [];
-        let (mut tx, mut rx) = handle
+        let (tx, rx) = handle
             .accept_async(&mut welcome, prepare)
             .may_cancel_with(cancel.child_token())
             .await
@@ -233,6 +282,6 @@ where
         //
         // TODO(重构): 当前是「一条子流处理一个请求」的一问一答模型；等会话复用
         // 语义确定后，这里可能改成在同一条子流上循环处理。
-        serve_channel_async_(server, &mut tx, &mut rx, context, cancel.child_token()).await?;
+        serve_channel_async_(server, tx, rx, context, cancel.child_token()).await?;
     }
 }

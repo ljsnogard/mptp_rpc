@@ -4,10 +4,8 @@
 //! 请求前缀解码、路由、handler 链、回复前缀写回、客户端解析。传输用的是 `smux_v1`
 //! 的真实实现，但两条全被动环直连两个端点，不经过任何 socket。
 
-use abs_art::TrLocalScope;
 use mptp_core::specs::Status;
 use mptp_cs_demo::run_local_roundtrip_;
-use smux_v1::x_deps::{abs_art, abs_art_bridge};
 
 /// 测试目标：客户端与服务端在进程内完成一次完整的
 /// 「建流 → 请求 → 路由 → 回复 → 解析」往返。

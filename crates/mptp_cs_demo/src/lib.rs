@@ -35,7 +35,6 @@ use smux_v1::{
     x_deps::{abs_buff, abs_smux, mm_ptr},
 };
 
-
 /// 跑一次完整的进程内往返：
 /// 建一对连接 → 服务端在 [`K_LISTEN_DOCK`] 上监听并服务一条子流 →
 /// 客户端向同一个 dock 发起 `View /hello` → 返回对端给出的状态码。
@@ -95,7 +94,6 @@ pub async fn run_local_roundtrip_() -> Result<Status> {
     let client_res = client_thread
         .join()
         .map_err(|_| anyhow!("客户端线程 panic"))?;
-    eprintln!("[dbg] 服务端结果: {:?}", server_res.is_ok());
     server_res?;
     client_res
 }
