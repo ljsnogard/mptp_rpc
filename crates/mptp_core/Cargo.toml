@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-name = "mptp_rpc_core"
+name = "mptp_core"
 version = "0.1.0"
 
 description = "Core definition for RPC over Message Packing and Transportation Protocol."
@@ -11,9 +11,13 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-abs_art-bridge = { version = "0.2.2", default-features = false, features = ["backend-tokio"] }
+abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0" }
+# abs_smux = { git = "https://gitee.com/lino_snsalias/abs_smux.git", branch = "dev/0.1.0" }
+abs_smux = { path = "../../../abs_smux" }
+# abs_art-bridge = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0" }
 abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/abs_buff_stdio_adapt.git", default-features = false }
-buffex = { git = "https://gitee.com/lino_snsalias/buffex.git", branch = "dev/0.3.0" }
+# buffex = { git = "https://gitee.com/lino_snsalias/buffex.git", branch = "dev/0.3.0" }
+mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 
 serde = { version = "1.0.*", features = ["derive"] }
 rmp-serde = { version = "1.3.*" }

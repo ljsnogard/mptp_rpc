@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-name = "mptp_rpc_transport_iroh"
+name = "mptp_smux_iroh"
 version = "0.1.0"
 
 description = "MsgPk RPC over IROH networks."
@@ -13,7 +13,8 @@ readme = "README.md"
 [dependencies]
 abs_art-bridge = { version = "0.2.2", default-features = false, features = ["backend-tokio"] }
 abs_buff_tokio_adapt = { git = "https://gitee.com/lino_snsalias/abs_buff_tokio_adapt.git" }
-mptp_rpc_core = { path = "../rpc_core" }
+mptp_core = { path = "../mptp_core" }
+smux_v1 = { path = "../../../smux_v1" }
 
 anyhow = "1"
 thiserror = "2"

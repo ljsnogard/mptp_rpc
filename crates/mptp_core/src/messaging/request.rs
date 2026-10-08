@@ -1,9 +1,8 @@
 use core:: mem::MaybeUninit;
-use std::slice;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use abs_buff::{TrBuffTryRead, TrBuffTryWrite};
+use abs_buff::{TrBuffRead, TrBuffWrite};
 use abs_buff_stdio_adapt::AsStdRead;
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use buffex::x_deps::{abs_buff::{self, Demand, buffer::TrBuffSegmMut}, abs_cancel};
@@ -93,12 +92,12 @@ impl ReqPrefix {
 pub(crate) async fn send_request_prefix_async<'f, TyReq, TyTx, TyTok>(
     req: &'f TyReq,
     tx: &'f mut TyTx,
-    tok: &'f mut TyTok,
+    tok: TyTok,
 ) -> Result<usize, std::io::Error>
 where
     TyReq: messaging::TrRpcRequest,
-    TyTx: TrBuffTryWrite,
-    TyTok: TrCancellationToken + Clone,
+    TyTx: TrBuffWrite<u8>,
+    TyTok: TrCancellationToken,
 {
     fn serialize_to<Req: messaging::TrRpcRequest>(
         req: &Req,

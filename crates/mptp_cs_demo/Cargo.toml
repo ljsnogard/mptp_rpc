@@ -1,12 +1,12 @@
 [package]
-name = "mptp_rpc_cs_demo"
+name = "mptp_cs_demo"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 abs_art-bridge = { version = "0.2.2", default-features = false, features = ["backend-tokio"] }
-mptp_rpc_core = { path = "../rpc_core" }
-mptp_rpc_transport_iroh = { path = "../rpc_transport_iroh" }
+mptp_core = { path = "../mptp_core" }
+mptp_smux_iroh = { path = "../mptp_smux_iroh" }
 
 anyhow = "1"
 rmp-serde = "1.3.*"

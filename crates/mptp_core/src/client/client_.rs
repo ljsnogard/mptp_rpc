@@ -4,12 +4,12 @@ use thiserror::Error;
 
 use abs_buff::gen_may_cancel_future;
 use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_mm::res_man::TrStrongShared;
+use abs_smux::conn::TrConnection;
 use buffex::x_deps::{abs_buff, abs_cancel};
+use mm_ptr::x_deps::abs_mm;
 
-use crate::{
-    messaging,
-    transport::{self, TrChannel, TrMuxConn},
-};
+use crate::messaging;
 use super::session::Session;
 
 #[derive(Debug, Error)]
@@ -38,14 +38,14 @@ pub enum ClientError {
 
 pub struct Client<TyConn>
 where
-    TyConn: Deref<Target: transport::TrMuxConn> + Clone,
+    TyConn: TrStrongShared<Item: TrConnection>,
 {
     conn_: Option<TyConn>,
 }
 
 impl<TyConn> Client<TyConn>
 where
-    TyConn: Deref<Target: transport::TrMuxConn> + Clone,
+    TyConn: TrStrongShared<Item: TrConnection>,
 {
     pub const fn new(conn: TyConn) -> Self {
         Client { conn_: Option::Some(conn) }
@@ -54,26 +54,26 @@ where
     pub fn request_async<'f, TyReq>(
         &'f self,
         request: &'f TyReq,
-    ) -> SendClientRequestAsync<'f, TyConn, TyReq>
+    ) -> SendClientRequestAsync<'f, 'f, TyConn, TyReq>
     where
         TyReq: messaging::TrRpcRequest,
     {
-        SendClientRequestAsync(self, request)
+        SendClientRequestAsync::new(self, request)
     }
 }
 
 type ChannelTypeFrom<TyConn> = <<TyConn as Deref>::Target as transport::TrMuxConn>::Channel;
 
-#[gen_may_cancel_future(SendClientRequest)]
+#[gen_may_cancel_future(SendClientRequest, pub, new(pub(crate)))]
 async fn client_request_async_<'f, TyConn, TyReq, TyTok>(
     client : &'f Client<TyConn>,
     request: &'f TyReq,
-    cancel : &'f mut TyTok,
+    cancel : TyTok,
 ) -> Result<Session<'f, TyReq, ChannelTypeFrom<TyConn>>, ClientError>
 where
-    TyConn: Deref<Target: transport::TrMuxConn> + Clone,
+    TyConn: TrStrongShared<Item: TrConnection>,
     TyReq: messaging::TrRpcRequest,
-    TyTok: TrCancellationToken + Clone,
+    TyTok: TrCancellationToken,
 {
     let Option::Some(conn) = &client.conn_ else {
         return Result::Err(ClientError::ConnectionLost("client has no connection".to_string()));

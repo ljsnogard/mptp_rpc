@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/rpc_core",
-    "crates/rpc_transport_iroh",
-    "crates/rpc_cs_demo",
+    "crates/mptp_core",
+    "crates/mptp_smux_iroh",
+    "crates/mptp_cs_demo",
 ]
 
 [workspace.package]
