@@ -1,0 +1,42 @@
+# mptp_cs_demo 的配方。
+#
+# 本 crate 是**独立 workspace**：三个运行时 feature 互斥，三格各编一次。
+# 超时纪律：单元测试 60 秒；本机环回全量 300 秒。
+set shell := ["bash", "-uc"]
+
+demo := justfile_directory()
+# 需要离线（本机 cargo 缓存只读 / 断网）时：`DEMO_CARGO_OFFLINE=--offline just pairs`
+offline := env('DEMO_CARGO_OFFLINE', '')
+
+default:
+    @just --list
+
+# 三格各编译一次（feature 互斥，必须分开编）
+build:
+    cargo build --manifest-path {{demo}}/Cargo.toml {{offline}} --no-default-features --features rt-tokio --bin peer_tokio
+    cargo build --manifest-path {{demo}}/Cargo.toml {{offline}} --no-default-features --features rt-compio --bin peer_compio
+    cargo build --manifest-path {{demo}}/Cargo.toml {{offline}} --no-default-features --features rt-smol --bin peer_smol
+
+# 单元测试（命令行解析、进程内环回），60 秒上限
+test:
+    timeout 60 cargo test --manifest-path {{demo}}/Cargo.toml {{offline}} --no-default-features --features rt-tokio
+
+# 静态检查
+clippy:
+    cargo clippy --manifest-path {{demo}}/Cargo.toml {{offline}} --no-default-features --features rt-tokio --all-targets
+
+# 进程内环回（不碰网络）
+local:
+    timeout 60 cargo test --manifest-path {{demo}}/Cargo.toml {{offline}} --no-default-features --features rt-tokio --test local_e2e -- --nocapture
+
+# 本机 127.0.0.1 环回：3 组运行时配对（tokio-compio / tokio-smol / compio-smol），300 秒上限
+pairs:
+    timeout 300 python3 {{demo}}/scripts/run_pairs.py {{offline}}
+
+# 只跑一组配对：`just one tokio compio`
+one a b:
+    timeout 300 python3 {{demo}}/scripts/run_pairs.py {{offline}} --pairs {{a}}-{{b}}
+
+# 自定义端口跑一组（手打命令行的对照见 README）
+run a b port:
+    timeout 300 python3 {{demo}}/scripts/run_pairs.py {{offline}} --pairs {{a}}-{{b}} --base-port {{port}}

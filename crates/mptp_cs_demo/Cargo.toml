@@ -1,24 +1,79 @@
+# `mptp_core` 的端到端演示：进程内环回 + 真实 TCP socket 上的跨运行时互通。
+#
+# 本 crate 是一个**独立 workspace**（见下面的空 `[workspace]` 表）：三个运行时 feature
+# 互斥，要按 feature 各编译一次（三个 peer 可执行文件）。把它并进别的 workspace 只会让
+# feature 被取并集，直接撞上 `abs_art-bridge` 的「多后端必须显式声明默认后端」守护。
 [package]
 name = "mptp_cs_demo"
 version = "0.1.0"
 edition = "2024"
-description = "mptp_core 的进程内端到端演示与验收。"
+description = "mptp_core 的端到端演示：进程内环回，以及真实 TCP socket 上跨 tokio / compio / smol 的互通。"
 readme = "README.md"
+publish = false
 
-# 本 crate 的职责是**给 mptp_core 做端到端验证**：真实的复用连接、真实的收发路径，
-# 但全部跑在进程内，不碰网络。它不属于 mptp_core 的依赖面，因此可以自由依赖具体
-# 实现（`smux_v1`）——反过来把这些重依赖塞进 mptp_core 的 dev-dependencies，就会让
-# 「核心定义」这个 crate 被迫跟着传输实现一起演进。
+[workspace]
+
 [dependencies]
 mptp_core = { path = "../mptp_core" }
 
-# 真实复用连接实现。其余依赖（`abs_art` / `abs_art-bridge` / `buffex` / `mm_ptr` /
-# `abs_smux` / `abs_buff`）一律从它的 `x_deps` 取，避免同一个 crate 出现第二个来源、
-# 或后端 feature 出现第二个决定点。
-#
-# `default-features = false`：`smux_v1` 的缺省后端是 compio，而本 demo 跑在 tokio 上；
-# 两个 `test-*` feature 同时打开会让 `abs_art-bridge` 的 backend 撞车。
-smux_v1 = { path = "../../../smux_v1", default-features = false, features = ["test-tokio-runtime"] }
+# 后端选择完全交给本 crate 的 `rt-*` feature：先关掉 `smux_v1` 的缺省后端，否则
+# 「缺省 + 显式」两个后端会同时打开，撞上 bridge 的守护。
+smux_v1 = { path = "../../../smux_v1", default-features = false }
 
+# 直接依赖它是为了**选同步等待的驱动**（`rt-*` feature）——`mptp_core` 是运行时无关的，
+# 不该替它做这个选择。
+abs_buff_stdio_adapt = { path = "../../../abs_buff_stdio_adapt", default-features = false }
+
+# 环与分配器：必须与 `smux_v1`、与三个适配器 crate **同源同分支**，否则会出现同名不同源
+# 的 `buffex`，环半部的类型对不上。
+buffex = { git = "https://gitee.com/lino_snsalias/buffex.git", branch = "dev/0.3.0" }
+mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
+# 三个**设备适配器**一律走本机同级路径：本 demo 依赖它们「自驱动写环」的那次更新
+# （`BuffWrite::try_new_local`，以及 `Drop` 里的关生产端 + detach 泵），那份改动还没推到
+# gitee；走 git 依赖只会拿到旧 commit，写泵就没人驱动。
+buffex_tokio_adapt = { path = "../../../buffex_tokio_adapt" }
+buffex_compio_adapt = { path = "../../../buffex_compio_adapt" }
+buffex_smol_adapt = { path = "../../../buffex_smol_adapt" }
+
+# 场景并发一律用与运行时无关的组合子：compio 的 socket 半边是 `!Send`，`spawn` 不可用。
+futures = "0.3.*"
 anyhow = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# 三个运行时都是正式依赖：三个 peer 由同一份源码按 feature 各编译一次，每个构建里只有
+# 一个运行时的代码真的被用到。
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+compio = { version = "0.19.*", features = ["macros", "net", "runtime", "time"] }
+smol = "2"
+
+[features]
+# 缺省 = tokio，与 `mptp_core` 的 dev-dependency 一致，裸 `cargo build` 也能出一个 peer。
+# 换运行时必须 `--no-default-features --features rt-<名字>`，否则两个后端同时打开。
+default = ["rt-tokio"]
+rt-tokio = ["smux_v1/test-tokio-runtime", "abs_buff_stdio_adapt/rt-tokio"]
+rt-compio = ["smux_v1/test-compio-runtime", "abs_buff_stdio_adapt/rt-compio"]
+rt-smol = ["smux_v1/test-smol-runtime", "abs_buff_stdio_adapt/rt-smol"]
+
+# crate 名与 bin 名都是下划线形式，nightly cargo 的 kebab-case 命名 lint 在这里纯属噪音。
+[lints.cargo]
+non_kebab_case_bins = "allow"
+
+[[bin]]
+name = "peer_tokio"
+path = "src/bin/peer_tokio.rs"
+required-features = ["rt-tokio"]
+
+[[bin]]
+name = "peer_compio"
+path = "src/bin/peer_compio.rs"
+required-features = ["rt-compio"]
+
+[[bin]]
+name = "peer_smol"
+path = "src/bin/peer_smol.rs"
+required-features = ["rt-smol"]
+
+# `abs_smux` 以 git 源依赖 `abs_buff`，而同仓的 `abs_buff_stdio_adapt` 以本地 path 依赖
+# 它——不统一的话，依赖图里会出现**两个 `abs_buff` 实例**，两者的 `TrBuffRead` /
+# `TrBuffWrite` 互不相认（`abs_cancel` 也随之分裂）。独立 workspace 要自己写一份。
+[patch."https://gitee.com/lino_snsalias/abs_buff.git"]
+abs_buff = { path = "../../../abs_buff" }

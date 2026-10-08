@@ -19,6 +19,7 @@
 
 use std::io;
 
+use abs_buff_stdio_adapt::AsStdRead;
 use abs_buff::{TrBuffRead, buffer::TrProducerState, gen_may_cancel_future, x_deps::abs_cancel};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_smux::{
@@ -195,47 +196,29 @@ where
     Result::Ok(())
 }
 
-/// 有界地等到对端关闭，顺带丢弃途中收到的多余字节。
+/// 读到对端关闭为止，顺带丢弃途中收到的多余字节。
 ///
-/// # 为什么等，以及为什么是**有界**的
+/// # 为什么必须等
 ///
-/// `ChannelRx::drop` 会发 `RESET` 拆掉该方向，解复用循环据此**静默丢弃在途数据**。
-/// 若响应还堵在环里就被这一发抹掉，对端只会看到 EOF——所以放掉接收半边之前，要先给写
-/// 循环一点时间把响应搬走。
+/// 放掉接收半边（`ChannelRx::drop`）会发 `RESET` 拆掉该方向，解复用循环据此**静默丢弃
+/// 在途数据**。若响应还堵在环里就被这一发抹掉，对端只会看到 EOF——所以收尾必须按
+/// 「先半关闭写端（`drop(tx)`，排空后发 `FIN`）→ 等对端关闭 → 再放掉读端」的次序。
 ///
-/// 但**不能**无界地等对端关闭：对端释放会话之后可能很快就结束，关闭信号未必来得及
-/// 传过来（实测会一直等到 smux 的空闲超时，整整 30 秒）。所以这里设一个很短的上限：
-/// 正常情形下对端关闭会立刻命中，最坏也只是多等这一小会儿——而响应只有几个字节，
-/// 远在窗口之内。
-async fn drain_until_eof_<TyRx, TyTok>(rx: &mut TyRx, _cancel: TyTok)
+/// 一问一答会话里对端读到响应之后就会关闭，因此这里**正常会等到 EOF**，不是超时兜底：
+/// 等待本身由 `AsStdRead` 的同步读完成（它会驱动当前后端的队列），不需要也不该有
+/// `sleep` 轮询或时间上界——那既拖慢收尾，又把「数据有没有排空」变成靠猜。
+async fn drain_until_eof_<TyRx, TyTok>(rx: &mut TyRx, cancel: TyTok)
 where
     TyRx: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
 {
-    use abs_buff::error::{ReadErrTag, TrTaggedError};
-
-    /// 上限：只在这段时间内尝试。
-    const K_MAX_WAIT: core::time::Duration = core::time::Duration::from_millis(50);
-    /// 每轮索要的上限（丢弃用，不关心拿到多少）。
-    const K_DEMAND: usize = 256usize;
-
-    let deadline = std::time::Instant::now() + K_MAX_WAIT;
+    let mut read = AsStdRead::new(rx, cancel);
+    let mut sink = [0u8; 256usize];
     loop {
-        let demand = abs_buff::Demand::no_more_than(K_DEMAND);
-        let mut outcome = rx.try_read(&demand);
-        // 借出的段 drop 即提交消费：这里只是把多余字节丢掉。
-        if outcome.as_mut().pick_left().is_none() {
-            // 对端关闭正是我们要等的信号；其它错误（暂时无数据等）继续等。
-            if let Option::Some(err) = outcome.pick_right()
-                && err.err_tag() == ReadErrTag::Closing
-            {
-                return;
-            }
+        match std::io::Read::read(&mut read, &mut sink) {
+            Result::Ok(0usize) | Result::Err(_) => return,
+            Result::Ok(_) => continue,
         }
-        if std::time::Instant::now() >= deadline {
-            return;
-        }
-        std::thread::sleep(core::time::Duration::from_millis(1));
     }
 }
 
