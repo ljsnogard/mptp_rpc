@@ -12,7 +12,6 @@ readme = "README.md"
 
 [dependencies]
 abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0" }
-# abs_art-bridge = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0" }
 abs_buff_stdio_adapt = { path = "../../../abs_buff_stdio_adapt", default-features = false }
 # abs_smux = { git = "https://gitee.com/lino_snsalias/abs_smux.git", branch = "dev/0.1.0" }
 abs_smux = { path = "../../../abs_smux" }
@@ -24,5 +23,8 @@ rmp-serde = { version = "1.3.*" }
 thiserror = { version = "2.0.20" }
 
 [dev-dependencies]
-abs_art-bridge = { version = "0.2.2", default-features = false, features = ["backend-tokio"] }
+# 必须与 `abs_buff_stdio_adapt` 用**同一个源**（同一个 git 分支）：它自己不启用任何
+# 后端（按 `abs_art-bridge` 的设计，后端由最终的二进制选定），若这里换回 registry 版，
+# 依赖图里就会出现两个 `abs_art-bridge` 实例，而 git 那个拿不到 backend。
+abs_art-bridge = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0", default-features = false, features = ["backend-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

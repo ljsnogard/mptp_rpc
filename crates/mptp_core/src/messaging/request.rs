@@ -1,20 +1,12 @@
-use core::{mem::MaybeUninit, slice};
-
+use abs_buff::{TrBuffRead, TrBuffWrite, x_deps::abs_cancel};
+use abs_cancel::TrCancellationToken;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-
-use abs_buff::{
-    Demand, TrBuffRead, TrBuffWrite,
-    buffer::{TrBuffSegmMut, TrConsumerState},
-    x_deps::abs_cancel,
-};
-use abs_buff_stdio_adapt::{AsStdRead, x_deps::abs_buff};
-use abs_cancel::{TrCancellationToken, TrMayCancel};
 
 use crate::{
     access_method::{AccessMethod, TrAccessMethod},
+    decode_::read_value_async_,
     messaging,
     specs::Headers,
-    std_io_adapt_::StdReadAdapter,
 };
 
 struct ReqBuilderInner {
@@ -102,7 +94,9 @@ impl ReqPrefix {
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 写入 request 的 method, location, headers。
-/// 内部使用一个 Vec 来计算写了多少字节
+///
+/// 先序列化到本地 `Vec` 以得到 `Body_Size` 需要的长度，再用共享的
+/// [`write_all_async_`](crate::encode_::write_all_async_) 完整写进发送半边。
 pub(crate) async fn send_request_prefix_async<'f, TyReq, TyTx, TyTok>(
     req: &'f TyReq,
     tx: &'f mut TyTx,
@@ -126,34 +120,15 @@ where
 
     let mut buf = Vec::new();
     if let Result::Err(error) = serialize_to(req, &mut buf) {
-        return Result::Err(std::io::Error::other(error))
-    };
+        return Result::Err(std::io::Error::other(error));
+    }
     let size = buf.len();
     if size == 0 {
         let err = "Zero bytes written during serialization.";
         return Result::Err(std::io::Error::other(err));
     }
-    let demand = Demand::less_than(size);
-    let mut opt_segm = tx
-        .write_async(&demand)
-        .may_cancel_with(tok)
-        .await;
-    if let Option::Some(segm) = opt_segm.as_mut().pick_left() {
-        // SAFETY: `buf` 是本函数独占的 `Vec<u8>`，其前 `size` 个字节已初始化；
-        // `MaybeUninit<u8>` 与 `u8` 布局相同（同尺寸、同对齐、无 niche），因此按
-        // `size` 长度把这段已初始化内存重新解释为 `MaybeUninit<u8>` 切片是健全的。
-        let buff = unsafe {
-            let p = buf.as_mut_ptr() as *mut MaybeUninit<u8>;
-            slice::from_raw_parts_mut(p, size)
-        };
-        let sent_size = segm.move_items_from_buff(buff);
-        return Result::Ok(sent_size);
-    }
-    if let Option::Some(err) = opt_segm.pick_right() {
-        let err = err.to_string();
-        return Result::Err(std::io::Error::other(err));
-    }
-    Result::Ok(0usize)
+    crate::encode_::write_all_async_(tx, &buf, &tok).await?;
+    Result::Ok(size)
 }
 
 /// Receive and deserialize the request prefix from stream
@@ -163,36 +138,14 @@ pub(crate) async fn recv_request_prefix_async<TyRx, TyTok>(
     tok: TyTok,
 ) -> Result<ReqPrefix, std::io::Error>
 where
-    TyRx: TrBuffRead<u8> + TrConsumerState,
+    TyRx: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
 {
-    fn deserialize_prefix<R, C>(
-        r: &mut R,
-        c: C,
-    ) -> Result<ReqPrefix, rmp_serde::decode::Error>
-    where
-        R: TrBuffRead<u8> + TrConsumerState,
-        C: TrCancellationToken,
-    {
-        // `AsStdRead` 按值持有令牌；再包一层转发，就不必要求令牌可克隆。
-        let mut std_read = StdReadAdapter::new_(AsStdRead::new(r, c));
-        let des_method = rmp_serde::from_read::<_, AccessMethod>(&mut std_read);
-        let method = match des_method {
-            Result::Err(err) => return Result::Err(err),
-            Result::Ok(m) => m,
-        };
-        let des_location = rmp_serde::from_read::<_, String>(&mut std_read);
-        let location = match des_location {
-            Result::Err(err) => return Result::Err(err),
-            Result::Ok(m) => m,
-        };
-        let des_headers = rmp_serde::from_read::<_, Option<Headers>>(&mut std_read);
-        let headers = match des_headers {
-            Result::Err(err) => return Result::Err(err),
-            Result::Ok(m) => m,
-        };
-        Result::Ok(ReqPrefix(method, location, headers))
-    }
-
-    deserialize_prefix(rx, tok).map_err(std::io::Error::other)
+    // 三个前缀值共用一份累积缓冲与「已消费字节数」，因此不会重复解析前面的字节。
+    let mut buf: Vec<u8> = Vec::new();
+    let mut consumed = 0usize;
+    let method: AccessMethod = read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
+    let location: String = read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
+    let headers: Option<Headers> = read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
+    Result::Ok(ReqPrefix(method, location, headers))
 }

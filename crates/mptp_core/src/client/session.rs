@@ -4,7 +4,7 @@
 //! 半边（`accept_async` 的产物），因此调用者可以在同一子上持续交互（一问一答，或
 //! 推送 / 拉取到推流结束）。
 
-use abs_buff::{buffer::TrConsumerState, gen_may_cancel_future, x_deps::abs_cancel};
+use abs_buff::{gen_may_cancel_future, x_deps::abs_cancel};
 use abs_cancel::TrCancellationToken;
 
 use super::{
@@ -63,8 +63,6 @@ where
 impl<C> TrSession<C> for Session<C>
 where
     C: TrClientConfig,
-    // 读取响应前缀要走 `AsStdRead`，它要求接收半边能报告「已耗尽 / 对端已关闭」。
-    ChannelRx<C>: TrConsumerState,
 {
     type RecvRespAsync<'f>
         = SessionRecvRespAsync<'f, 'f, C>
@@ -90,7 +88,6 @@ async fn session_recv_resp_async_<'f, C, TyTok>(
 ) -> Result<RespPrefix, ClientError>
 where
     C: TrClientConfig,
-    ChannelRx<C>: TrConsumerState,
     TyTok: TrCancellationToken,
 {
     let recv_res =

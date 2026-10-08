@@ -3,12 +3,20 @@ name = "mptp_cs_demo"
 version = "0.1.0"
 edition = "2024"
 
+# 本 crate 的职责是**给 mptp_core 做端到端验证**：真实的复用连接、真实的收发路径，
+# 但全部跑在进程内，不碰网络。它不属于 mptp_core 的依赖面，因此可以自由依赖具体
+# 实现（`smux_v1`）——反过来把这些重依赖塞进 mptp_core 的 dev-dependencies，就会让
+# 「核心定义」这个 crate 被迫跟着传输实现一起演进。
 [dependencies]
-abs_art-bridge = { version = "0.2.2", default-features = false, features = ["backend-tokio"] }
 mptp_core = { path = "../mptp_core" }
-mptp_smux_iroh = { path = "../mptp_smux_iroh" }
+
+# 真实复用连接实现。其余依赖（`abs_art` / `abs_art-bridge` / `buffex` / `mm_ptr` /
+# `abs_smux` / `abs_buff`）一律从它的 `x_deps` 取，避免同一个 crate 出现第二个来源、
+# 或后端 feature 出现第二个决定点。
+#
+# `default-features = false`：`smux_v1` 的缺省后端是 compio，而本 demo 跑在 tokio 上；
+# 两个 `test-*` feature 同时打开会让 `abs_art-bridge` 的 backend 撞车。
+smux_v1 = { path = "../../../smux_v1", default-features = false, features = ["test-tokio-runtime"] }
 
 anyhow = "1"
-rmp-serde = "1.3.*"
-iroh = "1.0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -2,12 +2,14 @@
 //!
 //! 这个模块提供：
 //!
+//! - [`config::TrServingConfig`]：服务端自己的配置契约（**与客户端那份完全独立**，
+//!   因为两端可能跑在不同进程里）；
+//! - [`config::TrServingAllocConfig`]：服务端的 ring 内存来源（accept 时必须交出）；
 //! - [`handler::TrReqHandler`]：单个 handler 的抽象；
 //! - [`handler::HandlerChain`]：把多个 handler 串成链，让同一个请求有机会
 //!   按顺序被感兴趣的 handler 处理；
-//! - [`server::Server`]：基础服务器组件，负责解码请求、路由、调用链、写回回复；
-//! - [`crate::codec::channel::RpcChannel`]：用于在代码内模拟一次请求/回复
-//!   收发的内存回环 channel。
+//! - [`server::Server`]：负责解码请求、路由、调用链、写回回复，并可在一个 binding
+//!   上监听、循环接受子流。
 //!
 //! # 与 Salvo 的对应关系
 //!
@@ -15,12 +17,19 @@
 //! - `HandlerChain` 类似于 Salvo 的 handler 链 / 中间件链；
 //! - `Server` 类似于 Salvo 的 `Service`，负责把请求交给匹配的链处理。
 //!
-//! 当前实现先面向“代码内直接模拟收发”的测试场景，后续可以再接入真实传输层。
+//! # 子流从哪来
+//!
+//! 本模块**不重复发明 channel**：一条子流的收发半边由 `abs_smux` 的
+//! `ChannelHandle::accept_async` 交出，[`server::Server::serve_listener_async`]
+//! 只负责「监听 → 接受 → 处理」这条循环。
 
+pub mod config;
 pub mod handler;
 pub mod server;
 
-mod cancel_tok_;
+mod alloc_config_;
 
-#[cfg(test)]
-mod tests_;
+pub use alloc_config_::{ServingRingPrepare, TrServingAllocConfig};
+pub use config::TrServingConfig;
+pub use handler::{BoxedFuture, FlowCtrl, HandlerChain, HandlerError, TrReqHandler};
+pub use server::{ServeError, Server, SessionContext};
