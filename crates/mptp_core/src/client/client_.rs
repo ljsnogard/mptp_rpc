@@ -12,7 +12,11 @@
 //! 第 2 步的开场消息当前不由 MPTP 使用：`smux_v1` 的响应方读循环还没有把 `OPEN`
 //! 载荷交给调用方，因此请求前缀只能等到第 4 步才进环。
 
-use abs_buff::{gen_may_cancel_future, x_deps::abs_cancel};
+use abs_buff::{
+    buffer::TrProducerState,
+    gen_may_cancel_future,
+    x_deps::abs_cancel,
+};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_smux::{
     chan::TrChannelHandle,
@@ -102,6 +106,9 @@ where
 impl<C> TrClient for Client<C>
 where
     C: TrClientConfig,
+    // 写请求前缀要经过 `AsStdWrite`，它要求写半边能报告「环是否已满」（`smux_v1` 的
+    // 实现沿用 trait 默认：不报告，于是适配器会真正等待空间）。
+    config::ChannelTx<C>: TrProducerState,
 {
     type Config = C;
 
@@ -131,6 +138,8 @@ async fn client_request_async_<'f, C, TyTok>(
 ) -> Result<Session<C>, ClientError>
 where
     C: TrClientConfig,
+    // 见 `impl TrClient`：写请求前缀要经过 `AsStdWrite`。
+    config::ChannelTx<C>: TrProducerState,
     TyTok: TrCancellationToken,
 {
     let Option::Some(conn) = client.conn_.as_ref() else {

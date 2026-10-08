@@ -22,8 +22,11 @@ use smux_v1::{
         agent::{AcceptAllEntries, HandshakeAgent},
         opts::BasicOpts,
     },
-    x_deps::mm_ptr,
+    x_deps::{abs_art, abs_art_bridge, mm_ptr},
 };
+
+use abs_art::TrLocalScope;
+use abs_art_bridge::Runtime;
 
 /// 传输环容量（字节）：只影响吞吐，不影响正确性。
 const K_TRANSPORT_CAP: usize = 64usize * 1024usize;
@@ -34,8 +37,8 @@ const K_STAGE_CAP: usize = 64usize * 1024usize;
 /// 一条子流向一个方向的环容量（字节）。
 pub(crate) const K_CHANNEL_CAP: usize = 4usize * 1024usize;
 
-/// 服务端监听的 dock。
-pub(crate) const K_LISTEN_DOCK: u32 = 1u32;
+/// 服务端监听的 dock（演示里客户端也打到这个 dock）。
+pub const K_LISTEN_DOCK: u32 = 1u32;
 
 /// 入向邀请最多同时挂起多少条。
 pub(crate) const K_LISTEN_RESERVE: usize = 8usize;
@@ -78,9 +81,54 @@ pub(crate) fn make_channel_buffs_() -> (DemoRingBuff, DemoRingBuff) {
 
 /// 在进程内建一对互连的复用连接（A 主动、B 被动）。
 ///
-/// 握手在本地完成，连接的五个循环经**本地作用域**投递，因此调用点必须在
-/// `TrLocalScope::run_until` 里被驱动，否则循环不会被推进。
+/// # 为什么连接要被托管在**另一个线程**上
+///
+/// `abs_buff` 的环是全被动的：环里的数据要靠 `smux_v1` 那五个读 / 写循环搬进搬出，
+/// 而那些循环经 `TrLocalScope` 投递到**本线程**的本地队列（tokio 下即 `LocalSet`），
+/// 只能由同一线程上的 `run_until` 驱动。
+///
+/// 应用侧读环时走的是 `AsStdRead`——一个同步的 `std::io::Read`，内部 `block_on`
+/// 会把当前线程占住。**如果连接循环和应用在同一线程，队列就再也不会被驱动**，
+/// 于是「等环里有数据」等的是一个没人喂的环：这是闭合的死锁，`run_until` 嵌套、
+/// `park_timeout` 都救不了（都实测过）。
+///
+/// 所以这里把连接交给一个**专用线程**：它在自己的 tokio 运行时里拿到本地队列，
+/// 用 `run_until` 一直驱动到进程结束；连接对象本身（`MuxConnection` 是
+/// `Send + Sync` 的智能指针）经 channel 交回调用线程。调用线程此后同步读写，
+/// 而循环在宿主线程上继续跑——这正是 `AsStdRead / AsStdWrite` 能工作的前提。
 pub async fn connect_pair_() -> Result<(DemoConn, DemoConn)> {
+    tokio::task::spawn_blocking(host_pair_)
+        .await
+        .map_err(|err| anyhow!("连接的宿主线程 panic: {err}"))?
+}
+
+/// 在**专用线程**上建连接并长期托管它的循环，把连接对象交回调用线程。
+fn host_pair_() -> Result<(DemoConn, DemoConn)> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(DemoConn, DemoConn)>>();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("建宿主线程的 tokio 运行时");
+        rt.block_on(async move {
+            let runtime = <Runtime<{ abs_art::FULL }>>::current();
+            let scope = runtime.local_scope();
+            // 整段都跑在 `run_until` 里：握手要它驱动，连接建成之后的五个循环
+            // 也继续靠它驱动（末尾那个 `pending` 就是为了不提前退出）。
+            scope
+                .run_until(async move {
+                    let pair = connect_pair_inner_().await;
+                    let _ = tx.send(pair);
+                    core::future::pending::<()>().await;
+                })
+                .await;
+        });
+    });
+    rx.recv().map_err(|_| anyhow!("连接宿主线程提前退出"))?
+}
+
+/// 真正的建连：两条全被动传输环 + 本地握手。
+async fn connect_pair_inner_() -> Result<(DemoConn, DemoConn)> {
     // 每条环拆成 (写半边, 读半边)，**交叉**交给两端：A 的写接到 B 的读，反之亦然。
     let (a_tx, b_rx) = make_transport_ring_()?;
     let (b_tx, a_rx) = make_transport_ring_()?;

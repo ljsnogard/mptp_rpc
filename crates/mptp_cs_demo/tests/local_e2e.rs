@@ -12,15 +12,13 @@ use smux_v1::x_deps::{abs_art, abs_art_bridge};
 /// 测试目标：客户端与服务端在进程内完成一次完整的
 /// 「建流 → 请求 → 路由 → 回复 → 解析」往返。
 /// - 手段：建一对互连的 `MuxConnection`（本地握手 + 两条全被动传输环），服务端在
-///   dock 1 上监听并服务一条子流，客户端向 dock 1 发起 `View /hello`；整段场景在
-///   tokio 的本地作用域里由 `run_until` 驱动。
+///   dock 1 上监听并服务一条子流，客户端向 dock 1 发起 `View /hello`；连接的读 / 写
+///   循环由 `mux_` 的宿主线程持续驱动，应用侧直接 await。
 /// - 判断：客户端解析出的响应状态必须是 `200 OK`；任一步失败都会带上下文返回 `Err`，
 ///   测试随即失败。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn local_roundtrip_returns_ok_() -> anyhow::Result<()> {
-    let rt = <abs_art_bridge::Runtime<{ abs_art::FULL }>>::current();
-    let scope = rt.local_scope();
-    let status = scope.run_until(run_local_roundtrip_()).await?;
+    let status = run_local_roundtrip_().await?;
     assert_eq!(status, Status::Ok, "响应状态应当是 200 OK");
     Ok(())
 }

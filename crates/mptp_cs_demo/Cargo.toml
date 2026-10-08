@@ -2,6 +2,8 @@
 name = "mptp_cs_demo"
 version = "0.1.0"
 edition = "2024"
+description = "mptp_core 的进程内端到端演示与验收。"
+readme = "README.md"
 
 # 本 crate 的职责是**给 mptp_core 做端到端验证**：真实的复用连接、真实的收发路径，
 # 但全部跑在进程内，不碰网络。它不属于 mptp_core 的依赖面，因此可以自由依赖具体

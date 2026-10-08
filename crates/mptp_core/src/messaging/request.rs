@@ -1,10 +1,14 @@
-use abs_buff::{TrBuffRead, TrBuffWrite, x_deps::abs_cancel};
+use abs_buff::{
+    TrBuffRead, TrBuffWrite,
+    buffer::TrProducerState,
+    x_deps::abs_cancel,
+};
+use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
 use abs_cancel::TrCancellationToken;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     access_method::{AccessMethod, TrAccessMethod},
-    decode_::read_value_async_,
     messaging,
     specs::Headers,
 };
@@ -96,7 +100,7 @@ impl ReqPrefix {
 /// 写入 request 的 method, location, headers。
 ///
 /// 先序列化到本地 `Vec` 以得到 `Body_Size` 需要的长度，再用共享的
-/// [`write_all_async_`](crate::encode_::write_all_async_) 完整写进发送半边。
+/// [`AsStdWrite`] 完整写进发送半边。
 pub(crate) async fn send_request_prefix_async<'f, TyReq, TyTx, TyTok>(
     req: &'f TyReq,
     tx: &'f mut TyTx,
@@ -104,7 +108,7 @@ pub(crate) async fn send_request_prefix_async<'f, TyReq, TyTx, TyTok>(
 ) -> Result<usize, std::io::Error>
 where
     TyReq: messaging::TrRpcRequest,
-    TyTx: TrBuffWrite<u8>,
+    TyTx: TrBuffWrite<u8> + TrProducerState,
     TyTok: TrCancellationToken,
 {
     fn serialize_to<Req: messaging::TrRpcRequest>(
@@ -127,7 +131,8 @@ where
         let err = "Zero bytes written during serialization.";
         return Result::Err(std::io::Error::other(err));
     }
-    crate::encode_::write_all_async_(tx, &buf, &tok).await?;
+    let mut write = AsStdWrite::new(tx, tok);
+    std::io::Write::write_all(&mut write, &buf).map_err(std::io::Error::other)?;
     Result::Ok(size)
 }
 
@@ -141,11 +146,13 @@ where
     TyRx: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
 {
-    // 三个前缀值共用一份累积缓冲与「已消费字节数」，因此不会重复解析前面的字节。
-    let mut buf: Vec<u8> = Vec::new();
-    let mut consumed = 0usize;
-    let method: AccessMethod = read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
-    let location: String = read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
-    let headers: Option<Headers> = read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
+    // `AsStdRead` 把这条读半边暴露成 `std::io::Read`，于是 `rmp_serde` 可以直接从流里
+    // 依次解出三个前缀值——不需要我们自己去碰 `abs_buff` 的段。
+    let mut read = AsStdRead::new(rx, tok);
+    let method =
+        rmp_serde::from_read::<_, AccessMethod>(&mut read).map_err(std::io::Error::other)?;
+    let location = rmp_serde::from_read::<_, String>(&mut read).map_err(std::io::Error::other)?;
+    let headers =
+        rmp_serde::from_read::<_, Option<Headers>>(&mut read).map_err(std::io::Error::other)?;
     Result::Ok(ReqPrefix(method, location, headers))
 }

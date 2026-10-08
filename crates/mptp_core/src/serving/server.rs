@@ -19,7 +19,11 @@
 
 use std::io;
 
-use abs_buff::{gen_may_cancel_future, x_deps::abs_cancel};
+use abs_buff::{
+    buffer::TrProducerState,
+    gen_may_cancel_future,
+    x_deps::abs_cancel,
+};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_smux::{
     chan::TrChannelHandle,
@@ -92,6 +96,8 @@ where
 impl<C> Server<C>
 where
     C: TrServingConfig,
+    // 回写响应前缀要经过 `AsStdWrite`，见 `serve_channel_async_`。
+    ChannelTx<C>: TrProducerState,
 {
     /// 使用指定路由表创建服务器。
     pub const fn new(router: Router<HandlerChain<C>>) -> Self {
@@ -149,6 +155,8 @@ async fn serve_channel_async_<'f, C, TyTok>(
 ) -> Result<(), ServeError>
 where
     C: TrServingConfig,
+    // 回写响应前缀要经过 `AsStdWrite`，它要求写半边能报告「环是否已满」。
+    ChannelTx<C>: TrProducerState,
     TyTok: TrCancellationToken,
 {
     // 1. 解码请求前缀。请求体 / suffix stream 由 handler 自行从 `rx` 读取。
@@ -193,6 +201,7 @@ async fn serve_listener_async_<'f, C, TyTok>(
 ) -> Result<(), ServeError>
 where
     C: TrServingConfig,
+    ChannelTx<C>: TrProducerState,
     TyTok: TrCancellationToken,
 {
     let mut listener = binding

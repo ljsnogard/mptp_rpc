@@ -24,15 +24,19 @@
 //!   恰好一条 MessagePack 值，并回报消耗的字节数。
 
 use core::{any::Any, pin::Pin};
-use std::future::Future;
+use std::{future::Future, io};
 
-use abs_buff::{TrBuffRead, TrBuffWrite, x_deps::abs_cancel};
-use abs_cancel::NonCancellableToken;
+use abs_buff::{
+    TrBuffRead, TrBuffWrite,
+    buffer::TrProducerState,
+    x_deps::abs_cancel,
+};
+use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
+use abs_cancel::{NonCancellableToken, TrCancellationToken};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::registry_::{TrDecodeAsync, TrDecodeFn, TrEncodeAsync, TrEncodeFn};
-use crate::{decode_::read_value_async_, encode_::write_all_async_};
 
 /// Body 编解码错误。
 #[derive(Debug, Error)]
@@ -77,7 +81,7 @@ impl TrDecodeAsync for Codec {
 impl<T, W> TrEncodeFn<T, W> for Codec
 where
     T: Serialize + 'static,
-    W: TrBuffWrite<u8> + 'static,
+    W: TrBuffWrite<u8> + TrProducerState + 'static,
 {
     fn encode_async<'a>(&'a self, data: &'a T, target: &'a mut W) -> CodecAsync<'a, usize>
     where
@@ -86,17 +90,18 @@ where
         W: 'a,
     {
         Box::pin(async move {
-            let bytes = match self {
-                Codec::MsgPack => {
-                    rmp_serde::to_vec(data).map_err(|e| CodecError::Encode(e.to_string()))?
-                }
+            // `AsStdWrite` 把这条写半边暴露成 `std::io::Write`，`rmp_serde` 于是可以直接
+            // 往环里编码；外面再套一层计数，好把 `Body_Size` 需要的长度报回去。
+            let mut write = CountingWriter::new_(AsStdWrite::new(
+                target,
+                NonCancellableToken::new(),
+            ));
+            match self {
+                Codec::MsgPack => rmp_serde::encode::write(&mut write, data)
+                    .map_err(|err| CodecError::Encode(err.to_string()))?,
                 Codec::Json => todo!("Support JSON codec at the moment."),
-            };
-            let size = bytes.len();
-            write_all_async_(target, &bytes, &NonCancellableToken::new())
-                .await
-                .map_err(|err| CodecError::Encode(err.to_string()))?;
-            Result::Ok(size)
+            }
+            Result::Ok(write.written_())
         })
     }
 }
@@ -113,24 +118,96 @@ where
         R: 'a,
     {
         Box::pin(async move {
-            match self {
-                Codec::MsgPack => {
-                    // 与解码请求 / 响应前缀走同一条异步读取路径：没有 `block_on`，
-                    // 因此不会在 `LocalSet` 驱动的连接上死锁。
-                    let mut buf: Vec<u8> = Vec::new();
-                    let mut consumed = 0usize;
-                    let value: T = read_value_async_(
-                        source,
-                        &mut buf,
-                        &mut consumed,
-                        &NonCancellableToken::new(),
-                    )
-                    .await
-                    .map_err(|err| CodecError::Decode(err.to_string()))?;
-                    Result::Ok((value, consumed))
-                }
+            // 同编码侧：`AsStdRead` 提供 `std::io::Read`，计数层回报消耗了多少字节。
+            let mut read = CountingReader::new_(AsStdRead::new(source, NonCancellableToken::new()));
+            let value = match self {
+                Codec::MsgPack => rmp_serde::from_read::<_, T>(&mut read)
+                    .map_err(|err| CodecError::Decode(err.to_string()))?,
                 Codec::Json => todo!("Support JSON codec at the moment."),
-            }
+            };
+            Result::Ok((value, read.read_count_()))
         })
+    }
+}
+
+/// 给 [`AsStdWrite`] 套一层写计数：编码器要回报写了多少字节。
+struct CountingWriter<'a, W, C>
+where
+    W: TrBuffWrite + TrProducerState,
+    C: TrCancellationToken,
+{
+    inner_: AsStdWrite<'a, W, C>,
+    written_: usize,
+}
+
+impl<'a, W, C> CountingWriter<'a, W, C>
+where
+    W: TrBuffWrite + TrProducerState,
+    C: TrCancellationToken,
+{
+    fn new_(inner: AsStdWrite<'a, W, C>) -> Self {
+        CountingWriter {
+            inner_: inner,
+            written_: 0usize,
+        }
+    }
+
+    const fn written_(&self) -> usize {
+        self.written_
+    }
+}
+
+impl<W, C> io::Write for CountingWriter<'_, W, C>
+where
+    W: TrBuffWrite + TrProducerState,
+    C: TrCancellationToken,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner_.write(buf)?;
+        self.written_ += written;
+        Result::Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner_.flush()
+    }
+}
+
+/// 给 [`AsStdRead`] 套一层读计数：解码器要回报消耗了多少字节。
+struct CountingReader<'a, R, C>
+where
+    R: TrBuffRead<u8>,
+    C: TrCancellationToken,
+{
+    inner_: AsStdRead<'a, R, C>,
+    read_: usize,
+}
+
+impl<'a, R, C> CountingReader<'a, R, C>
+where
+    R: TrBuffRead<u8>,
+    C: TrCancellationToken,
+{
+    fn new_(inner: AsStdRead<'a, R, C>) -> Self {
+        CountingReader {
+            inner_: inner,
+            read_: 0usize,
+        }
+    }
+
+    const fn read_count_(&self) -> usize {
+        self.read_
+    }
+}
+
+impl<R, C> io::Read for CountingReader<'_, R, C>
+where
+    R: TrBuffRead<u8>,
+    C: TrCancellationToken,
+{
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = io::Read::read(&mut self.inner_, buf)?;
+        self.read_ += read;
+        Result::Ok(read)
     }
 }

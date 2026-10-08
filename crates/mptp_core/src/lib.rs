@@ -5,8 +5,6 @@
 pub mod access_method;
 pub mod client;
 pub mod codec;
-mod decode_;
-mod encode_;
 pub mod messaging;
 pub mod routing;
 pub mod serving;

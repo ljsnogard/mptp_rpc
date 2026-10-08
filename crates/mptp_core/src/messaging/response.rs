@@ -1,8 +1,13 @@
-use abs_buff::{TrBuffRead, TrBuffWrite, x_deps::abs_cancel};
+use abs_buff::{
+    TrBuffRead, TrBuffWrite,
+    buffer::TrProducerState,
+    x_deps::abs_cancel,
+};
+use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
 use abs_cancel::TrCancellationToken;
 use serde::Serialize;
 
-use crate::{decode_::read_value_async_, messaging, specs};
+use crate::{messaging, specs};
 
 pub struct RespPrefix(pub specs::Status, pub Option<specs::Headers>);
 
@@ -19,7 +24,7 @@ pub(crate) async fn send_response_prefix_async<'f, TyResp, TyTx, TyTok>(
 ) -> Result<usize, std::io::Error>
 where
     TyResp: messaging::TrRpcResponse,
-    TyTx: TrBuffWrite<u8>,
+    TyTx: TrBuffWrite<u8> + TrProducerState,
     TyTok: TrCancellationToken,
 {
     fn serialize_to<Resp: messaging::TrRpcResponse>(
@@ -41,7 +46,8 @@ where
         let err = "Zero bytes written during serialization.";
         return Result::Err(std::io::Error::other(err));
     }
-    crate::encode_::write_all_async_(tx, &buf, &tok).await?;
+    let mut write = AsStdWrite::new(tx, tok);
+    std::io::Write::write_all(&mut write, &buf).map_err(std::io::Error::other)?;
     Result::Ok(size)
 }
 
@@ -55,11 +61,11 @@ where
     TyRx: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
 {
-    // 两个前缀值共用一份累积缓冲与「已消费字节数」，因此不会重复解析前面的字节。
-    let mut buf: Vec<u8> = Vec::new();
-    let mut consumed = 0usize;
-    let status: specs::Status = read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
-    let headers: Option<specs::Headers> =
-        read_value_async_(rx, &mut buf, &mut consumed, &tok).await?;
+    // 与请求前缀同一条路径：`AsStdRead` 让 `rmp_serde` 直接从流里解出两个值。
+    let mut read = AsStdRead::new(rx, tok);
+    let status =
+        rmp_serde::from_read::<_, specs::Status>(&mut read).map_err(std::io::Error::other)?;
+    let headers = rmp_serde::from_read::<_, Option<specs::Headers>>(&mut read)
+        .map_err(std::io::Error::other)?;
     Result::Ok(RespPrefix(status, headers))
 }
