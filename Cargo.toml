@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/mptp_core",
-    "crates/mptp_cs_demo",
+    # "crates/mptp_cs_demo",
 ]
 
 # `crates/mptp_cs_demo` **刻意不是本 workspace 的成员**：它要按 tokio / compio / smol

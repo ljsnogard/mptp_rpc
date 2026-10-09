@@ -1,42 +1,35 @@
-//! 内置的 body 编解码器，以及编解码错误与异步产物类型。
+//! body 编解码的**接口层**。
 //!
-//! 这里只放「与具体业务类型无关」的三样东西：
+//! 这里只放与具体实现无关的三样东西：
 //!
 //! - [`CodecError`]：编解码失败的错误；
-//! - [`CodecAsync`]：编解码过程的异步产物（借用了调用方的数据与缓冲，因此带生命周期）；
-//! - [`Codec`]：内置的编码格式（MessagePack / JSON）。它对任意
-//!   `Serialize` / `DeserializeOwned` 的类型都可用，因此可以直接作为一个业务类型
-//!   的编解码器注册进 [`CodecRegistry`](super::CodecRegistry)。
+//! - [`TrEncoder`] / [`TrDecoder`]：把业务类型 `T` 编成 body / 从 body 解出 `T` 的接口；
+//! - 两个方向的异步产物 [`EncodeAsync`] / [`DecodeAsync`]（由 `encode_` / `decode_`
+//!   子模块定义，这里转出）。
 //!
-//! # 为什么两边都不走 `std::io` 适配器
+//! # 为什么接口不对 `T` 设 serde 约束
 //!
-//! `rmp_serde` 的编解码入口要的是 `std::io::{Read, Write}`，而 `abs_buff` 的段接口是
-//! 异步的。`abs_buff_stdio_adapt` 的 `AsStdWrite` / `AsStdRead` 能把两者接起来，但它们是
-//! **同步**的——内部靠 `block_on` 等数据。那在 `smux_v1` 的用法下会死锁：连接的读 / 写
-//! 循环被投递到**本线程**（tokio 下即 `LocalSet`），而 `block_on` 把当前线程占住之后，
-//! 本地队列再也不会被驱动。
+//! 「`T` 要能被 serde 接受」是**某一对具体实现**的能力，不是接口的前提。约束因此留在
+//! 实现侧（见 [`serde_`](super::serde_) 模块）。[`CodecRegistry`](super::CodecRegistry)
+//! 于是不必区分「`T` 是否能被 serde 接受」，它只要求「有人愿意处理这个 `T`」；
+//! 选错了实现时，编译器会在**选择实现的那一行**报错，而不是在注册表的签名里。
 //!
-//! 因此两侧都用真正的异步路径：
+//! # 产物为什么能既通用又 object safe
 //!
-//! - 编码：`rmp_serde::to_vec` 先在自己内存里算出完整字节（顺带得到 `Body_Size` 需要的
-//!   长度），再用 [`write_all_async_`] 分块异步落进目标环；
-//! - 解码：走 [`read_value_async_`](crate::decode_::read_value_async_)，它逐字节异步读出
-//!   恰好一条 MessagePack 值，并回报消耗的字节数。
+//! [`TrEncoder::encode_async`] 返回的是通用产物 [`EncodeAsync`]——类型里不出现任何
+//! 具体实现。这是靠产物内部一个**私有枚举**做到的：泛型方法（带取消令牌的 future）
+//! 无法 object safe，于是把动态分发从 `dyn` 换成封闭枚举，藏在产物内部不让外界接触。
+//! 本 trait 因此保住 object safety，注册表才能存 `Box<dyn TrEncoder<T, C>, A>`。
 
-use core::{any::Any, pin::Pin};
-use std::{future::Future, io};
+use core::mem::MaybeUninit;
 
-use abs_buff::{
-    TrBuffRead, TrBuffWrite,
-    buffer::TrProducerState,
-    x_deps::abs_cancel,
-};
-use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
-use abs_cancel::{NonCancellableToken, TrCancellationToken};
-use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use super::registry_::{TrDecodeAsync, TrDecodeFn, TrEncodeAsync, TrEncodeFn};
+use super::{
+    config_::TrCodecConfig,
+    decode_::{DecodeAsync, DecodeBuffRead},
+    encode_::{EncodeAsync, EncodeBuffWrite},
+};
 
 /// Body 编解码错误。
 #[derive(Debug, Error)]
@@ -48,166 +41,36 @@ pub enum CodecError {
     Decode(String),
 }
 
-/// 编解码过程返回的异步产物。
+/// 把一个业务类型 `T` 编码成 body 的接口。
 ///
-/// 它借用了调用方的数据 / 目标缓冲，因此带一个生命周期参数：调用点必须在这些借用
-/// 仍然有效的同一个作用域里把它 `await` 掉，不能把它存进结构体或跨任务发送。
-pub type CodecAsync<'a, T> = Pin<Box<dyn Future<Output = Result<T, CodecError>> + 'a>>;
-
-/// 支持的 body 编解码器。
+/// 本 trait 是 object safe 的，因此可以 `Box<dyn TrEncoder<T, C>, A>` 地存进
+/// [`CodecRegistry`](super::CodecRegistry)；擦除只发生在 `T` 这一层。
 ///
-/// 使用枚举而不是 trait object，是为了让「选哪种格式」保持成一个轻量的 `Copy` 值：
-/// 注册表里存的是**类型到编解码器**的映射，而格式的选择本身是配置项。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Codec {
-    /// MessagePack，对应 `StdHeaderVal::Mime_Body_Type_MsgPack`。
-    MsgPack,
-    /// JSON，对应 `StdHeaderVal::Mime_Body_Type_Json` 或字符串 `application/json`。
-    Json,
-}
-
-impl TrEncodeAsync for Codec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl TrDecodeAsync for Codec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-impl<T, W> TrEncodeFn<T, W> for Codec
+/// 它不对 `T` 设 serde 约束，理由见模块文档；内置的 serde 类实现见
+/// [`serde_`](super::serde_)。
+pub trait TrEncoder<T, C>
 where
-    T: Serialize + 'static,
-    W: TrBuffWrite<u8> + TrProducerState + 'static,
+    C: TrCodecConfig,
 {
-    fn encode_async<'a>(&'a self, data: &'a T, target: &'a mut W) -> CodecAsync<'a, usize>
-    where
-        Self: 'a,
-        T: 'a,
-        W: 'a,
-    {
-        Box::pin(async move {
-            // `AsStdWrite` 把这条写半边暴露成 `std::io::Write`，`rmp_serde` 于是可以直接
-            // 往环里编码；外面再套一层计数，好把 `Body_Size` 需要的长度报回去。
-            let mut write = CountingWriter::new_(AsStdWrite::new(
-                target,
-                NonCancellableToken::new(),
-            ));
-            match self {
-                Codec::MsgPack => rmp_serde::encode::write(&mut write, data)
-                    .map_err(|err| CodecError::Encode(err.to_string()))?,
-                Codec::Json => todo!("Support JSON codec at the moment."),
-            }
-            Result::Ok(write.written_())
-        })
-    }
+    /// 开始一次编码，返回可被 `.await`（或用取消令牌包一层）的产物。
+    fn encode_async<'f>(
+        &'f self,
+        data: &'f T,
+        buffer: &'f mut EncodeBuffWrite<C>,
+    ) -> EncodeAsync<'f, T, C>;
 }
 
-impl<T, R> TrDecodeFn<T, R> for Codec
+/// 从 body 里解出一个业务类型 `T` 的接口，与 [`TrEncoder`] 对称。
+///
+/// 同样不对 `T` 设 serde 约束，理由见模块文档。
+pub trait TrDecoder<T, C>
 where
-    T: DeserializeOwned + 'static,
-    R: TrBuffRead<u8> + 'static,
+    C: TrCodecConfig,
 {
-    fn decode_async<'a>(&'a self, source: &'a mut R) -> CodecAsync<'a, (T, usize)>
-    where
-        Self: 'a,
-        T: 'a,
-        R: 'a,
-    {
-        Box::pin(async move {
-            // 同编码侧：`AsStdRead` 提供 `std::io::Read`，计数层回报消耗了多少字节。
-            let mut read = CountingReader::new_(AsStdRead::new(source, NonCancellableToken::new()));
-            let value = match self {
-                Codec::MsgPack => rmp_serde::from_read::<_, T>(&mut read)
-                    .map_err(|err| CodecError::Decode(err.to_string()))?,
-                Codec::Json => todo!("Support JSON codec at the moment."),
-            };
-            Result::Ok((value, read.read_count_()))
-        })
-    }
-}
-
-/// 给 [`AsStdWrite`] 套一层写计数：编码器要回报写了多少字节。
-struct CountingWriter<'a, W, C>
-where
-    W: TrBuffWrite + TrProducerState,
-    C: TrCancellationToken,
-{
-    inner_: AsStdWrite<'a, W, C>,
-    written_: usize,
-}
-
-impl<'a, W, C> CountingWriter<'a, W, C>
-where
-    W: TrBuffWrite + TrProducerState,
-    C: TrCancellationToken,
-{
-    fn new_(inner: AsStdWrite<'a, W, C>) -> Self {
-        CountingWriter {
-            inner_: inner,
-            written_: 0usize,
-        }
-    }
-
-    const fn written_(&self) -> usize {
-        self.written_
-    }
-}
-
-impl<W, C> io::Write for CountingWriter<'_, W, C>
-where
-    W: TrBuffWrite + TrProducerState,
-    C: TrCancellationToken,
-{
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let written = self.inner_.write(buf)?;
-        self.written_ += written;
-        Result::Ok(written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner_.flush()
-    }
-}
-
-/// 给 [`AsStdRead`] 套一层读计数：解码器要回报消耗了多少字节。
-struct CountingReader<'a, R, C>
-where
-    R: TrBuffRead<u8>,
-    C: TrCancellationToken,
-{
-    inner_: AsStdRead<'a, R, C>,
-    read_: usize,
-}
-
-impl<'a, R, C> CountingReader<'a, R, C>
-where
-    R: TrBuffRead<u8>,
-    C: TrCancellationToken,
-{
-    fn new_(inner: AsStdRead<'a, R, C>) -> Self {
-        CountingReader {
-            inner_: inner,
-            read_: 0usize,
-        }
-    }
-
-    const fn read_count_(&self) -> usize {
-        self.read_
-    }
-}
-
-impl<R, C> io::Read for CountingReader<'_, R, C>
-where
-    R: TrBuffRead<u8>,
-    C: TrCancellationToken,
-{
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read = io::Read::read(&mut self.inner_, buf)?;
-        self.read_ += read;
-        Result::Ok(read)
-    }
+    /// 开始一次解码，返回可被 `.await`（或用取消令牌包一层）的产物。
+    fn decode_async<'f>(
+        &'f self,
+        data: &'f mut MaybeUninit<T>,
+        buffer: &'f mut DecodeBuffRead<C>,
+    ) -> DecodeAsync<'f, T, C>;
 }
