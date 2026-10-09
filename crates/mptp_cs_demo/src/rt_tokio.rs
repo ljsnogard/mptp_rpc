@@ -34,7 +34,6 @@ use smux_v1::{
         agent::{AcceptAllEntries, HandshakeAgent},
         opts::BasicOpts,
     },
-    x_deps::abs_art_bridge,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -74,7 +73,7 @@ pub async fn run_async() -> ExitCode {
 
 /// 按角色跑一次：服务端监听并服务一条子流，客户端拨号并发一次请求。
 async fn run_peer_(opts: &PeerOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = abs_art_bridge::current();
+    let runtime = smux_v1::connection::default_rt_();
     assert_runtime_(&runtime, opts.runtime)?;
 
     // 宿主线程包办 socket 与连接；本线程只拿地址与连接对象。
@@ -169,7 +168,7 @@ fn spawn_host_(
             }
         };
         rt.block_on(async move {
-            let art = abs_art_bridge::current();
+            let art = smux_v1::connection::default_rt_();
             let scope = art.local_scope();
             scope
                 .run_until(async move {

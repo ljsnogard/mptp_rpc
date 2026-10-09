@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/mptp_core",
-    "crates/mptp_smux_iroh",
+    "crates/mptp_cs_demo",
 ]
 
 # `crates/mptp_cs_demo` **刻意不是本 workspace 的成员**：它要按 tokio / compio / smol
@@ -14,3 +14,18 @@ members = [
 [workspace.package]
 edition = "2024"
 authors = ["lino <lino_snsalias@outlook.com>"]
+
+# **开发期**：`abs_art` 家族的本地联调。新门面 `abs_art-facade` 只存在于本机同级
+# `abs_art/`，`mptp_core` 经它用的是 **path** 版；而本 workspace 的成员（`mptp_smux_iroh`
+# 拉 `smux_v1`，`smux_v1` 又依赖 git 源的 `abs_art` / `abs_art-mock_clock`）仍走 git。
+# `[patch]` 只对**构建根 workspace** 生效，`smux_v1` 自己 manifest 里那份管不到这里：
+# 不重定向就会出现两个 `abs_art` 实例，`TrTime` / `TrLocalScope`「同名不同源」。
+#
+# 列的是本图上真正来自 git 的包；`abs_art-bridge` 不走 git（门面用 path，
+# `mptp_smux_iroh` 用的是 registry 的 0.2.2）。
+[patch."https://gitee.com/lino_snsalias/abs_art.git"]
+abs_art = { path = "../abs_art/abs_art" }
+abs_art-mock_clock = { path = "../abs_art/abs_art-mock_clock" }
+abs_art-tokio = { path = "../abs_art/abs_art-tokio" }
+abs_art-compio = { path = "../abs_art/abs_art-compio" }
+abs_art-smol = { path = "../abs_art/abs_art-smol" }

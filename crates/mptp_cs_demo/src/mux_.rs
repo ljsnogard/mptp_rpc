@@ -12,6 +12,7 @@ use core::mem::MaybeUninit;
 use abs_mm::CoreAlloc;
 #[cfg(feature = "rt-tokio")]
 use anyhow::{Result, anyhow};
+use mptp_core::x_deps::mm_ptr;
 use mm_ptr::Owned;
 use mm_ptr::x_deps::abs_mm;
 use smux_v1::x_deps::abs_buff;
@@ -30,7 +31,7 @@ use smux_v1::{
 #[cfg(feature = "rt-tokio")]
 use smux_v1::connection::{BufferedRx, BufferedTx, new_buffered_channel};
 #[cfg(feature = "rt-tokio")]
-use smux_v1::x_deps::{abs_art, abs_art_bridge};
+use smux_v1::x_deps::abs_art;
 
 use abs_buff::{TrBuffRead, TrBuffWrite};
 
@@ -143,7 +144,7 @@ fn host_pair_() -> Result<(LocalConn, LocalConn)> {
             .build()
             .expect("建宿主线程的 tokio 运行时");
         rt.block_on(async move {
-            let runtime = abs_art_bridge::current();
+            let runtime = smux_v1::connection::default_rt_();
             let scope = runtime.local_scope();
             // 整段都跑在 `run_until` 里：握手要它驱动，连接建成之后的五个循环
             // 也继续靠它驱动（末尾那个 `pending` 就是为了不提前退出）。

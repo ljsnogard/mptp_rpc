@@ -6,7 +6,8 @@
 //! # 一个进程只扮演一个角色
 //!
 //! 这不是为了省事。`AsStdRead / AsStdWrite` 的同步等待要在**同线程**上嵌套驱动本地队列
-//! （见 `abs_buff_stdio_adapt::block_on_`）；同一个进程里若既有服务端又有客户端，两者的
+//! （见 `abs_buff_stdio_adapt` 的 `AsStdRead` / `AsStdWrite`，内部走
+//! `TrLocalScope::block_on_local`）；同一个进程里若既有服务端又有客户端，两者的
 //! 同步等待会互相锁死——一端 park 住，另一端就永远等不到建流的裁决。拆成两个进程之后，
 //! 每个进程里只有**一次**同步等待，嵌套 `run_until` 驱动的就是它自己的收发 future。
 

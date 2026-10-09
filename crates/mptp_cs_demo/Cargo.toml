@@ -14,29 +14,29 @@ publish = false
 [workspace]
 
 [dependencies]
-mptp_core = { path = "../mptp_core" }
+# 关掉 `mptp_core` 的缺省后端：后端选择完全交给本 crate 的 `rt-*` feature。
+mptp_core = { path = "../mptp_core", default-features = false }
 
 # 后端选择完全交给本 crate 的 `rt-*` feature：先关掉 `smux_v1` 的缺省后端，否则
 # 「缺省 + 显式」两个后端会同时打开，撞上 bridge 的守护。
 smux_v1 = { path = "../../../smux_v1", default-features = false }
 
-# 直接依赖它是为了**选同步等待的驱动**（`rt-*` feature）——`mptp_core` 是运行时无关的，
-# 不该替它做这个选择。
-abs_buff_stdio_adapt = { path = "../../../abs_buff_stdio_adapt" }
+# `abs_buff_stdio_adapt` / `mm_ptr` / `abs_buff` / `abs_smux` 都**不再直接声明**：
+# `mptp_core` 已把它们经 `x_deps` 转出（见 `crates/mptp_core/src/lib.rs`）。下游只依赖
+# `mptp_core` 就自动与它用的是**同一个源**，不会再出现同名不同源的环半部类型。
+# 需要时走 `mptp_core::x_deps::{mm_ptr, abs_buff, abs_smux, abs_buff_stdio_adapt}`。
 
-# 环与分配器：必须与 `smux_v1`、与三个适配器 crate **同源同分支**，否则会出现同名不同源
-# 的 `buffex`，环半部的类型对不上。
-buffex = { git = "https://gitee.com/lino_snsalias/buffex.git", branch = "dev/0.3.0" }
-mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 # 三个**设备适配器**一律走本机同级路径：本 demo 依赖它们「自驱动写环」的那次更新
 # （`BuffWrite::try_new_local`，以及 `Drop` 里的关生产端 + detach 泵），那份改动还没推到
 # gitee；走 git 依赖只会拿到旧 commit，写泵就没人驱动。
-buffex_tokio_adapt = { path = "../../../buffex_tokio_adapt" }
-buffex_compio_adapt = { path = "../../../buffex_compio_adapt" }
-buffex_smol_adapt = { path = "../../../buffex_smol_adapt" }
+buffex_tokio_adapt  = { git = "https://gitee.com/lino_snsalias/buffex_tokio_adapt.git" }
+buffex_compio_adapt = { git = "https://gitee.com/lino_snsalias/buffex_compio_adapt.git" }
+buffex_smol_adapt   = { git = "https://gitee.com/lino_snsalias/buffex_smol_adapt.git" }
 
-# 场景并发一律用与运行时无关的组合子：compio 的 socket 半边是 `!Send`，`spawn` 不可用。
-futures = "0.3.*"
+# buffex_tokio_adapt  = { path = "../buffex_tokio_adapt" }
+# buffex_compio_adapt = { path = "../buffex_compio_adapt" }
+# buffex_smol_adapt   = { path = "../buffex_smol_adapt" }
+
 anyhow = "1"
 
 # 三个运行时都是正式依赖：三个 peer 由同一份源码按 feature 各编译一次，每个构建里只有
@@ -46,15 +46,18 @@ compio = { version = "0.19.*", features = ["macros", "net", "runtime", "time"], 
 smol = { version = "2", optional = true }
 
 [features]
-# 缺省 = tokio，与 `mptp_core` 的 dev-dependency 一致，裸 `cargo build` 也能出一个 peer。
-# 换运行时必须 `--no-default-features --features rt-<名字>`，否则两个后端同时打开。
+# 缺省 = compio。换运行时必须 `--no-default-features --features rt-<名字>`：三个后端
+# **互斥三选一**，而选择只需要说**一次**——`mptp_core/rt-*` 与 `smux_v1/test-*-runtime`
+# 都只是把 `abs_art-facade/rt-*` 点亮，门面（全家族唯一决定后端的 crate）会让全图
+# （本 crate、`smux_v1`、`mptp_core`、`abs_buff_stdio_adapt` 的同步等待）统一跟上。
+# 逐层转发 `abs_buff_stdio_adapt/rt-*` 已经不需要了。
 #
-# 这里只需要转发给 `smux_v1`：同步等待的语义（`block_on_local`）由 `abs_art` 各后端
-# 自己兑现，`abs_buff_stdio_adapt` 已经不再需要「按后端选驱动」的 feature。
+# `dep:<运行时>` 是必须的：三个运行时 crate 都是 optional，不在这里显式启用就永远不进
+# 依赖图（本 demo 的 `Tx` / `Rx` 与各壳直接引用它们）。
 default = ["rt-compio"]
-rt-compio = ["smux_v1/test-compio-runtime"]
-rt-smol = ["smux_v1/test-smol-runtime"]
-rt-tokio = ["smux_v1/test-tokio-runtime"]
+rt-compio = ["dep:compio", "mptp_core/rt-compio", "smux_v1/test-compio-runtime"]
+rt-smol = ["dep:smol", "mptp_core/rt-smol", "smux_v1/test-smol-runtime"]
+rt-tokio = ["dep:tokio", "mptp_core/rt-tokio", "smux_v1/test-tokio-runtime"]
 
 # crate 名与 bin 名都是下划线形式，nightly cargo 的 kebab-case 命名 lint 在这里纯属噪音。
 [lints.cargo]
@@ -75,19 +78,26 @@ name = "peer_smol"
 path = "src/bin/peer_smol.rs"
 required-features = ["rt-smol"]
 
-# `abs_smux` 以 git 源依赖 `abs_buff`，而同仓的 `abs_buff_stdio_adapt` 以本地 path 依赖
-# 它——不统一的话，依赖图里会出现**两个 `abs_buff` 实例**，两者的 `TrBuffRead` /
-# `TrBuffWrite` 互不相认（`abs_cancel` 也随之分裂）。独立 workspace 要自己写一份。
-[patch."https://gitee.com/lino_snsalias/abs_buff.git"]
-abs_buff = { path = "../../../abs_buff" }
+# **开发期**：`abs_buff` 的本地联调。目前**整段注释掉**：依赖图上的 `abs_buff` 一律来自
+# git（`mptp_core`、三个适配器 crate、`smux_v1` 都是同一条 git spec），不存在 path 与 git
+# 并存的分裂，因此不需要 patch。要做本机联调时再打开。
+# [patch."https://gitee.com/lino_snsalias/abs_buff.git"]
+# abs_buff = { path = "../../../abs_buff" }
 
-# **开发期**：`abs_art` 家族的本地联调。`TrLocalScope::block_on_local`（三端实现）正在
-# 本仓同级的 `abs_art/` 里改，尚未推到 gitee。六个 crate 必须**一起**重定向，否则
-# `TrLocalScope` 会出现「同名不同源」。推到 gitee 之后可以删除本段。
-[patch."https://gitee.com/lino_snsalias/abs_art.git"]
-abs_art = { path = "../../../abs_art/abs_art" }
-abs_art-bridge = { path = "../../../abs_art/abs_art-bridge" }
-abs_art-mock_clock = { path = "../../../abs_art/abs_art-mock_clock" }
-abs_art-tokio = { path = "../../../abs_art/abs_art-tokio" }
-abs_art-compio = { path = "../../../abs_art/abs_art-compio" }
-abs_art-smol = { path = "../../../abs_art/abs_art-smol" }
+# **开发期**：`abs_art` 家族的本地联调。**必须打开**——新增的 `abs_art-facade` 只存在于
+# 本机同级 `abs_art/`，而图上仍有几个 crate 以 git spec 依赖 `abs_art` 家族：
+# `smux_v1`（`abs_art` / `abs_art-mock_clock`）与三个**设备适配器**
+# （`buffex_tokio_adapt` 拉 `abs_art-tokio`、`buffex_smol_adapt` 拉 `abs_art-smol`）。
+#
+# `[patch]` 只对**构建根 workspace** 生效，demo 是独立 workspace，因此 `smux_v1` 自己
+# manifest 里那份 patch 管不到这里。不重定向的话图里会出现**两个 `abs_art-tokio`**
+# （git 版 + 门面带进来的 path 版）：编译期看不出来，但适配器的写泵会挂到另一个实例的
+# 本地队列上，于是握手一条字节都不发、两端永久停住。
+#
+# 不列 `abs_art-bridge` / `abs_art-compio`：前者已全部走门面的 path，后者 demo 图上没有
+# git 来源（`buffex_compio_adapt` 不依赖 `abs_art`）。
+# [patch."https://gitee.com/lino_snsalias/abs_art.git"]
+# abs_art = { path = "../../../abs_art/abs_art" }
+# abs_art-mock_clock = { path = "../../../abs_art/abs_art-mock_clock" }
+# abs_art-tokio = { path = "../../../abs_art/abs_art-tokio" }
+# abs_art-smol = { path = "../../../abs_art/abs_art-smol" }

@@ -17,7 +17,7 @@ use smux_v1::{
         agent::{AcceptAllEntries, HandshakeAgent},
         opts::BasicOpts,
     },
-    x_deps::{abs_art, abs_art_bridge},
+    x_deps::abs_art,
 };
 
 use abs_art::TrLocalScope;
@@ -59,7 +59,7 @@ pub async fn run_async() -> ExitCode {
 
 /// 按角色跑一次。
 async fn run_peer_(opts: &PeerOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = abs_art_bridge::current();
+    let runtime = smux_v1::connection::default_rt_();
     assert_runtime_(&runtime, opts.runtime)?;
     let scope = runtime.local_scope();
 

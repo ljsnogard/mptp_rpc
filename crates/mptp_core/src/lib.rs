@@ -12,7 +12,7 @@ pub mod specs;
 pub mod transport;
 
 pub mod x_deps {
-    pub use abs_art_bridge;
+    pub use abs_art_facade;
     pub use abs_buff::x_deps::{abs_cancel, anylr, gen_mcf2, funty};
     pub use abs_buff_stdio_adapt;
     pub use abs_buff_stdio_adapt::x_deps::abs_buff;

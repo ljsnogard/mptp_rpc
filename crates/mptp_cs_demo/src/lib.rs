@@ -25,10 +25,12 @@
 //!
 //! # 为什么选运行时是编译期的事
 //!
-//! 后端由 `abs_art-bridge` 的 feature 选定，而 `smux_v1` 的三个 `test-*-runtime` 是
-//! **互斥三选一**（多后端且没有显式默认后端会撞 bridge 的 `compile_error!`）。因此
-//! `--runtime` 只用于**自检**：与编译期后端不一致就立刻报错退出（见 [`assert_runtime_`]），
-//! 不是进程内切换运行时。这也是本 crate 必须是**独立 workspace** 的原因——见 README。
+//! 本 crate 的 `rt-tokio` / `rt-compio` / `rt-smol` 是**互斥三选一**：每个恰好打开
+//! `smux_v1` 的一个 `test-*-runtime`，而 [`Runtime`]（= `smux_v1::connection::DefaultRt_`）
+//! 就按它选出当前装配的后端。多开一个会让该别名没有唯一解，因此换运行时必须带
+//! `--no-default-features`。`--runtime` 只用于**自检**：与编译期后端不一致就立刻报错退出
+//! （见 [`assert_runtime_`]），不是进程内切换运行时。这也是本 crate 必须是**独立
+//! workspace** 的原因——见 README。
 //!
 //! # 怎么跑
 //!
@@ -129,7 +131,7 @@ use anyhow::{Result, anyhow};
 use abs_art::TrAsyncRuntime;
 #[cfg(feature = "rt-tokio")]
 use abs_smux::conn::TrConnection;
-use smux_v1::x_deps::{abs_art, abs_art_bridge};
+use smux_v1::x_deps::abs_art;
 #[cfg(feature = "rt-tokio")]
 use smux_v1::x_deps::abs_smux;
 
@@ -153,7 +155,12 @@ use mm_ptr::Shared;
 #[cfg(feature = "rt-tokio")]
 use mptp_core::{serving::server::SessionContext, specs::Status};
 
-use abs_art_bridge::Runtime;
+/// 本构建所用运行时的**运行时值**类型。
+///
+/// 取 `smux_v1` 的默认后端别名：它由 `smux_v1` 的 `test-*-runtime` **三选一**决定，正好
+/// 是本 crate 的 `rt-*` feature 打开的那一个。**不能**取 bridge 的裸名——bridge 的缺省
+/// 后端（compio）始终在线，裸名在 tokio / smol 装配下会指向另一个运行时。
+pub type Runtime = smux_v1::connection::DefaultRt_;
 
 /// 核对「命令行声明的运行时」与「编译期选定的后端」是否一致。
 ///

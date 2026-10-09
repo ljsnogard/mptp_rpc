@@ -17,7 +17,7 @@ use smux_v1::{
         agent::{AcceptAllEntries, HandshakeAgent},
         opts::BasicOpts,
     },
-    x_deps::{abs_art, abs_art_bridge},
+    x_deps::abs_art,
 };
 
 use abs_art::TrLocalScope;
@@ -49,7 +49,7 @@ pub fn run_blocking() -> ExitCode {
             return ExitCode::from(2u8);
         }
     };
-    let runtime = abs_art_bridge::current();
+    let runtime = smux_v1::connection::default_rt_();
     if let Result::Err(err) = assert_runtime_(&runtime, opts.runtime) {
         eprintln!("运行失败：{err}");
         return ExitCode::FAILURE;

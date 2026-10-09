@@ -11,15 +11,16 @@ license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-abs_buff = {
-    git = "https://gitee.com/lino_snsalias/abs_buff.git",
-    branch = "dev/0.3.0",
-}
-abs_art-bridge = {
-    git = "https://gitee.com/lino_snsalias/abs_art.git",
-    branch = "dev/0.3.0",
-}
+abs_buff = { git = "https://gitee.com/lino_snsalias/abs_buff.git", branch = "dev/0.3.0" }
+# **后端门面**：本 crate 只认 `abs_art_facade::Runtime`，不再直接依赖 `abs_art-bridge`。
+# 门面是全家族唯一决定「当前后端」的地方；下游点亮 `abs_art-facade/rt-tokio`，全图
+# （含 `abs_buff_stdio_adapt` 的同步等待）就都是 tokio，不需要逐层转发。
+abs_art-facade = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0" }
+# abs_art-facade = { path = "../../../abs_art/abs_art-facade" }
+# 同步等待（`AsStdRead` / `AsStdWrite`）现在也问门面要运行时值，因此这里走本地 path
+# 与门面同源；推到 gitee 后可换回 git spec。
 abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/abs_buff_stdio_adapt.git" }
+# abs_buff_stdio_adapt = { path = "../../../abs_buff_stdio_adapt" }
 
 abs_smux = { git = "https://gitee.com/lino_snsalias/abs_smux.git", branch = "dev/0.1.0" }
 # abs_smux = { path = "../../../abs_smux" }
@@ -35,6 +36,8 @@ compio = { version = "0.19.*", features = ["fs", "macros", "time", "net", "runti
 
 [features]
 default = ["rt-compio"]                        # 库自测/单编时的缺省
-rt-compio = ["abs_art-bridge/backend-compio"]
-rt-tokio  = ["abs_art-bridge/backend-tokio"]
-rt-smol   = ["abs_art-bridge/backend-smol"]
+# 三个后端互斥三选一：只转发**一次**给门面即可。`abs_buff_stdio_adapt` 不需要任何
+# 转发——门面的选择是全图并集的，它自己取到的就是同一个 `Runtime`。
+rt-compio = ["abs_art-facade/rt-compio"]
+rt-tokio  = ["abs_art-facade/rt-tokio"]
+rt-smol   = ["abs_art-facade/rt-smol"]
