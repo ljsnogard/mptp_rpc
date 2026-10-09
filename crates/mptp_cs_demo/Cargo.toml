@@ -22,7 +22,7 @@ smux_v1 = { path = "../../../smux_v1", default-features = false }
 
 # 直接依赖它是为了**选同步等待的驱动**（`rt-*` feature）——`mptp_core` 是运行时无关的，
 # 不该替它做这个选择。
-abs_buff_stdio_adapt = { path = "../../../abs_buff_stdio_adapt", default-features = false }
+abs_buff_stdio_adapt = { path = "../../../abs_buff_stdio_adapt" }
 
 # 环与分配器：必须与 `smux_v1`、与三个适配器 crate **同源同分支**，否则会出现同名不同源
 # 的 `buffex`，环半部的类型对不上。
@@ -41,17 +41,20 @@ anyhow = "1"
 
 # 三个运行时都是正式依赖：三个 peer 由同一份源码按 feature 各编译一次，每个构建里只有
 # 一个运行时的代码真的被用到。
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
-compio = { version = "0.19.*", features = ["macros", "net", "runtime", "time"] }
-smol = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"], optional = true }
+compio = { version = "0.19.*", features = ["macros", "net", "runtime", "time"], optional = true }
+smol = { version = "2", optional = true }
 
 [features]
 # 缺省 = tokio，与 `mptp_core` 的 dev-dependency 一致，裸 `cargo build` 也能出一个 peer。
 # 换运行时必须 `--no-default-features --features rt-<名字>`，否则两个后端同时打开。
-default = ["rt-tokio"]
-rt-tokio = ["smux_v1/test-tokio-runtime", "abs_buff_stdio_adapt/rt-tokio"]
-rt-compio = ["smux_v1/test-compio-runtime", "abs_buff_stdio_adapt/rt-compio"]
-rt-smol = ["smux_v1/test-smol-runtime", "abs_buff_stdio_adapt/rt-smol"]
+#
+# 这里只需要转发给 `smux_v1`：同步等待的语义（`block_on_local`）由 `abs_art` 各后端
+# 自己兑现，`abs_buff_stdio_adapt` 已经不再需要「按后端选驱动」的 feature。
+default = ["rt-compio"]
+rt-compio = ["smux_v1/test-compio-runtime"]
+rt-smol = ["smux_v1/test-smol-runtime"]
+rt-tokio = ["smux_v1/test-tokio-runtime"]
 
 # crate 名与 bin 名都是下划线形式，nightly cargo 的 kebab-case 命名 lint 在这里纯属噪音。
 [lints.cargo]
@@ -77,3 +80,14 @@ required-features = ["rt-smol"]
 # `TrBuffWrite` 互不相认（`abs_cancel` 也随之分裂）。独立 workspace 要自己写一份。
 [patch."https://gitee.com/lino_snsalias/abs_buff.git"]
 abs_buff = { path = "../../../abs_buff" }
+
+# **开发期**：`abs_art` 家族的本地联调。`TrLocalScope::block_on_local`（三端实现）正在
+# 本仓同级的 `abs_art/` 里改，尚未推到 gitee。六个 crate 必须**一起**重定向，否则
+# `TrLocalScope` 会出现「同名不同源」。推到 gitee 之后可以删除本段。
+[patch."https://gitee.com/lino_snsalias/abs_art.git"]
+abs_art = { path = "../../../abs_art/abs_art" }
+abs_art-bridge = { path = "../../../abs_art/abs_art-bridge" }
+abs_art-mock_clock = { path = "../../../abs_art/abs_art-mock_clock" }
+abs_art-tokio = { path = "../../../abs_art/abs_art-tokio" }
+abs_art-compio = { path = "../../../abs_art/abs_art-compio" }
+abs_art-smol = { path = "../../../abs_art/abs_art-smol" }

@@ -20,10 +20,12 @@
 //! socket 全程不跨 runtime：bind / accept / connect 都在宿主线程里完成，地址与连接经
 //! channel 交回应用线程。`MuxConnection` 是 `Send + Sync` 的智能指针，跨线程传递安全。
 
-use std::net::SocketAddr;
-use std::process::ExitCode;
-use std::sync::mpsc::{Receiver, channel};
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    process::ExitCode,
+    sync::mpsc::{Receiver, channel},
+    time::Duration,
+};
 
 use buffex_tokio_adapt::DefaultAllocConfig;
 use smux_v1::{
@@ -38,8 +40,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use abs_buff::x_deps::abs_cancel;
 use abs_cancel::{NonCancellableToken, TrMayCancel};
-use mm_ptr::Shared;
-use mm_ptr::x_deps::abs_mm;
+use mm_ptr::{Shared, x_deps::abs_mm};
 use smux_v1::x_deps::{abs_art, abs_buff, abs_smux, mm_ptr};
 
 use abs_art::TrLocalScope;
@@ -125,6 +126,12 @@ where
         .map_err(|message| message.into())
 }
 
+/// 宿主线程回传的两条 channel：**先**是实际地址（服务端据此打印 `ready`），**再**是连接。
+type HostChannels = (
+    Receiver<Result<SocketAddr, String>>,
+    Receiver<Result<Conn, String>>,
+);
+
 /// 在**宿主线程**上完成「socket + 适配器 + 握手 + 建连接」，并一直驱动连接。
 ///
 /// 返回两个 channel：第一个在 `bind` 成功后立刻给出实际监听地址（服务端用它打印 ready
@@ -136,10 +143,7 @@ fn spawn_host_(
     dock: u32,
     tag: String,
     runtime_sel: crate::cli::RuntimeSel,
-) -> (
-    Receiver<Result<SocketAddr, String>>,
-    Receiver<Result<Conn, String>>,
-) {
+) -> HostChannels {
     let (actual_tx, actual_rx) = channel::<Result<SocketAddr, String>>();
     let (conn_tx, conn_rx) = channel::<Result<Conn, String>>();
 
@@ -169,21 +173,32 @@ fn spawn_host_(
             let scope = art.local_scope();
             scope
                 .run_until(async move {
-                    // 1. 拿 socket：bind / accept 或 connect，全部在这个 runtime 里完成。
-                    let (actual, stream) = match accept_or_connect_(&host_opts).await {
-                        Result::Ok(pair) => pair,
+                    // 1. 备好端点。服务端在这里**只 bind**：`ready` 的语义是「已经 bind
+                    //    成功」，编排器要等它才起客户端（见 [`Endpoint_`]）。
+                    let endpoint = match bind_or_connect_(&host_opts).await {
+                        Result::Ok(endpoint) => endpoint,
                         Result::Err(message) => {
                             let _ = actual_tx.send(Result::Err(message.clone()));
                             let _ = conn_tx.send(Result::Err(message));
                             return;
                         }
                     };
+                    let actual = endpoint.addr_();
                     if let Result::Err(message) = actual_tx.send(Result::Ok(actual)) {
                         let _ = conn_tx.send(Result::Err(format!("地址无人接收：{message}")));
                         return;
                     }
 
-                    // 2. 适配器 + 握手 + 建连接。
+                    // 2. 服务端到这里才 accept——此刻编排器已经可以放客户端过来了。
+                    let stream = match endpoint.into_stream_().await {
+                        Result::Ok(stream) => stream,
+                        Result::Err(message) => {
+                            let _ = conn_tx.send(Result::Err(message));
+                            return;
+                        }
+                    };
+
+                    // 3. 适配器 + 握手 + 建连接。
                     let built = build_conn_on_socket_(stream, host_opts.role).await;
                     match built {
                         Result::Ok(conn) => {
@@ -194,7 +209,7 @@ fn spawn_host_(
                         }
                     }
 
-                    // 3. 连接建成之后五个循环仍要靠这条队列驱动，故一直挂着。
+                    // 4. 连接建成之后五个循环仍要靠这条队列驱动，故一直挂着。
                     core::future::pending::<()>().await;
                 })
                 .await;
@@ -204,10 +219,51 @@ fn spawn_host_(
     (actual_rx, conn_rx)
 }
 
-/// 服务端 bind + accept；客户端 connect（带重试）。返回 `(实际地址, 连接)`。
-async fn accept_or_connect_(
-    opts: &PeerOptions,
-) -> Result<(SocketAddr, TcpStream), String> {
+/// 一步「备好端点」的结果。
+///
+/// # 为什么服务端要分成「bind」与「accept」两步
+///
+/// 编排器（`scripts/run_pairs.py`）的顺序是「起服务端 → 等它的 `ready` 行 → 才起
+/// 客户端」。因此 `ready` 的语义必须是「**已经 bind 成功**」，而不是「已经完成一次
+/// accept」——后者会让服务端等客户端连、编排器等 `ready`、客户端等编排器放行，三方互等，
+/// 对以 tokio 为服务端的每一组配对都表现为永久挂起。
+///
+/// 客户端方向没有 `ready`，但同样走这个枚举：它的端点一步就绪。
+enum Endpoint_ {
+    /// 服务端：已 bind 的监听器，以及它的实际地址（**尚未 accept**）。
+    Listening(TcpListener, SocketAddr),
+    /// 客户端：已连上的流，以及它的本地地址。
+    Connected(TcpStream, SocketAddr),
+}
+
+impl Endpoint_ {
+    /// 本端点要上报给编排器的地址（服务端用它打印 `ready`）。
+    fn addr_(&self) -> SocketAddr {
+        match self {
+            Endpoint_::Listening(_, addr) | Endpoint_::Connected(_, addr) => *addr,
+        }
+    }
+
+    /// 等到对端就位：服务端在**这里**才 `accept`；客户端直接交出已连的流。
+    async fn into_stream_(self) -> Result<TcpStream, String> {
+        match self {
+            Endpoint_::Listening(listener, _) => {
+                let (stream, _peer) = listener
+                    .accept()
+                    .await
+                    .map_err(|err| format!("接受连接失败：{err}"))?;
+                stream
+                    .set_nodelay(true)
+                    .map_err(|err| format!("设置 nodelay 失败：{err}"))?;
+                Result::Ok(stream)
+            }
+            Endpoint_::Connected(stream, _) => Result::Ok(stream),
+        }
+    }
+}
+
+/// 服务端只 bind（**不 accept**）；客户端 connect（带重试）。
+async fn bind_or_connect_(opts: &PeerOptions) -> Result<Endpoint_, String> {
     match opts.role {
         Role::Server => {
             let listener = TcpListener::bind(opts.listen)
@@ -216,14 +272,7 @@ async fn accept_or_connect_(
             let actual = listener
                 .local_addr()
                 .map_err(|err| format!("取监听地址失败：{err}"))?;
-            let (stream, _peer) = listener
-                .accept()
-                .await
-                .map_err(|err| format!("接受连接失败：{err}"))?;
-            stream
-                .set_nodelay(true)
-                .map_err(|err| format!("设置 nodelay 失败：{err}"))?;
-            Result::Ok((actual, stream))
+            Result::Ok(Endpoint_::Listening(listener, actual))
         }
         Role::Client => {
             let stream = connect_retry_(opts.peer).await.map_err(|err| err.to_string())?;
@@ -233,7 +282,7 @@ async fn accept_or_connect_(
             let actual = stream
                 .local_addr()
                 .map_err(|err| format!("取本地地址失败：{err}"))?;
-            Result::Ok((actual, stream))
+            Result::Ok(Endpoint_::Connected(stream, actual))
         }
     }
 }

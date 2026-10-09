@@ -15,7 +15,6 @@
 use abs_buff::{
     buffer::TrProducerState,
     gen_may_cancel_future,
-    x_deps::abs_cancel,
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_smux::{
@@ -26,12 +25,15 @@ use abs_smux::{
 use mm_ptr::Shared;
 use thiserror::Error;
 
+use crate::{
+    messaging,
+    x_deps::{abs_buff, abs_cancel},
+};
 use super::{
     alloc_config_::{ClientRingPrepare, TrClienAllocConfig},
     config::{self, Dock, TrClient, TrClientConfig},
     session::Session,
 };
-use crate::messaging;
 
 /// 单次会话内的操作错误。
 ///

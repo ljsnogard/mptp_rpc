@@ -14,20 +14,3 @@ members = [
 [workspace.package]
 edition = "2024"
 authors = ["lino <lino_snsalias@outlook.com>"]
-
-[workspace.dependencies]
-funty = { version = "3.0.0-rc2", default-features = false }
-pin-project = { version = "1.1.*" }
-pin-utils = { version = "*" }
-env_logger = { version = "0.11.*" }
-log = { version = "0.4.*" }
-futures-lite = { version = "2" }
-compio = { version = "0.19.*", features = ["fs", "macros", "time"] }
-thiserror = { version = "2.0", default-features = false }
-
-# `abs_smux` 以 git 源依赖 `abs_buff`，而同仓的 `abs_buff_stdio_adapt` 以本地 path
-# 依赖它——不统一的话，依赖图里会出现**两个 `abs_buff` 实例**，两者的
-# `TrBuffRead` / `TrBuffWrite` 互不相认（`abs_cancel` 也随之分裂）。
-# 这里把 git 源统一到本地 path，与 `abs_buff_stdio_adapt` 自己 Cargo.toml 里的做法一致。
-[patch."https://gitee.com/lino_snsalias/abs_buff.git"]
-abs_buff = { path = "../abs_buff" }

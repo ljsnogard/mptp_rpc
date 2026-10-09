@@ -111,3 +111,10 @@ tests/
 - **`abs_art-bridge` 报「必须启用一个 backend feature」**：本 crate 用
   `smux_v1` 的 `test-tokio-runtime` feature 选定后端；不要同时打开
   `smux_v1` 的 compio 侧 feature（两个后端会撞在 `abs_art-bridge` 的守护上）。
+- **编排脚本卡在等 `ready`**：服务端的 `ready` 必须在 **bind 之后、accept 之前**打印。
+  放到 `accept` 之后就会变成「服务端等客户端连、编排器等 `ready`、客户端等编排器放行」
+  的三方互等——`scripts/run_pairs.py` 的 `readline` 又是阻塞的，表现为永久挂住而不是
+  报错（`rt_tokio.rs` 的 [`Endpoint_`](src/rt_tokio.rs) 记录了这个坑）。
+- **服务端跑完一次往返后不退出**：收尾要等对端 EOF，而这条信号靠**读泵退出时显式封口**
+  连接读环（`smux_v1` 的 `StageCloseGuard_` 里的 `stage.close()`）唤醒 demux。只 drop
+  环的写端**不会**唤醒 park 的读者（`buffex` 的环半部 drop 不置关闭标记）。

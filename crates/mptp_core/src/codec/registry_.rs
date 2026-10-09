@@ -392,7 +392,7 @@ mod tests_ {
     ///   半边交给取回的编码器，在 `tokio` 运行时里驱动 `encode_async`。
     /// - 判断：编码成功，且返回的写入长度与 `rmp_serde::to_vec` 参考编码的长度一致；
     ///   这证明「取回的编码器」不只是类型对得上，而是真的可用。
-    #[tokio::test]
+    #[compio::test]
     async fn registered_msgpack_encoder_writes_into_target_() {
         #[derive(serde::Deserialize, serde::Serialize)]
         struct MsgBody {
