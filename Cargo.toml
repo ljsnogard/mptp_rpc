@@ -1,15 +1,8 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/mptp_core",
-    # "crates/mptp_cs_demo",
+    "./mptp_core",
 ]
-
-# `crates/mptp_cs_demo` **刻意不是本 workspace 的成员**：它要按 tokio / compio / smol
-# 三个**互斥**的后端 feature 各编译一份（跨运行时互通演示），而 workspace 会把成员的
-# feature 取并集，直接撞上 `abs_art-bridge` 的「多后端必须显式声明默认后端」守护。
-# 它因此是独立 workspace，入口见它自己的 justfile；本 workspace 根目录的 justfile 里
-# 有转发配方（`just demo-run` 等）。
 
 [workspace.package]
 edition = "2024"
