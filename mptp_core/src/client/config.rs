@@ -5,6 +5,7 @@
 
 use abs_buff::x_deps::abs_cancel;
 use abs_cancel::TrMayCancel;
+use serde::de::DeserializeOwned;
 use abs_smux::{
     chan::TrChannelHandle,
     conf::TrMuxConfig,
@@ -64,6 +65,12 @@ pub trait TrClient {
 /// channel 进行的通信过程。
 ///
 /// 简单的会话只包括一问一答。针对推送或者拉取类请求的会话，则会维持到推流结束。
+///
+/// # 读取始终是 async 的
+///
+/// 报文的读写经 `AsStdRead` / `AsStdWrite` 直接落在 ring 上，而那两个适配器内部是
+/// 同步等待。这份同步是**本框架对 `serde` 的暂时妥协**，不外溢成调用方的语义：这里
+/// 交出去的每个读取入口都是可取消的异步产物。
 pub trait TrSession<C>
 where
     C: TrClientConfig,
@@ -75,9 +82,29 @@ where
 
     /// 接收对端就本次请求给出的响应前缀（状态码 + 头）。
     ///
-    /// TODO(重构): 响应体（按 `Body_Size` 头声明的后续字节）的读取路径尚未落地；
-    /// 在那之前，调用者只能拿到前缀。
+    /// 前缀本身说明不了回复的全部：体是可选的，长度写在 `Body_Size` 头里。要不要读、
+    /// 读多少，由 [`TrSession::recv_response_body_async`] 按协议判定。
     fn recv_response_async<'f>(&'f mut self) -> Self::RecvRespAsync<'f>;
+
+    type RecvRespBodyAsync<'f, T>: TrMayCancel<'f, MayCancelOutput = Result<Option<T>, ClientError>>
+    where
+        Self: 'f,
+        T: 'f + DeserializeOwned + 'static;
+
+    /// 读取本次回复的报文体，并解成一个业务类型。
+    ///
+    /// 决策完全由协议给出（见 [`ResponseBodyDecision`](crate::messaging::ResponseBodyDecision)）：
+    /// 没有声明体的回复**一个字节都不会读**，因此也不会破坏这条 channel 上后续数据的
+    /// 对齐；声明了体却与请求方法冲突（`Head` / `Drop`），或只有 `Body_Type` 没有
+    /// `Body_Size`，都会按协议违规报错，而不是猜一个长度读下去。
+    ///
+    /// 解码**直接从 ring 的接收半边进行**，中间没有中转缓冲。
+    fn recv_response_body_async<'f, T>(
+        &'f mut self,
+        prefix: &'f RespPrefix,
+    ) -> Self::RecvRespBodyAsync<'f, T>
+    where
+        T: DeserializeOwned + 'static;
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----

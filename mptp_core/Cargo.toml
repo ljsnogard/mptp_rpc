@@ -33,6 +33,11 @@ thiserror = { version = "2.0.20" }
 
 [dev-dependencies]
 compio = { version = "0.19.*", features = ["fs", "macros", "time", "net", "runtime"] }
+# 协议层的用例必须跑在**当前后端**的运行时里：报文 IO 走 `AsStdRead` / `AsStdWrite`，
+# 它们的同步等待要问门面取当前后端的运行时值。而 workspace 里只要有成员点亮
+# `rt-tokio`（例如 demo），全图的默认后端就变成 tokio——所以两个后端的测试入口都要
+# 备好，用例按 feature 分派（见 `messaging/tests_.rs` 的 `backend_async_test!`）。
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [features]
 default = ["rt-compio"]                        # 库自测/单编时的缺省

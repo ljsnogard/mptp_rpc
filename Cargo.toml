@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "./mptp_core",
+    "./rpc_demo",
 ]
 
 [workspace.package]

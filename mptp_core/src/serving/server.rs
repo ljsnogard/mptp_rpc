@@ -183,7 +183,7 @@ where
 
     // 4. 如果 handler 通过 FlowCtrl 返回了 Response，则写回客户端。
     if let Option::Some(resp) = ctrl.response() {
-        messaging::response::send_response_prefix_async(resp, &mut tx, cancel.child_token())
+        messaging::response::send_response_async(resp, &mut tx, cancel.child_token())
             .await
             .map_err(|err| ServeError::Io(err.to_string()))?;
     }

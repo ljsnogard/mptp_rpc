@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use abs_buff::x_deps::funty;
 use abs_buff_stdio_adapt::x_deps::abs_buff;
 
-type HeaderStrType = String;
+type HeaderString = String;
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // StrOrU16
@@ -264,14 +264,26 @@ impl Status {
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct HeaderKey(StrOrNum<HeaderStrType, u16>);
+pub struct HeaderKey(StrOrNum<HeaderString, u16>);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct HeaderVal(StrOrNum<HeaderStrType, u16>);
+pub struct HeaderVal(StrOrNum<HeaderString, u16>);
 
 impl From<StdHeaderKey> for HeaderKey {
     fn from(value: StdHeaderKey) -> Self {
         HeaderKey(StrOrNum::Num(value.0))
+    }
+}
+
+impl From<&str> for HeaderKey {
+    fn from(value: &str) -> Self {
+        HeaderKey(StrOrNum::Str(value.to_string()))
+    }
+}
+
+impl From<String> for HeaderKey {
+    fn from(value: String) -> Self {
+        HeaderKey(StrOrNum::Str(value))
     }
 }
 
@@ -281,7 +293,34 @@ impl From<StdHeaderVal> for HeaderVal {
     }
 }
 
+impl From<&str> for HeaderVal {
+    fn from(value: &str) -> Self {
+        HeaderVal(StrOrNum::Str(value.to_string()))
+    }
+}
+
+impl From<String> for HeaderVal {
+    fn from(value: String) -> Self {
+        HeaderVal(StrOrNum::Str(value))
+    }
+}
+
 impl HeaderVal {
+    /// 由 `u16` 构造**数字形态**的头值。
+    ///
+    /// 标准头里凡是能用 `u16` 表达的量（例如 `Body_Size` 的小长度）都应当走数字形态：
+    /// 它比十进制字符串更省字节，也正是「头不是 HTTP 文本」这一设计意图的落点。
+    pub const fn from_u16(value: u16) -> Self {
+        HeaderVal(StrOrNum::Num(value))
+    }
+
+    /// 由字符串构造**文本形态**的头值。
+    ///
+    /// 超过 `u16` 表达能力的量、MIME 类型、以及 `Data_Type_Id` 这类标识都走文本形态。
+    pub fn from_string(value: impl Into<HeaderString>) -> Self {
+        HeaderVal(StrOrNum::Str(value.into()))
+    }
+
     /// 取出其中的字符串形态（`StrOrNum::Str`）。
     ///
     /// 意图：客户端在读取回复体时，需要把 `Body_Size` 之类的数字型头值

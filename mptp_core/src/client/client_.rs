@@ -194,9 +194,9 @@ where
         }
     };
 
-    // 4. 写入请求前缀（method / location / headers）。
+    // 4. 写入请求：前缀（method / location / headers）+ 报文体。
     let send_res = messaging::request
-        ::send_request_prefix_async(&request, &mut tx, cancel.child_token())
+        ::send_request_async(&request, &mut tx, cancel.child_token())
         .await;
     if let Result::Err(err) = send_res {
         let info = format!("send request prefix failed: {err}");

@@ -1,17 +1,21 @@
 //! 客户端的会话对象。
 //!
 //! 一个 [`Session`] 围绕 `abs_smux` 概念里的一条 channel 进行：它持有该子流的收发
-//! 半边（`accept_async` 的产物），因此调用者可以在同一子上持续交互（一问一答，或
-//! 推送 / 拉取到推流结束）。
+//! 半边（`accept_async` 的产物），因此调用者可以在同一条子流上持续交互（一问一答，
+//! 或推送 / 拉取到推流结束）。
+//!
+//! 会话的每次读取都是 `async` 的。同步只发生在 `serde` 与 `AsStdRead` 那一层——它们
+//! 是本框架唯一允许暂时用同步代码的地方，这份妥协不外溢成调用方的语义。
 
 use abs_buff::{gen_may_cancel_future, x_deps::abs_cancel};
 use abs_cancel::TrCancellationToken;
+use serde::de::DeserializeOwned;
 
 use super::{
     ClientError,
     config::{self, ChannelRx, ChannelTx, RespPrefix, TrClientConfig, TrSession},
 };
-use crate::messaging;
+use crate::messaging::{self, ResponseBodyDecision, TrRpcRequest};
 
 /// 一次请求/回复过程（一问一答）的会话。
 ///
@@ -20,8 +24,8 @@ pub struct Session<C>
 where
     C: TrClientConfig,
 {
-    /// 本会话对应的请求。按值持有：请求体的读取 / 推送都要回到它（按 `Body_Size`
-    /// 头声明的长度）。当前尚未使用，先随会话一起保管。
+    /// 本会话对应的请求。按值持有：读回复体时要回到它，看请求用的是哪个 access
+    /// method——`Head` / `Drop` 的回复按协议不带本体内容。
     request_: Option<config::Request<C>>,
 
     /// 子流的发送半边。
@@ -31,7 +35,7 @@ where
     #[allow(dead_code)]
     tx_: ChannelTx<C>,
 
-    /// 子流的接收半边。
+    /// 子流的接收半边。读回复时直接接 `AsStdRead`，中间不留缓冲。
     rx_: ChannelRx<C>,
 }
 
@@ -70,9 +74,23 @@ where
         Self: 'f;
 
     fn recv_response_async<'f>(&'f mut self) -> Self::RecvRespAsync<'f> {
-        /// 解析响应状态与头部的最大长度，超过就丢弃。
-        const MAX_PREFIX_LEN: usize = 1024usize;
-        SessionRecvRespAsync::new(self, MAX_PREFIX_LEN)
+        SessionRecvRespAsync::new(self)
+    }
+
+    type RecvRespBodyAsync<'f, T>
+        = SessionRecvRespBodyAsync<'f, 'f, C, T>
+    where
+        Self: 'f,
+        T: 'f + DeserializeOwned + 'static;
+
+    fn recv_response_body_async<'f, T>(
+        &'f mut self,
+        prefix: &'f RespPrefix,
+    ) -> Self::RecvRespBodyAsync<'f, T>
+    where
+        T: DeserializeOwned + 'static,
+    {
+        SessionRecvRespBodyAsync::new(self, prefix)
     }
 }
 
@@ -83,20 +101,48 @@ where
 #[gen_may_cancel_future(SessionRecvResp, pub, new(pub(crate)))]
 async fn session_recv_resp_async_<'f, C, TyTok>(
     session: &'f mut Session<C>,
-    max_len: usize,
     cancel: TyTok,
 ) -> Result<RespPrefix, ClientError>
 where
     C: TrClientConfig,
     TyTok: TrCancellationToken,
 {
-    let recv_res =
-        messaging::response::recv_response_prefix_async(&mut session.rx_, max_len, cancel).await;
-    match recv_res {
-        Result::Err(err) => {
-            let info = format!("Error ({err}) in receiving response");
-            Result::Err(ClientError::RespErr(info))
-        }
-        Result::Ok(prefix) => Result::Ok(prefix),
+    messaging::response::recv_response_prefix_async(&mut session.rx_, cancel)
+        .await
+        .map_err(|err| ClientError::RespErr(format!("接收响应前缀失败：{err}")))
+}
+
+/// 读取本次回复的报文体，并解成一个业务类型。
+///
+/// 先按协议决策边界，再按边界读：没有体的回复不会碰接收半边分毫；解码直接发生在 ring
+/// 的接收半边上，中间没有中转缓冲。
+// `gen_may_cancel_future` 要求显式生命周期，理由同 `session_recv_resp_async_`。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(SessionRecvRespBody, pub, new(pub(crate)))]
+async fn session_recv_resp_body_async_<'f, C, T, TyTok>(
+    session: &'f mut Session<C>,
+    prefix: &'f RespPrefix,
+    cancel: TyTok,
+) -> Result<Option<T>, ClientError>
+where
+    C: TrClientConfig,
+    T: DeserializeOwned + 'static,
+    TyTok: TrCancellationToken,
+{
+    let Option::Some(request) = session.request_.as_ref() else {
+        return Result::Err(ClientError::RespErr(
+            "会话已经不认识自己的请求，无法判定回复体边界".to_string(),
+        ));
+    };
+    // 边界先由协议判一次：`Head` / `Drop` 带体、只有 `Body_Type` 没有 `Body_Size`
+    // 都属违规，这里宁可当场失败，也不要带着错位的流继续走。
+    let decision = ResponseBodyDecision::decide(request.method(), prefix)
+        .map_err(|err| ClientError::RespErr(err.to_string()))?;
+    if decision == ResponseBodyDecision::Absent {
+        // 没有体：**一个字节都不读**，接收半边上后续数据的对齐因此不受影响。
+        return Result::Ok(Option::None);
     }
+    messaging::response::recv_response_body_async(&mut session.rx_, prefix, cancel)
+        .await
+        .map_err(|err| ClientError::RespErr(format!("接收响应体失败：{err}")))
 }
