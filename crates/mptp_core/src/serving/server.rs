@@ -17,16 +17,20 @@
 //! 后者需要本端在最终裁决时交出两块 ring 内存，所以它依赖
 //! [`TrServingAllocConfig`](super::alloc_config_::TrServingAllocConfig)。
 
-use std::io;
+use thiserror::Error;
 
 use abs_buff_stdio_adapt::AsStdRead;
-use abs_buff::{TrBuffRead, buffer::TrProducerState, gen_may_cancel_future, x_deps::abs_cancel};
+use abs_buff::{
+    TrBuffRead,
+    buffer::TrProducerState,
+    gen_may_cancel_future,
+    x_deps::abs_cancel,
+};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_smux::{
     chan::TrChannelHandle,
     conn::{TrChannelListener, TrDockBinding},
 };
-use thiserror::Error;
 
 use super::{
     alloc_config_::{ServingRingPrepare, TrServingAllocConfig},
@@ -73,8 +77,8 @@ pub enum ServeError {
     Io(String),
 }
 
-impl From<io::Error> for ServeError {
-    fn from(value: io::Error) -> Self {
+impl From<std::io::Error> for ServeError {
+    fn from(value: std::io::Error) -> Self {
         ServeError::Io(value.to_string())
     }
 }

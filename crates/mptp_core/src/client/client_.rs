@@ -65,7 +65,7 @@ pub enum ClientError {
 }
 
 /// 客户端持有的连接智能指针。
-type SharedMuxConn<C> = Shared<config::MuxConn<C>, config::SharedConnAlloc<C>>;
+type SharedMuxConn<C> = <C as TrClientConfig>::SharedConn;
 
 /// 面向**某一个**对端 dock 的 RPC 客户端。
 ///

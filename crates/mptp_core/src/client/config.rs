@@ -10,6 +10,7 @@ use abs_smux::{
     conf::TrMuxConfig,
     conn::{TrConnection, TrDockBinding},
 };
+use mm_ptr::x_deps::abs_mm::res_man::TrStrongShared;
 
 use super::{ClientError, alloc_config_::TrClienAllocConfig};
 
@@ -26,6 +27,8 @@ pub trait TrClientConfig {
 
     /// 客户端侧的资源分配约定。
     type AllocCfg: TrClienAllocConfig;
+
+    type SharedConn: TrStrongShared<Item = Self::MuxConn>;
 
     /// 本客户端发送的请求类型。
     type Request: crate::messaging::TrRpcRequest;
@@ -65,7 +68,8 @@ pub trait TrSession<C>
 where
     C: TrClientConfig,
 {
-    type RecvRespAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<RespPrefix, ClientError>>
+    type RecvRespAsync<'f>: TrMayCancel<'f, MayCancelOutput =
+        Result<RespPrefix, ClientError>>
     where
         Self: 'f;
 
