@@ -15,10 +15,17 @@ use std::io::Write;
 use abs_buff::x_deps::abs_cancel;
 use abs_cancel::NonCancellableToken;
 
+use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
+
 use super::{
     MessageIoError, Nothing, ProtocolViolation, Request, RespPrefix, Response,
     ResponseBodyDecision, TrRpcBody, TrRpcRequest,
     basic::EncodedBody,
+    body::{
+        BodyTransfer, body_reader, body_transfer_of, chunked_transfer_header_val, send_body_async,
+    },
+    chunked::ChunkedWrite,
+    limit::{LimitedRead, LimitedWrite},
     request::{RequestBuildError, RequestBuilder, recv_request_prefix_async, send_request_async},
     response::{recv_response_body_async, recv_response_prefix_async, send_response_async},
 };
@@ -177,10 +184,12 @@ backend_async_test! {
     /// - 判断：解码出的前缀字段与构造时一致；读出 String 等于原来那个；且**读源被恰好
     ///   耗尽**（体之后没有多余字节）。
     fn request_with_body_roundtrips_() {
-        let req = Request::<String, Nothing>::with_measured_body(
+        // 发送路径要求体的字节**现成可借出**，因此这里先编成 `EncodedBody`：
+        // MessagePack 的 "hello" 是 fixstr 头 1 字节 + 正文 5 字节。
+        let req = Request::<EncodedBody, Nothing>::with_measured_body(
             AccessMethod::Call,
             "/rpc/echo",
-            "hello".to_string(),
+            EncodedBody::new(rmp_serde::to_vec("hello").expect("编码不该失败")),
         )
         .expect("量长度不该失败");
         let wire = write_to_vec!(|tx| send_request_async(
@@ -211,9 +220,9 @@ backend_async_test! {
     ///   写出去后从字节里先解前缀，交给 [`ResponseBodyDecision`] 判边界，再按判决读体。
     /// - 判断：状态码一致；决策给出 `Present(5)`；读出的字符串与写出去的一致。
     fn response_with_body_roundtrips_() {
-        let resp = Response::<String, Nothing>::with_measured_body(
+        let resp = Response::<EncodedBody, Nothing>::with_measured_body(
             Status::Ok,
-            "resp".to_string(),
+            EncodedBody::new(rmp_serde::to_vec("resp").expect("编码不该失败")),
         )
         .expect("量长度不该失败");
         let wire = write_to_vec!(|tx| send_response_async(
@@ -282,9 +291,9 @@ backend_async_test! {
     /// - 判断：返回 `Err(Truncated)`——协议头已经承诺了长度，流却在长度满足前结束，属于
     ///   必须报出来的错误，不能当成功。
     fn truncated_body_is_reported_() {
-        let resp = Response::<String, Nothing>::with_measured_body(
+        let resp = Response::<EncodedBody, Nothing>::with_measured_body(
             Status::Ok,
-            "abcdefgh".to_string(),
+            EncodedBody::new(rmp_serde::to_vec("abcdefgh").expect("编码不该失败")),
         )
         .expect("量长度不该失败");
         let mut wire = write_to_vec!(|tx| send_response_async(
@@ -312,11 +321,11 @@ backend_async_test! {
 }
 
 backend_async_test! {
-    /// 测试发送端拒绝写出「`Body_Size` 与实际体长度不符」的报文。
-    /// - 手段：手工把 `Body_Size` 设成比实际体多，再调用 `send_request_async`。
-    /// - 判断：返回 `Err(BodySizeMismatch { declared, actual })`，两个数就是头声明与实际
-    ///   字节数；报文**不会被写出去**，因此接收方不可能按错误长度切分字节。
-    fn send_rejects_body_size_mismatch_() {
+    /// 测试「`Body_Size` 声明得比体实际字节多」时按截断报出。
+    /// - 手段：手工把 `Body_Size` 设成 5 而体只有 3 字节，再调用 `send_request_async`。
+    /// - 判断：返回 `Err(Truncated)`——定长搬运要求源恰好给得出声明的那么多字节，源提前
+    ///   结束就是「对端会按错误的长度切分后续字节」的前兆，必须报出来而不是照发。
+    fn send_reports_truncated_when_body_shorter_than_declared_() {
         let req = Request::<EncodedBody, Nothing>::new(AccessMethod::Post, "/upload")
             .with_headers(HeadersBuilder::new().set_body_size(5usize).build())
             .with_body(EncodedBody::new(b"abc".to_vec()));
@@ -324,14 +333,11 @@ backend_async_test! {
         let mut sink: &mut [u8] = storage.as_mut_slice();
         let err = send_request_async(&req, &mut sink, NonCancellableToken::new())
             .await
-            .expect_err("长度不符时应当拒绝写出");
-        match err {
-            MessageIoError::BodySizeMismatch { declared, actual } => {
-                assert_eq!(declared, 5usize, "头声明的是 5");
-                assert_eq!(actual, 3usize, "实际体是 3");
-            }
-            other => panic!("应当是 BodySizeMismatch，实际是 {other}"),
-        }
+            .expect_err("体不足声明长度时应当报截断");
+        assert!(
+            matches!(err, MessageIoError::Truncated(_)),
+            "应当是 Truncated，实际是 {err}"
+        );
     }
 }
 
@@ -351,7 +357,7 @@ fn head_reply_with_body_is_a_violation_() {
     match err {
         ProtocolViolation::BodyNotAllowed { method, declared } => {
             assert_eq!(method, AccessMethod::Head, "违规的应当是 Head");
-            assert_eq!(declared, 8usize, "声明的长度应当原样带出来");
+            assert_eq!(declared, Option::Some(8usize), "声明的长度应当原样带出来");
         }
         other => panic!("应当是 BodyNotAllowed，实际是 {other}"),
     }
@@ -564,10 +570,13 @@ backend_async_test! {
         const K_ALLOC_BUDGET: usize = 8usize * 1024usize;
 
         let payload = "x".repeat(32usize * 1024usize);
-        let req = Request::<String, Nothing>::with_measured_body(
+        // 编码发生在计数开始**之前**：这正是新模型要求的——体在发送时已经是可借出的
+        // 字节，协议层不再为它临时分配任何缓存。
+        let encoded = rmp_serde::to_vec(&payload).expect("编码不该失败");
+        let req = Request::<EncodedBody, Nothing>::with_measured_body(
             AccessMethod::Call,
             "/rpc/echo",
-            payload,
+            EncodedBody::new(encoded),
         )
         .expect("量长度不该失败");
         let mut storage = vec![0u8; K_BUFFER * 16usize];
@@ -582,5 +591,349 @@ backend_async_test! {
             allocated < K_ALLOC_BUDGET,
             "写出 32 KiB 的请求不该为报文攒缓冲（实际分配 {allocated} 字节，预算 {K_ALLOC_BUDGET}）"
         );
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 体的传输模式判定（纯逻辑，不碰 IO）
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 造一组「声明了分块传输」的报文头。
+fn chunked_headers_() -> crate::specs::Headers {
+    HeadersBuilder::new()
+        .set(StdHeaderKey::Body_Transfer, chunked_transfer_header_val())
+        .build()
+}
+
+/// 测试模式判定只看「哪些头在场」，三种声明各归各位。
+/// - 手段：分别造「没有头」「只有 Body_Size」「只有分块声明」三组头，交给
+///   [`body_transfer_of`]。
+/// - 判断：三者分别是 `Absent` / `Sized(n)` / `Chunked`；`Body_Size` 为 0 等价于没有体
+///   ——边界一旦为 0，收发两侧都不该多碰一个字节。
+#[test]
+fn body_transfer_decision_matches_declarations_() {
+    assert_eq!(
+        body_transfer_of(Option::None).expect("没有头不是违规"),
+        BodyTransfer::Absent,
+        "没有任何声明就是没有体"
+    );
+
+    let sized = HeadersBuilder::new().set_body_size(7usize).build();
+    assert_eq!(
+        body_transfer_of(Option::Some(&sized)).expect("只声明长度是合法的"),
+        BodyTransfer::Sized(7usize),
+        "有 Body_Size 就是定长"
+    );
+
+    let zero = HeadersBuilder::new().set_body_size(0usize).build();
+    assert_eq!(
+        body_transfer_of(Option::Some(&zero)).expect("长度 0 不是违规"),
+        BodyTransfer::Absent,
+        "长度为 0 与「没有体」是同一件事"
+    );
+
+    let chunked = chunked_headers_();
+    assert_eq!(
+        body_transfer_of(Option::Some(&chunked)).expect("只声明分块是合法的"),
+        BodyTransfer::Chunked,
+        "只有分块声明就是分块"
+    );
+}
+
+/// 测试「定长」与「分块」两种声明同时在场时按协议违规报出。
+/// - 手段：一组头里同时写下 `Body_Size` 与 `Body_Transfer: Chunked`。
+/// - 判断：返回 `Err(ConflictingTransfer)`，并把 `Body_Size` 声明的长度带出来——两种边界
+///   互斥，接收方无从判定该按哪种切分后续字节，宁可失败也不能猜。
+#[test]
+fn conflicting_transfer_declarations_are_rejected_() {
+    let headers = HeadersBuilder::new()
+        .set_body_size(9usize)
+        .set(StdHeaderKey::Body_Transfer, chunked_transfer_header_val())
+        .build();
+    let err = body_transfer_of(Option::Some(&headers)).expect_err("两种声明同时在场应当违规");
+    match err {
+        ProtocolViolation::ConflictingTransfer { declared } => {
+            assert_eq!(declared, 9usize, "声明的长度应当原样带出来");
+        }
+        other => panic!("应当是 ConflictingTransfer，实际是 {other}"),
+    }
+}
+
+/// 测试无法解读的 `Body_Transfer` 取值按违规报出，而不是当作「没有声明」。
+/// - 手段：把 `Body_Transfer` 写成一个协议未定义的数字值。
+/// - 判断：返回 `Err(UnknownBodyTransfer)`；若静默按「没有声明」处理，对端就会按错误的
+///   边界切分后续字节。
+#[test]
+fn unknown_transfer_value_is_rejected_() {
+    let headers = HeadersBuilder::new()
+        .set(StdHeaderKey::Body_Transfer, HeaderVal::from_u16(0x7fff))
+        .build();
+    let err = body_transfer_of(Option::Some(&headers)).expect_err("未知取值应当违规");
+    assert!(
+        matches!(err, ProtocolViolation::UnknownBodyTransfer(_)),
+        "应当是 UnknownBodyTransfer，实际是 {err}"
+    );
+}
+
+/// 测试分块声明的回复被决策判为 `Chunked`。
+/// - 手段：造一个只带分块声明的回复前缀，用 `AccessMethod::Call` 去决策。
+/// - 判断：得到 `ResponseBodyDecision::Chunked`——分块体没有确定总长，`body_size()` 因此
+///   返回 `None`，调用方必须按块读到终止块为止。
+#[test]
+fn chunked_reply_is_decided_as_chunked_() {
+    let prefix = RespPrefix(Status::Ok, Option::Some(chunked_headers_()));
+    let decision = ResponseBodyDecision::decide(AccessMethod::Call, &prefix)
+        .expect("Call 的回复带分块体是合法的");
+    assert_eq!(decision, ResponseBodyDecision::Chunked, "应当判为分块");
+    assert_eq!(decision.body_size(), Option::None, "分块体没有确定总长");
+}
+
+/// 测试 `Head` 的回复声明了分块体时同样按协议违规报出。
+/// - 手段：造一个只带分块声明的回复前缀，用 `AccessMethod::Head` 去决策。
+/// - 判断：返回 `Err(BodyNotAllowed)`，且 `declared` 为 `None`（分块体没有总长可报）。
+#[test]
+fn head_reply_with_chunked_body_is_a_violation_() {
+    let prefix = RespPrefix(Status::Ok, Option::Some(chunked_headers_()));
+    let err = ResponseBodyDecision::decide(AccessMethod::Head, &prefix)
+        .expect_err("Head 的回复不该带体");
+    match err {
+        ProtocolViolation::BodyNotAllowed { method, declared } => {
+            assert_eq!(method, AccessMethod::Head, "违规的应当是 Head");
+            assert_eq!(declared, Option::None, "分块体没有总长");
+        }
+        other => panic!("应当是 BodyNotAllowed，实际是 {other}"),
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 限长读写
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+backend_async_test! {
+    /// 测试限长读读到额度就用完，不会多借一个字节。
+    /// - 手段：以 `b"abcdef"` 为源、额度 3 构造 [`LimitedRead`]，用 `AsStdRead` 一次读满
+    ///   一个 8 字节缓冲。
+    /// - 判断：只读到 `b"abc"`，且额度归零；额度用尽在读者眼里就是 EOF。
+    fn limited_read_stops_at_the_limit_() {
+        let mut src: &[u8] = b"abcdef";
+        {
+            let mut limited = LimitedRead::new(&mut src, 3usize);
+            let mut read = AsStdRead::new(&mut limited, NonCancellableToken::new());
+            let mut buf = [0u8; 8usize];
+            let n = std::io::Read::read(&mut read, &mut buf).expect("读不该失败");
+            assert_eq!(&buf[..n], b"abc", "只应当读到额度内的 3 个字节");
+            assert_eq!(limited.remaining(), 0usize, "额度应当刚好用完");
+        }
+        assert_eq!(src, b"def", "底层源恰好推进了被读走的那 3 个字节");
+    }
+}
+
+backend_async_test! {
+    /// 测试限长写最多只借出额度那么多空间。
+    /// - 手段：以 16 字节缓冲为底、额度 4 构造 [`LimitedWrite`]，用 `AsStdWrite` 尝试写
+    ///   10 个字节。
+    /// - 判断：只写进去 4 个字节（返回 4），底层缓冲的前 4 个字节是 `b"abcd"`；额度用尽
+    ///   之后对生产者就是「没有空间」。
+    fn limited_write_caps_the_amount_() {
+        let mut storage = [0u8; 16usize];
+        let mut sink: &mut [u8] = storage.as_mut_slice();
+        {
+            let mut limited = LimitedWrite::new(&mut sink, 4usize);
+            let mut write = AsStdWrite::new(&mut limited, NonCancellableToken::new());
+            let n = std::io::Write::write(&mut write, b"abcdefghij").expect("写不该失败");
+            assert_eq!(n, 4usize, "只应当写进额度内的 4 个字节");
+            assert_eq!(limited.remaining(), 0usize, "额度应当刚好用完");
+        }
+        assert_eq!(&storage[..4], b"abcd", "写进去的应当正好是前 4 个字节");
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 分块帧
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+backend_async_test! {
+    /// 测试分块写的线上字节就是「2 字节大端长度 + 内容」，并以长度 0 的块收尾。
+    /// - 手段：用 [`ChunkedWrite`] 写一块 `b"abc"`，再写终止块。
+    /// - 判断：线上字节恰好是 `00 03 61 62 63 00 00`——长度是定长 2 字节、且就在内容前面，
+    ///   写侧因此不需要回填，读侧也不需要跑一遍解码器才知道块有多长。
+    fn chunked_write_emits_expected_frame_() {
+        let mut storage = [0u8; 32usize];
+        // 借用期间不能同时读 `storage`，因此先把剩余长度带出来。
+        let rest = {
+            let mut sink: &mut [u8] = storage.as_mut_slice();
+            let mut writer = ChunkedWrite::new(&mut sink);
+            let n = writer
+                .write_chunk_async(b"abc")
+                .await
+                .expect("写块不该失败");
+            assert_eq!(n, 3usize, "返回的是内容字节数，不含前缀");
+            writer.finish_async().await.expect("写终止块不该失败");
+            sink.len()
+        };
+        let written = storage.len() - rest;
+        assert_eq!(
+            &storage[..written],
+            b"\x00\x03abc\x00\x00",
+            "线上字节应当是长度前缀 + 内容 + 长度 0 的终止块"
+        );
+    }
+}
+
+backend_async_test! {
+    /// 测试分块体可以跨多个块完整往返（内容比单块上限还大）。
+    /// - 手段：造 70000 字节的体（超过 65535 的单块上限，必然被切成多块），声明分块后
+    ///   用 [`send_body_async`] 写进内存缓冲，再用 [`body_reader`] 把它读回来。
+    /// - 判断：读回的字节与原体逐字节相同；且线上长度 = 体长度 + 每块 2 字节前缀 +
+    ///   终止块 2 字节——前缀记的是**各块实际的字节数**，不是固定值。
+    fn chunked_body_roundtrips_across_chunks_() {
+        const LEN: usize = 70_000usize;
+        let payload: Vec<u8> = (0..LEN).map(|i| (i % 251usize) as u8).collect();
+        let headers = chunked_headers_();
+
+        let mut wire = vec![0u8; LEN + 64usize];
+        // 借用期间不能同时读 `wire`，因此先把剩余长度带出来。
+        let rest = {
+            let mut src: &[u8] = payload.as_slice();
+            let mut dst: &mut [u8] = wire.as_mut_slice();
+            let written = send_body_async(&mut src, &mut dst, Option::Some(&headers), NonCancellableToken::new())
+                .await
+                .expect("分块发送不该失败");
+            assert_eq!(written, LEN, "返回的是体字节数");
+            dst.len()
+        };
+        let body_len = wire.len() - rest;
+        // 70000 = 65535 + 4465，两块；线上 = 70000 + 2*2(前缀) + 2(终止块)。
+        assert_eq!(body_len, LEN + 3usize * 2usize, "线上长度应当含块前缀与终止块");
+
+        let mut rx: &[u8] = &wire[..body_len];
+        let mut reader = body_reader(&mut rx, Option::Some(&headers)).expect("头声明合法");
+        let mut out = Vec::new();
+        {
+            let mut read = AsStdRead::new(&mut reader, NonCancellableToken::new());
+            std::io::Read::read_to_end(&mut read, &mut out).expect("读回不该失败");
+        }
+        assert_eq!(out, payload, "分块往返后内容应当逐字节相同");
+        assert!(rx.is_empty(), "读完之后线上的体字节应当恰好耗尽");
+    }
+}
+
+backend_async_test! {
+    /// 测试分块体读完终止块之后，同一条流上的后续字节一个都不会被吃掉。
+    /// - 手段：写出一个分块体，末尾手工追加一个哨兵字节，再由体视图读完。
+    /// - 判断：内容与写出去的一致，且读源恰好剩下哨兵——终止块就是体的边界，后面的字节
+    ///   属于 suffix stream（Push / Pull 的数据从那里开始）。
+    fn chunked_body_leaves_suffix_untouched_() {
+        let headers = chunked_headers_();
+        let mut wire = vec![0u8; 64usize];
+        // 借用期间不能同时读 `wire`，因此先把剩余长度带出来。
+        let rest = {
+            let mut src: &[u8] = b"hello";
+            let mut dst: &mut [u8] = wire.as_mut_slice();
+            send_body_async(&mut src, &mut dst, Option::Some(&headers), NonCancellableToken::new())
+                .await
+                .expect("分块发送不该失败");
+            dst.len()
+        };
+        let used = wire.len() - rest;
+        let mut with_sentinel = wire[..used].to_vec();
+        with_sentinel.push(0xABu8);
+
+        let mut rx: &[u8] = with_sentinel.as_slice();
+        let mut reader = body_reader(&mut rx, Option::Some(&headers)).expect("头声明合法");
+        let mut out = Vec::new();
+        {
+            let mut read = AsStdRead::new(&mut reader, NonCancellableToken::new());
+            std::io::Read::read_to_end(&mut read, &mut out).expect("读回不该失败");
+        }
+        assert_eq!(out, b"hello", "体内容应当原样读回");
+        assert_eq!(rx, &[0xABu8], "终止块之后的字节不应当被体读取吃掉");
+    }
+}
+
+backend_async_test! {
+    /// 测试定长体读完之后，多写的字节不会被这条报文吃掉。
+    /// - 手段：声明 `Body_Size` 为 5，实际写出 8 个字节，末尾再追加一个哨兵，然后按头读体。
+    /// - 判断：只读出声明的 5 个字节，读源剩下「多写的 3 字节 + 哨兵」——边界由头决定，
+    ///   不由「读到哪算哪」决定。
+    fn sized_body_stops_at_declared_length_() {
+        let headers = HeadersBuilder::new().set_body_size(5usize).build();
+        let mut wire = b"abcdefgh".to_vec();
+        wire.push(0xCDu8);
+
+        let mut rx: &[u8] = wire.as_slice();
+        let mut reader = body_reader(&mut rx, Option::Some(&headers)).expect("头声明合法");
+        let mut out = Vec::new();
+        {
+            let mut read = AsStdRead::new(&mut reader, NonCancellableToken::new());
+            std::io::Read::read_to_end(&mut read, &mut out).expect("读回不该失败");
+        }
+        assert_eq!(out, b"abcde", "只应当读出声明的 5 个字节");
+        assert_eq!(rx, b"fgh\xcd", "多写的字节与哨兵都应当留在流上");
+    }
+}
+
+backend_async_test! {
+    /// 测试「没有体」的视图一个字节都不读。
+    /// - 手段：源里放一个哨兵，用「没有声明任何体」的头构造体视图并尝试读。
+    /// - 判断：一个字节都读不到，且哨兵原封不动——「没有体」是独立于「体有多长」的结论。
+    fn absent_body_view_consumes_nothing_() {
+        let mut rx: &[u8] = &[0xABu8];
+        let mut reader = body_reader(&mut rx, Option::None).expect("没有头不是违规");
+        assert_eq!(reader.transfer(), BodyTransfer::Absent, "应当是「没有体」");
+        let mut out = Vec::new();
+        {
+            let mut read = AsStdRead::new(&mut reader, NonCancellableToken::new());
+            std::io::Read::read_to_end(&mut read, &mut out).expect("读不该失败");
+        }
+        assert!(out.is_empty(), "没有体时不该读出任何字节");
+        assert_eq!(rx, &[0xABu8], "哨兵不应当被碰到");
+    }
+}
+
+backend_async_test! {
+    /// 测试分块帧的长度前缀不完整时按帧非法报出。
+    /// - 手段：只给 1 个字节（长度前缀要 2 字节），声明分块后尝试读。
+    /// - 判断：得到一个 io 错误——帧读不满就不能猜长度，更不能把它当成「读到头了」。
+    fn incomplete_chunk_header_is_reported_() {
+        let headers = chunked_headers_();
+        let mut rx: &[u8] = &[0x00u8];
+        let mut reader = body_reader(&mut rx, Option::Some(&headers)).expect("头声明合法");
+        let mut read = AsStdRead::new(&mut reader, NonCancellableToken::new());
+        let mut buf = [0u8; 4usize];
+        let err = std::io::Read::read(&mut read, &mut buf).expect_err("长度前缀不完整应当报错");
+        assert!(
+            err.to_string().contains("分块"),
+            "错误文案应当指向分块帧，实际是 {err}"
+        );
+    }
+}
+
+backend_async_test! {
+    /// 测试定长发送只搬声明的字节数，源里多出来的一个都不碰。
+    /// - 手段：声明 `Body_Size` 为 5，源给 8 个字节，用 [`send_body_async`] 写进内存缓冲。
+    /// - 判断：线上只落了 5 个字节；源恰好推进到剩下的 `b"fgh"`——多出来的字节留在源上，
+    ///   既不会被这条报文发出去，也不会被丢掉。
+    fn sized_send_moves_only_declared_bytes_() {
+        let headers = HeadersBuilder::new().set_body_size(5usize).build();
+        let mut payload: &[u8] = b"abcdefgh";
+        let mut wire = vec![0u8; 32usize];
+        let rest = {
+            let mut dst: &mut [u8] = wire.as_mut_slice();
+            let moved = send_body_async(
+                &mut payload,
+                &mut dst,
+                Option::Some(&headers),
+                NonCancellableToken::new(),
+            )
+            .await
+            .expect("定长发送不该失败");
+            assert_eq!(moved, 5usize, "返回的应当是声明长度");
+            dst.len()
+        };
+        let used = wire.len() - rest;
+        assert_eq!(used, 5usize, "线上只应当落下声明的 5 个字节");
+        assert_eq!(&wire[..used], b"abcde", "内容应当是源的前 5 个字节");
+        assert_eq!(payload, b"fgh", "源里多出来的字节应当留在源上");
     }
 }

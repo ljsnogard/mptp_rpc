@@ -14,7 +14,7 @@ use mm_ptr::{Owned, Shared, x_deps::abs_mm};
 use mptp_core::{
     access_method::AccessMethod,
     client::{Client, TrClienAllocConfig, TrClient, TrSession, config::TrClientConfig},
-    messaging::{Nothing, Request, Response},
+    messaging::{EncodedBody, Nothing, Request, Response},
     specs::Status,
 };
 use smux_v1::{
@@ -78,9 +78,9 @@ impl TrClientConfig for DemoClientCfg {
 
     type SharedConn = Shared<Conn, CoreAlloc>;
 
-    type Request = Request<String, Nothing>;
+    type Request = Request<EncodedBody, Nothing>;
 
-    type Response = Response<String, Nothing>;
+    type Response = Response<EncodedBody, Nothing>;
 
     type Err = DemoCfgError;
 }
@@ -101,12 +101,13 @@ pub async fn run_client_(
 ) -> Result<String> {
     let client = Client::<DemoClientCfg>::new(conn, Dock::new(remote_dock));
 
-    // 体直接挂业务类型：编码发生在写出时，`rmp-serde` 编出来的字节被 `AsStdWrite`
-    // 逐段写进 ring，中间没有第二块内存；`Body_Size` 则由「只数不写」量出来。
-    let request = Request::<String, Nothing>::with_measured_body(
+    // 体的字节必须**现成可借出**，因此这里在构造请求时就把业务值编成字节，再挂成
+    // `EncodedBody`；`with_measured_body` 顺手写下 `Body_Size`，声明这是定长传输。
+    let encoded = rmp_serde::to_vec(payload).map_err(|err| anyhow!("编码请求体失败：{err}"))?;
+    let request = Request::<EncodedBody, Nothing>::with_measured_body(
         AccessMethod::Call,
         K_ECHO_PATH,
-        payload.to_string(),
+        EncodedBody::new(encoded),
     )
     .map_err(|err| anyhow!("攒请求失败：{err}"))?;
 

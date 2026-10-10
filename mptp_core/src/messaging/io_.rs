@@ -27,7 +27,12 @@
 //! 本模块提供的每个 IO 入口都是 `async`：同步只发生在 `serde` 那一层，不外溢成调用方
 //! 的语义。
 
-use std::io::{self, Read, Write};
+use core::{
+    future::{Future, poll_fn},
+    pin::pin,
+    task::Poll,
+};
+use std::io::{self, Write};
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryWrite, TrBuffWrite,
@@ -40,6 +45,7 @@ use anylr::SomeOf;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+use super::body::{BodyReader, body_transfer_of};
 use crate::specs::{Headers, StdHeaderKey};
 
 /// 报文级 IO 的错误。
@@ -56,6 +62,14 @@ pub enum MessageIoError {
     #[error("decode failed: {0}")]
     Decode(String),
 
+    /// 读写底层缓冲失败（例如把字节写进 ring 时出错）。
+    #[error("io failed: {0}")]
+    Io(String),
+
+    /// 报文头里的体声明自相矛盾或无法解读。
+    #[error("protocol violation: {0}")]
+    Protocol(String),
+
     /// 对端在报文读完之前关闭了通道。
     ///
     /// 报文头已经声明了长度，流却在长度满足之前结束——这是**协议违规**，不能当成功。
@@ -63,6 +77,11 @@ pub enum MessageIoError {
     Truncated(String),
 
     /// `Body_Size` 头声明的长度与实际体字节数不符。
+    ///
+    /// 协议路径**不再**预量体长，因此当前没有产生点：定长体在搬运时源给不出声明的那么多
+    /// 字节，如实报成 [`MessageIoError::Truncated`]。装配期的同类校验由
+    /// [`RequestBuildError::BodySizeMismatch`](super::request::RequestBuildError::BodySizeMismatch)
+    /// 承担；这个变体保留给「显式核对」的场合。
     #[error("Body_Size 头声明 {declared} 字节，实际体有 {actual} 字节")]
     BodySizeMismatch { declared: usize, actual: usize },
 }
@@ -85,6 +104,43 @@ fn map_decode_err_(err: rmp_serde::decode::Error) -> MessageIoError {
     } else {
         MessageIoError::Decode(err.to_string())
     }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 竞速取消
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 让一个**不可取消**的 future 也能响应取消令牌。
+///
+/// # 为什么不用 `may_cancel_with`
+///
+/// 交付给 `gen_may_cancel_future` 的 step 函数里，底层缓冲的 `ReadAsync<'f>` /
+/// `WriteAsync<'f>` 借用了 step 的缓冲参数，而 `may_cancel_with` 要求令牌类型
+/// `C: 'f`。这条约束只能写在 where 子句里，但宏会把 where 中**提到取消令牌类型**的
+/// 谓词整条去掉（它自己只补 `TyTok__: TrCancellationToken`），于是那条约束无处可写。
+///
+/// 这里改用竞速：令牌先响应就返回 `None`，底层 future 随本函数返回而被丢弃，它的等待
+/// 注册随之注销。`TrCancellationToken` 只保证 `Send + Sync`，因此不假设它 `Unpin`。
+pub(super) async fn race_cancel_<TyFut, TyTok>(tok: TyTok, fut: TyFut) -> Option<TyFut::Output>
+where
+    TyFut: Future,
+    TyTok: TrCancellationToken,
+{
+    if !tok.can_be_cancelled() {
+        return Option::Some(fut.await);
+    }
+    let mut fut = pin!(fut);
+    let mut cancelled = pin!(tok.cancellation());
+    poll_fn(|cx| {
+        if cancelled.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Option::None);
+        }
+        if let Poll::Ready(output) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Option::Some(output));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -216,17 +272,20 @@ where
     rmp_serde::from_read::<_, T>(&mut read).map_err(map_decode_err_)
 }
 
-/// 按 `Body_Size` 头声明的长度，从接收半边**直接解出**一个业务类型的报文体。
+/// 按报文头声明的传输方式，从接收半边**直接解出**一个业务类型的报文体。
 ///
-/// - 没有该头（或长度为 0）时**一个字节都不读**，返回 `None`；
-/// - 有长度时把它包成 `Read::take(size)` 再交给解码器：即使对端多写了字节，也不会被
-///   这条报文读走（那属于同一条 channel 上的后续数据）。
+/// 边界完全交给 [`body_reader`](super::body::body_reader) 给出的体视图：
+///
+/// - 没有体时**一个字节都不读**，返回 `None`；
+/// - 定长体读到声明的长度即为流末，对端多写的字节不会被这条报文读走（那属于同一条
+///   channel 上的后续数据）；
+/// - 分块体按块自带的长度前缀解，读到终止块为止。
 ///
 /// 解码直接发生在 ring 的接收半边上，中间没有中转缓冲。
 ///
 /// # Errors
 ///
-/// 头值不是合法长度、报文不是合法的 MessagePack、对端提前关闭，或读 ring 失败时返回错误。
+/// 头部声明违规、报文不是合法的 MessagePack、对端提前关闭，或读 ring 失败时返回错误。
 pub(crate) async fn read_body_async_<T, TyRx, TyTok>(
     rx: &mut TyRx,
     headers: Option<&Headers>,
@@ -237,12 +296,12 @@ where
     TyRx: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
 {
-    let size = try_get_body_size_(headers)?;
-    if size == 0usize {
+    let transfer = body_transfer_of(headers).map_err(|err| MessageIoError::Protocol(err.to_string()))?;
+    if !transfer.has_body() {
         return Ok(Option::None);
     }
-    let limit = u64::try_from(size).unwrap_or(u64::MAX);
-    let mut read = AsStdRead::new(rx, tok).take(limit);
+    let mut reader = BodyReader::new(rx, transfer);
+    let mut read = AsStdRead::new(&mut reader, tok);
     let value = rmp_serde::from_read::<_, T>(&mut read).map_err(map_decode_err_)?;
     Ok(Option::Some(value))
 }
@@ -267,21 +326,4 @@ pub(crate) fn try_get_body_size_(headers: Option<&Headers>) -> Result<usize, Mes
             MessageIoError::Decode(format!("Body_Size 头不是合法的长度（{text:?}）：{err}"))
         }),
     }
-}
-
-/// 核对 `Body_Size` 头与实际体字节数是否一致。
-///
-/// # Errors
-///
-/// 不一致（或头的值不是合法长度）时返回错误。
-pub(crate) fn check_body_size_(
-    headers: Option<&Headers>,
-    body_len: Option<usize>,
-) -> Result<(), MessageIoError> {
-    let actual = body_len.unwrap_or(0usize);
-    let declared = try_get_body_size_(headers)?;
-    if declared == actual {
-        return Ok(());
-    }
-    Err(MessageIoError::BodySizeMismatch { declared, actual })
 }

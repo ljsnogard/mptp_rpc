@@ -46,11 +46,11 @@ $ cargo run -p rpc_demo -- client --peer   127.0.0.1:9000 --dock 7
 | TCP 连接、握手、建出复用连接 | `smux_v1` + `buffex_tokio_adapt` |
 | 客户端绑 dock、开子流、交出两块 ring 内存 | `mptp_core::client` |
 | 请求前缀（`Call` + `/rpc/echo` + 头）的编码 | `mptp_core::messaging::request` |
-| 请求体按 `Body_Size` 写出（编码直接落进 ring） | 同上（`send_request_async`） |
+| 请求体按头里声明的 `Body_Size` 搬运（段到段，无中转缓冲） | 同上（`send_request_async` + `send_body_async`） |
 | 服务端监听、接受子流、交出两块 ring 内存 | `mptp_core::serving` |
-| 解码请求前缀、handler 按 `Body_Size` 直接解出请求体 | `mptp_core::messaging` |
+| 解码请求前缀、handler 按头给出的体视图直接解出请求体 | `mptp_core::messaging`（`body_reader`） |
 | 路由到 `/rpc/echo`、handler 回带体的 `200 OK` | `mptp_core::serving` |
-| 回复前缀 + 回复体的写出（同样直接落进 ring） | `mptp_core::messaging::response` |
+| 回复前缀 + 回复体的写出（先前缀、再按头搬体） | `mptp_core::messaging::response` |
 | 客户端解析回复前缀、按协议决策读回复体 | `mptp_core::client` |
 
 **不覆盖**：协议层的单元测试（那些在 `mptp_core` 里，用内存缓冲驱动，不碰 socket）。
@@ -105,7 +105,11 @@ channel 交回应用线程。`MuxConnection` 是 `Send + Sync` 的智能指针�
 - **换个方法**：把客户端请求的 `AccessMethod::Call` 换成 `Head` 或 `Drop`，看服务端的
   回复被判为协议违规——`Head` / `Drop` 的回复按协议不带本体内容，而 echo handler 仍然
   回了体，客户端会明确报错而不是猜一个长度读下去。
-- **换个体**：改 `main.rs` 的 `K_PAYLOAD`。请求体用 `Request::with_measured_body`
-  挂上去，长度是「只数不写」量出来的，`Body_Size` 头必然跟着变。
+- **换个体**：改 `main.rs` 的 `K_PAYLOAD`。请求体在构造时编成 `EncodedBody`（发送路径
+  要求体的字节现成可借出），`Body_Size` 由 `with_measured_body` 顺手写好。
+- **换成分块传输**：把两端各自头里的 `Body_Size` 换成
+  `Body_Transfer: Chunked`（`HeadersBuilder::set(StdHeaderKey::Body_Transfer,
+  chunked_transfer_header_val())`），其余代码一行都不用改——收发两侧都只看头来分派。
+  协议层对这两种模式的处理已经各有单元测试。
 - **看流对齐**：把 echo handler 改成「不回体」，客户端那句 `recv_response_body_async`
   会一个字节都不读——这正是「没有 body 不破坏对齐」的落点。

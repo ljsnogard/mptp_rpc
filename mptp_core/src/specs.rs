@@ -124,6 +124,17 @@ impl StdHeaderKey {
     /// 指明本报文创建的日期和时间，值类型应该是关于日期的字符串
     pub const Created_At : StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x04);
 
+    /// 报文体的**传输方式**。取值见 [`StdHeaderVal::Body_Transfer_Chunked`]。
+    ///
+    /// 它与 `Body_Size` 是**互斥**的两种声明，接收方靠「哪个头在场」唯一地判断体是
+    /// 定长还是分块，不靠猜：
+    ///
+    /// - `Body_Size` 在场 = 定长，体恰好那么多字节；
+    /// - 本头取 `Chunked` = 分块，总长不写在头里，由块自带的长度前缀给出；
+    /// - 两者都不在场 = 本条报文没有体；
+    /// - 两者同时在场 = 协议违规（无法判定该按哪种方式切分后续字节）。
+    pub const Body_Transfer: StdHeaderKey = StdHeaderKey::new(Self::Reserved.0 + 0x05);
+
     //-------------------------------------------------------------------------
     // 客户端常用的标准请求头 0xB0 - 0xCF 保留了 32 个位置供扩展
     //-------------------------------------------------------------------------
@@ -195,6 +206,11 @@ impl StdHeaderVal {
 
     pub const Mime_Body_Type_MsgPack: StdHeaderVal = StdHeaderVal(0x01);
     pub const Mime_Body_Type_Json   : StdHeaderVal = StdHeaderVal(0x02);
+
+    /// `Body_Transfer` 的标准取值：报文体按**分块**方式传输。
+    ///
+    /// 每个块自带 2 字节大端长度前缀，以长度 `0` 的块结束；总长不写在 `Body_Size` 里。
+    pub const Body_Transfer_Chunked  : StdHeaderVal = StdHeaderVal(0x20);
 
     /// 表明客户端的主要目的是调用 RPC
     pub const User_Rpc_Client       : StdHeaderVal = StdHeaderVal(0x10);

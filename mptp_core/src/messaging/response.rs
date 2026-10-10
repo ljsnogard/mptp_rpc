@@ -4,9 +4,9 @@ use abs_cancel::TrCancellationToken;
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use super::io_::{
-    CountingWrite, MessageIoError, WaitingTx, check_body_size_, decode_from_async_,
-    read_body_async_,
+use super::{
+    body::{BodyTransfer, body_transfer_of, send_body_async},
+    io_::{CountingWrite, MessageIoError, WaitingTx, decode_from_async_, read_body_async_},
 };
 use crate::{
     access_method::AccessMethod,
@@ -59,65 +59,82 @@ impl RespPrefix {
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 回复头自相矛盾、或请求方法与回复头冲突时的协议违规。
-#[derive(Debug, Error)]
+///
+/// 请求方向的同类判定由 [`body_transfer_of`](super::body::body_transfer_of) 给出，
+/// 这里多出来的是**回复侧才有**的那条：某些请求方法的回复按协议不带本体内容。
+#[derive(Clone, Debug, Error)]
 pub enum ProtocolViolation {
     /// `Head` / `Drop` 按协议不带本体内容，服务端却在回复头里声明了报文体。
-    #[error("协议违规：{method:?} 的回复不应带报文体，但回复头声明了 {declared} 字节")]
+    ///
+    /// `declared` 是 `Body_Size` 声明的长度；分块体没有总长，因此是 `None`。
+    #[error("协议违规：{method:?} 的回复不应带报文体，但回复头声明了体（长度 {declared:?}）")]
     BodyNotAllowed {
         method: AccessMethod,
-        declared: usize,
+        declared: Option<usize>,
     },
 
-    /// 回复头声明了 `Body_Type` 却没有 `Body_Size`：无法确定回复体的边界。
-    #[error("协议违规：回复头声明了 Body_Type 却没有 Body_Size，无法确定回复体边界")]
+    /// 回复头声明了 `Body_Type`，却既没有 `Body_Size` 也没有分块声明：无法确定回复体的边界。
+    #[error("协议违规：回复头声明了 Body_Type 却没有给出体边界（既无 Body_Size 也无分块声明）")]
     MissingBodySize,
+
+    /// `Body_Size` 与 `Body_Transfer: Chunked` 同时在场：两种边界声明互斥，无法判定该按哪种读。
+    #[error("协议违规：Body_Size（{declared} 字节）与分块声明同时在场，体边界无从判定")]
+    ConflictingTransfer { declared: usize },
+
+    /// `Body_Transfer` 的取值不是已知的传输方式。
+    #[error("协议违规：无法解读的体传输方式（{0}）")]
+    UnknownBodyTransfer(String),
+
+    /// `Body_Size` 头不是合法的长度。
+    #[error("协议违规：Body_Size 头不是合法的长度（{0}）")]
+    MalformedBodySize(String),
 }
 
 /// 客户端在读完回复前缀之后，该拿报文体怎么办。
+///
+/// 这是「回复体边界」的唯一判据：边界一旦确定，读多少字节、按哪种方式读也就定了，
+/// 调用方不必自己去看头。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponseBodyDecision {
     /// 没有报文体：**一个字节都不要读**。
     Absent,
 
-    /// 有报文体：恰好这么多字节。
+    /// 定长报文体：恰好这么多字节。
     Present(usize),
+
+    /// 分块报文体：总长未知，读到终止块为止。
+    Chunked,
 }
 
 impl ResponseBodyDecision {
     /// 依据请求方法与回复前缀做出决策。
     ///
     /// 这是 MPTP 里「回复体边界」的唯一判据，取代了历史上那个只回答「要不要读」的
-    /// `should_read_response_body`：边界一旦确定，读多少字节也就定了，调用方不必再
-    /// 自己去看 `Body_Size`。
+    /// `should_read_response_body`。
     ///
-    /// 判定顺序：
+    /// 判定顺序（与 HTTP 的成熟约定同构）：
     ///
-    /// 1. 两个头都没有 → [`ResponseBodyDecision::Absent`]；
-    /// 2. 有 `Body_Type` 但没有 `Body_Size` → 无法确定边界，
-    ///    [`ProtocolViolation::MissingBodySize`]；
-    /// 3. 请求方法是 `Head` / `Drop` 却声明了体 →
-    ///    [`ProtocolViolation::BodyNotAllowed`]；
-    /// 4. 其余情况 → `Present(size)`（`size` 可以是 0，那就等价于没有体）。
+    /// 1. 请求方法是 `Head` / `Drop`——方法本身就否决体，无论头里怎么声明都属违规；
+    /// 2. 否则按 [`body_transfer_of`](super::body::body_transfer_of) 判定：两个体声明头
+    ///    都不在场（且没有 `Body_Type`）是没有体，`Body_Size` 为 0 也是没有体，
+    ///    有长度是定长，只有分块声明是分块；
+    /// 3. 头里的两种边界声明同时在场、或只有 `Body_Type` 而没有任何边界信息，都是协议
+    ///    违规——宁可不读，也不能按猜出来的长度切分后续字节。
     ///
     /// # Errors
     ///
-    /// 命中上述第 2、3 条时返回 [`ProtocolViolation`]。
+    /// 命中上述第 1、3 条时返回 [`ProtocolViolation`]。
     pub fn decide(method: AccessMethod, prefix: &RespPrefix) -> Result<Self, ProtocolViolation> {
-        let size = prefix.try_get_body_size();
-        let has_type = prefix.try_get_body_type().is_some();
-        match (size, has_type) {
-            // 什么都没声明：这条回复就到前缀为止。
-            (Option::None, false) => Result::Ok(ResponseBodyDecision::Absent),
-            // 只有类型没有长度：边界无从谈起。
-            (Option::None, true) => Result::Err(ProtocolViolation::MissingBodySize),
-            (Option::Some(0usize), _) => Result::Ok(ResponseBodyDecision::Absent),
-            (Option::Some(size), _) => match method {
+        let transfer = body_transfer_of(prefix.headers())?;
+        match transfer {
+            BodyTransfer::Absent => Result::Ok(ResponseBodyDecision::Absent),
+            BodyTransfer::Sized(size) => match method {
                 // 这两个方法按协议不带本体内容；服务端仍然声明了体，说明两端对协议的
                 // 理解已经不一致——继续按自己的理解读下去只会越错越远。
                 AccessMethod::Head | AccessMethod::Drop => {
                     Result::Err(ProtocolViolation::BodyNotAllowed {
                         method,
-                        declared: size,
+                        declared: Option::Some(size),
                     })
                 }
                 AccessMethod::View
@@ -126,14 +143,28 @@ impl ResponseBodyDecision {
                 | AccessMethod::Pull
                 | AccessMethod::Call => Result::Ok(ResponseBodyDecision::Present(size)),
             },
+            BodyTransfer::Chunked => match method {
+                AccessMethod::Head | AccessMethod::Drop => {
+                    Result::Err(ProtocolViolation::BodyNotAllowed {
+                        method,
+                        declared: Option::None,
+                    })
+                }
+                AccessMethod::View
+                | AccessMethod::Post
+                | AccessMethod::Push
+                | AccessMethod::Pull
+                | AccessMethod::Call => Result::Ok(ResponseBodyDecision::Chunked),
+            },
         }
     }
 
-    /// 这次回复需要读多少字节；没有体就是 0。
-    pub const fn body_size(&self) -> usize {
+    /// 这次回复需要读多少字节；没有体是 `Some(0)`，分块体没有确定的总长故为 `None`。
+    pub const fn body_size(&self) -> Option<usize> {
         match self {
-            ResponseBodyDecision::Absent => 0usize,
-            ResponseBodyDecision::Present(size) => *size,
+            ResponseBodyDecision::Absent => Option::Some(0usize),
+            ResponseBodyDecision::Present(size) => Option::Some(*size),
+            ResponseBodyDecision::Chunked => Option::None,
         }
     }
 }
@@ -174,14 +205,14 @@ where
     Ok(write.written_())
 }
 
-/// 写出一条完整的回复：前缀 + 报文体。
+/// 写出一条完整的回复：**先写前缀，再按头里声明的模式搬体**。
 ///
-/// 与请求方向同一条纪律：写出之前核对 `Body_Size` 头与体的实际长度，不一致就失败——
-/// 那样的报文会让客户端按错误的长度切分后续字节。
+/// 与请求方向同一条纪律：前缀先走（腾出 ring 的空间），体按 `Body_Size` 或分块声明搬运，
+/// 长度不必事先知道。
 ///
 /// # Errors
 ///
-/// 编码失败、`Body_Size` 与体长度不符，或写 ring 失败时返回错误。
+/// 头部体声明违规、体的字节借不出、体不足声明长度、编码失败，或写 ring 失败时返回错误。
 pub(crate) async fn send_response_async<'f, TyResp, TyTx, TyTok>(
     resp: &'f TyResp,
     tx: &'f mut TyTx,
@@ -192,25 +223,26 @@ where
     TyTx: TrBuffWrite<u8> + TrProducerState,
     TyTok: TrCancellationToken,
 {
-    let body_len = resp
-        .try_body_len()
-        .map_err(|err| MessageIoError::Encode(err.to_string()))?;
-    check_body_size_(resp.headers(), body_len)?;
-
     let written = send_response_prefix_async(resp, tx, tok.child_token()).await?;
 
-    let mut waiting = WaitingTx::new_(tx);
-    let mut write = CountingWrite::new_(AsStdWrite::new(&mut waiting, tok));
-    let declared = resp
-        .try_write_body(&mut write)
-        .map_err(|err| MessageIoError::Encode(err.to_string()))?;
-    let actual = write.written_();
-    if let Option::Some(declared) = declared
-        && declared != actual
-    {
-        return Err(MessageIoError::BodySizeMismatch { declared, actual });
-    }
-    Ok(written + actual)
+    let Some(bytes) = resp
+        .try_body_bytes()
+        .map_err(|err| MessageIoError::Encode(err.to_string()))?
+    else {
+        let transfer = body_transfer_of(resp.headers())
+            .map_err(|err| MessageIoError::Protocol(err.to_string()))?;
+        if transfer.has_body() {
+            return Result::Err(MessageIoError::Protocol(
+                "回复头声明了报文体，但体的字节不是现成可借出的（请先编码到一块内存，例如 EncodedBody）"
+                    .to_string(),
+            ));
+        }
+        return Result::Ok(written);
+    };
+
+    let mut src: &[u8] = bytes;
+    let body = send_body_async(&mut src, tx, resp.headers(), tok).await?;
+    Result::Ok(written + body)
 }
 
 /// 解码回复前缀（`status` / `headers`）。
@@ -234,9 +266,10 @@ where
     Ok(RespPrefix(status, headers))
 }
 
-/// 按 `Body_Size` 头把回复体解成一个业务类型。语义同
+/// 按回复头把回复体解成一个业务类型。语义同
 /// [`recv_request_body_async`](super::request::recv_request_body_async)：边界由协议头
-/// 决定，没有体时一个字节都不读，解码直接发生在 ring 的接收半边上。
+/// 决定（定长按 `Body_Size`、分块按块自带的长度），没有体时一个字节都不读，解码直接
+/// 发生在 ring 的接收半边上。
 ///
 /// # Errors
 ///

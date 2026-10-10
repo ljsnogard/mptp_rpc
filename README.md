@@ -93,8 +93,10 @@ MPTP 只依赖底层提供的能力，不在协议内部重新实现：
 - `Request` 由 `method_ + path_ + headers_` 组成；
 - `Response` 由 `status_ + headers_` 组成；
 - 头部目前使用 `rmp-serde` / MessagePack 序列化，但这是可以替换的，不能写死
-- 如果有 body，通过标准头 `Body_Size` 声明长度、`Body_Type` 声明类型；
-- body 是跟随在消息头后面的原始二进制内容；
+- 如果有 body，**必须**在头里声明它是怎么传的：`Body_Size` 声明定长，或者
+  `Body_Transfer: Chunked` 声明分块（两者互斥）；`Body_Type` 声明类型；
+- body 是跟随在消息头后面的原始二进制内容：定长体就是那么多字节，分块体是一串
+  「2 字节大端长度 + 内容」的块，以长度 `0` 的块收尾；
 - 在 body 之后，协议还允许同一 stream 上继续追加“suffix stream”数据，用于实时流。
 
 关键点：**头部不是 HTTP 文本**，而是二进制友好的 `String or u16` 联合体。
@@ -143,9 +145,12 @@ MPTP 定义了 7 种资源访问方法：
 | HeaderKey / HeaderVal / Status / 标准头 | `mptp_core/src/specs.rs` | 已定义，含数字 / 文本两种形态的构造入口 |
 | Request / Response / 报文体的线上编码 | `mptp_core/src/messaging/basic.rs` | 已定义（`TrRpcBody`） |
 | 前缀与报文体的字节 IO | `mptp_core/src/messaging/io_.rs` | 已实现（直接读写 ring，无中转缓冲） |
+| 限长读写（只借出预设额度） | `mptp_core/src/messaging/limit.rs` | 已实现（`TrBuffRead` / `TrBuffWrite` 的衍生类型） |
+| 分块帧（块自带长度、显式结束） | `mptp_core/src/messaging/chunked.rs` | 已实现（`ChunkedWrite` / `ChunkedRead`） |
+| 体的模式判定 / 发送搬运 / 接收视图 | `mptp_core/src/messaging/body.rs` | 已实现（`BodyTransfer` / `send_body_async` / `body_reader`） |
 | RequestBuilder / HeadersBuilder | `mptp_core/src/messaging/request.rs`、`client/headers_.rs` | 已实现 |
 | 回复体决策 | `mptp_core/src/messaging/response.rs` | 已实现（`ResponseBodyDecision`） |
-| 客户端会话（发请求、读前缀与体） | `mptp_core/src/client/` | 已实现 |
+| 客户端会话（发请求、读前缀与体） | `mptp_core/src/client/` | 已实现（前缀与体分两步，体按头声明的模式搬运） |
 | 服务端 dispatcher / handler 链 | `mptp_core/src/serving/` | 已实现 |
 | body 的语义编解码（按 `Data_Type_Id` 分派） | `mptp_core/src/codec/` | 接口已定义，**尚未**接到真实半边 |
 | 多流连接 / Channel 抽象 | 由 `abs_smux` 提供 | 本 crate 只实现 trait，不自定义传输 |
@@ -248,6 +253,25 @@ cargo run -p rpc_demo -- client
 - **codec 抽象尚未接线**：`EncodeBuffWrite` / `DecodeBuffRead` / `CodecRegistry` 仍是
   「按 `Data_Type_Id` 分派编解码器」的接口，没有接到真实半边；本阶段的体一律按字节处理。
   接线留到需要按类型标识分派时再做。
+
+**第二轮落地记录**（分块 / 定长两种传输机制，见
+`dev-notes/body-transfer-20261010-2020.md` 与 `dev-notes/body-transfer-impl-20261010-2102.md`）：
+
+- **体的传输模式由报文头声明、由调用方选择**：`Body_Size` 是定长，`Body_Transfer: Chunked`
+  是分块，两者互斥；同时在场、或只有 `Body_Type` 而没有边界，都按协议违规报出。协议层
+  不再「试探体类型、推断模式」。
+- **发送体的统一形状是一个 `TrBuffRead<u8>`**：`send_body_async(src, dst, headers, tok)`
+  只按头搬字节，不预量长度、不为体分配缓存；定长用限长读钉住边界，分块则「源让出一段就
+  封一块」，块长就是那一段实际的字节数。代价是体在发送时必须已经落在某块内存里——
+  `EncodedBody` 是值体的标准载体，任意 `Serialize` 值要在构造请求时编进去。
+- **接收侧给的是「体读视图」而不是解好的值**：`body_reader(rx, headers)` 返回一个实现了
+  `TrBuffRead<u8>` 的 `BodyReader`（没有体 / 定长 / 分块三态），上层先拿前缀、再决定要不要
+  读、怎么读；没有体时它一个字节都不会碰。
+- **prefix 与 body 彻底分成两个收发单元**：`send_*_prefix_async` 先走（前缀的内容构造时
+  就完全确定，先把 ring 的空间腾出来），`send_body_async` 再按模式搬体。
+- **新标准头**：`StdHeaderKey::Body_Transfer`（`0xA5`）与
+  `StdHeaderVal::Body_Transfer_Chunked`（`0x20`）；chunk 前缀是定长 2 字节大端 `u16`，
+  `0` 兼作终止块。
 
 ### Phase 3：实现资源 CRUD Demo
 

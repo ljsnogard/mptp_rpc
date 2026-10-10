@@ -6,9 +6,10 @@ use thiserror::Error;
 
 use super::{
     basic::{EncodedBody, Nothing, Request, set_body_size_header_},
+    body::{body_transfer_of, send_body_async},
     io_::{
-        CountingWrite, MessageIoError, WaitingTx, check_body_size_, decode_from_async_,
-        read_body_async_, try_get_body_size_,
+        CountingWrite, MessageIoError, WaitingTx, decode_from_async_, read_body_async_,
+        try_get_body_size_,
     },
 };
 use crate::{
@@ -303,14 +304,19 @@ where
     Ok(write.written_())
 }
 
-/// 写出一条完整的请求：前缀 + 报文体。
+/// 写出一条完整的请求：**先写前缀，再按头里声明的模式搬体**。
 ///
-/// 写出之前核对 `Body_Size` 头与体的实际长度；不一致时**宁可失败也不写出**——那样的
-/// 报文会让接收方按错误的长度切分后续字节。
+/// 两步是分开的：前缀的内容（method / path / headers）由协议实现自己决定，构造时就完全
+/// 确定，所以可以先写出去、先把 ring 的空间腾出来；体则按 `Body_Size` 或分块声明搬运，
+/// 长度不必事先知道（见 `dev-notes/body-transfer`）。
+///
+/// 体的字节必须**现成可借出**（[`TrRpcRequest::try_body_bytes`]）：协议层不为它临时
+/// 分配缓存。需要发送「边编码边产生」的体时，先把它写进一块环，再从环的读半边取出来
+/// 作为源。
 ///
 /// # Errors
 ///
-/// 编码失败、`Body_Size` 与体长度不符，或写 ring 失败时返回错误。
+/// 头部体声明违规、体的字节借不出、体不足声明长度、编码失败，或写 ring 失败时返回错误。
 pub(crate) async fn send_request_async<'f, TyReq, TyTx, TyTok>(
     req: &'f TyReq,
     tx: &'f mut TyTx,
@@ -321,26 +327,28 @@ where
     TyTx: TrBuffWrite<u8> + TrProducerState,
     TyTok: TrCancellationToken,
 {
-    let body_len = req
-        .try_body_len()
-        .map_err(|err| MessageIoError::Encode(err.to_string()))?;
-    check_body_size_(req.headers(), body_len)?;
-
     let written = send_request_prefix_async(req, tx, tok.child_token()).await?;
 
-    // 体继续写进 ring 的发送半边：中间没有第二块内存。
-    let mut waiting = WaitingTx::new_(tx);
-    let mut write = CountingWrite::new_(AsStdWrite::new(&mut waiting, tok));
-    let declared = req
-        .try_write_body(&mut write)
-        .map_err(|err| MessageIoError::Encode(err.to_string()))?;
-    let actual = write.written_();
-    if let Option::Some(declared) = declared
-        && declared != actual
-    {
-        return Err(MessageIoError::BodySizeMismatch { declared, actual });
-    }
-    Ok(written + actual)
+    let Some(bytes) = req
+        .try_body_bytes()
+        .map_err(|err| MessageIoError::Encode(err.to_string()))?
+    else {
+        // 体给不出字节：头里若也声明了体，那就是「有内容却发不出去」，必须报出来，
+        // 而不是静默发一条没有体的请求。
+        let transfer = body_transfer_of(req.headers())
+            .map_err(|err| MessageIoError::Protocol(err.to_string()))?;
+        if transfer.has_body() {
+            return Result::Err(MessageIoError::Protocol(
+                "请求头声明了报文体，但体的字节不是现成可借出的（请先编码到一块内存，例如 EncodedBody）"
+                    .to_string(),
+            ));
+        }
+        return Result::Ok(written);
+    };
+
+    let mut src: &[u8] = bytes;
+    let body = send_body_async(&mut src, tx, req.headers(), tok).await?;
+    Result::Ok(written + body)
 }
 
 /// 解码请求前缀（`method` / `location` / `headers`）。

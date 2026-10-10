@@ -18,7 +18,7 @@ use anyhow::{Result, anyhow};
 use mm_ptr::{Owned, x_deps::abs_mm};
 use mptp_core::{
     access_method::AccessMethod,
-    messaging::{Nothing, Request, Response, recv_request_body_async},
+    messaging::{EncodedBody, Nothing, Request, Response, recv_request_body_async},
     routing::prefix_router::Router,
     serving::{
         ServingRingPrepare, TrServingAllocConfig, TrServingConfig,
@@ -75,14 +75,18 @@ impl TrServingConfig for DemoServingCfg {
 
     type AllocCfg = DemoAllocCfg;
 
-    type Request = Request<String, Nothing>;
+    type Request = Request<EncodedBody, Nothing>;
 
-    type Response = Response<String, Nothing>;
+    type Response = Response<EncodedBody, Nothing>;
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 把请求体原样回写的 handler。
+///
+/// 两边的体都用 [`EncodedBody`] 承载：发送路径要求体的字节**现成可借出**，因此编码在
+/// 构造报文时一次完成（服务端这边就是解析出业务值之后立刻编回去），协议层只负责按头部
+/// 声明的模式搬运这些字节，不会再为体分配任何缓存。
 pub struct EchoHandler;
 
 // handler 的入参本来就宽（请求信息 + 双向半边 + 上下文 + 令牌）。
@@ -97,7 +101,7 @@ async fn handle_echo_async_<'h, TyTok>(
     rx: &'h mut ChannelRx<DemoServingCfg>,
     _context: &'h mut SessionContext,
     cancel: TyTok,
-) -> Result<FlowCtrl<Response<String, Nothing>>, HandlerError>
+) -> Result<FlowCtrl<Response<EncodedBody, Nothing>>, HandlerError>
 where
     TyTok: TrCancellationToken,
 {
@@ -114,10 +118,14 @@ where
             .await
             .map_err(|_| HandlerError::IoError)?;
 
-    // 回体时用 `with_measured_body`：长度只数不写地量一遍，`Body_Size` 与实际写出量
-    // 必然一致，`Server` 写回时不会因为对不上而拒绝。
-    let resp = Response::<String, Nothing>::with_measured_body(Status::Ok, msg.unwrap_or_default())
-        .map_err(|_| HandlerError::IoError)?;
+    // 回体：先把业务值编成字节（MessagePack），再用 `with_measured_body` 顺手写好
+    // `Body_Size`——这是**定长**传输，发送方会恰好搬这么多字节。
+    let encoded = rmp_serde::to_vec(&msg.unwrap_or_default()).map_err(|_| HandlerError::IoError)?;
+    let resp = Response::<EncodedBody, Nothing>::with_measured_body(
+        Status::Ok,
+        EncodedBody::new(encoded),
+    )
+    .map_err(|_| HandlerError::IoError)?;
     Result::Ok(FlowCtrl::Ceased(Option::Some(resp)))
 }
 
@@ -130,7 +138,7 @@ impl TrReqHandler<DemoServingCfg> for EchoHandler {
         tx: &'h mut ChannelTx<DemoServingCfg>,
         rx: &'h mut ChannelRx<DemoServingCfg>,
         context: &'h mut SessionContext,
-    ) -> impl TrMayCancel<'h, MayCancelOutput = Result<FlowCtrl<Response<String, Nothing>>, HandlerError>>
+    ) -> impl TrMayCancel<'h, MayCancelOutput = Result<FlowCtrl<Response<EncodedBody, Nothing>>, HandlerError>>
     {
         HandleEchoAsync::new(self, method, location, headers, tx, rx, context)
     }

@@ -57,6 +57,25 @@ pub trait TrRpcBody {
     ///
     /// 体编码失败或写 `sink` 失败时返回错误。
     fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError>;
+
+    /// **借出**本体的全部线上字节（如果它本来就在内存里）。
+    ///
+    /// 发送路径把体看成一个 [`TrBuffRead`](abs_buff::TrBuffRead) 流，因此需要**已经
+    /// 存在的字节**；`try_encode_into` 是 push 语义，给不出引用。于是这里回答另一个
+    /// 问题：「你的字节现在能不能直接借出来？」
+    ///
+    /// - [`EncodedBody`] 与任何「字节已在手上」的体：`Ok(Some(bytes))`；
+    /// - [`Nothing`]：`Ok(None)`（没有体，不是「借不出」）；
+    /// - 只有编码过程才知道字节长什么样的体（例如任意 `Serialize` 值）：默认实现返回
+    ///   [`BodyEncodeError::NotByteAccessible`]。这类体要在发送前先编码到一块内存
+    ///   （例如构造时就编进 [`EncodedBody`]），协议层**不会**为它临时分配缓存。
+    ///
+    /// # Errors
+    ///
+    /// 体有内容、却无法以借出的形式给出字节时返回错误。
+    fn try_as_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
+        Result::Err(BodyEncodeError::NotByteAccessible)
+    }
 }
 
 /// 体编码失败的原因。
@@ -69,6 +88,13 @@ pub enum BodyEncodeError {
     /// 往 `sink` 写出时失败。
     #[error("体写出失败：{0}")]
     Io(String),
+
+    /// 体有内容，但其字节不是现成可借出的：发送路径要求体已经落在一块内存里。
+    ///
+    /// 这类体（例如任意 `Serialize` 值）应当先编码进一块内存——最直接的做法是构造请求
+    /// 时就编成 [`EncodedBody`]——协议层不会替它临时分配缓存（见 README §7 第 1 条）。
+    #[error("体的字节不是现成可借出的，请先把它编码到一块内存（例如 EncodedBody）再发送")]
+    NotByteAccessible,
 }
 
 /// 「什么都没有」：既表示报文**没有体**，也用作 suffix stream 的缺省标记。
@@ -90,6 +116,11 @@ impl TrRpcBody for Nothing {
         &self,
         _sink: &mut dyn io::Write,
     ) -> Result<Option<usize>, BodyEncodeError> {
+        Ok(Option::None)
+    }
+
+    #[inline]
+    fn try_as_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
         Ok(Option::None)
     }
 }
@@ -133,6 +164,11 @@ impl TrRpcBody for EncodedBody {
         sink.write_all(self.bytes_.as_slice())
             .map_err(|err| BodyEncodeError::Io(err.to_string()))?;
         Ok(Option::Some(self.bytes_.len()))
+    }
+
+    #[inline]
+    fn try_as_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
+        Ok(Option::Some(self.bytes_.as_slice()))
     }
 }
 
@@ -309,6 +345,16 @@ where
     /// 体编码失败或写 `sink` 失败时返回错误。
     fn try_write_body(&self, sink: &mut dyn io::Write)
     -> Result<Option<usize>, BodyEncodeError>;
+
+    /// 借出本条请求的**体字节**，供发送路径按头部声明的模式搬运。
+    ///
+    /// `Ok(None)` 表示没有体；体有内容却给不出字节时返回
+    /// [`BodyEncodeError::NotByteAccessible`]。
+    ///
+    /// # Errors
+    ///
+    /// 体的字节不是现成可借出的时返回错误。
+    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError>;
 }
 
 pub trait TrRpcResponse
@@ -332,6 +378,13 @@ where
     /// 体编码失败或写 `sink` 失败时返回错误。
     fn try_write_body(&self, sink: &mut dyn io::Write)
     -> Result<Option<usize>, BodyEncodeError>;
+
+    /// 借出本条回复的**体字节**，语义同 [`TrRpcRequest::try_body_bytes`]。
+    ///
+    /// # Errors
+    ///
+    /// 体的字节不是现成可借出的时返回错误。
+    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError>;
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -486,6 +539,14 @@ where
             Option::None => Ok(Option::None),
         }
     }
+
+    #[inline]
+    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
+        match self.body_.as_ref() {
+            Option::Some(body) => body.try_as_bytes(),
+            Option::None => Ok(Option::None),
+        }
+    }
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -618,6 +679,14 @@ where
     ) -> Result<Option<usize>, BodyEncodeError> {
         match self.body_.as_ref() {
             Option::Some(body) => body.try_encode_into(sink),
+            Option::None => Ok(Option::None),
+        }
+    }
+
+    #[inline]
+    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
+        match self.body_.as_ref() {
+            Option::Some(body) => body.try_as_bytes(),
             Option::None => Ok(Option::None),
         }
     }
