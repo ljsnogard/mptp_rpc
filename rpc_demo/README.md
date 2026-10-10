@@ -105,8 +105,11 @@ channel 交回应用线程。`MuxConnection` 是 `Send + Sync` 的智能指针�
 - **换个方法**：把客户端请求的 `AccessMethod::Call` 换成 `Head` 或 `Drop`，看服务端的
   回复被判为协议违规——`Head` / `Drop` 的回复按协议不带本体内容，而 echo handler 仍然
   回了体，客户端会明确报错而不是猜一个长度读下去。
-- **换个体**：改 `main.rs` 的 `K_PAYLOAD`。请求体在构造时编成 `EncodedBody`（发送路径
-  要求体的字节现成可借出），`Body_Size` 由 `with_measured_body` 顺手写好。
+- **换个体**：改 `main.rs` 的 `K_PAYLOAD`。请求体编成字节串后直接当体（`Vec<u8>` 实现了
+  `TrRpcBody`），`Body_Size` 由 `with_sized_body` 顺手写好。
+- **改成发业务值**：把请求换成 `RequestBuilder::body(值)`（默认 MessagePack）或
+  `body_with(值, codec)`——那时编码推迟到发送时、边编边发，长度不必事先知道，传输模式
+  默认就是分块。
 - **换成分块传输**：把两端各自头里的 `Body_Size` 换成
   `Body_Transfer: Chunked`（`HeadersBuilder::set(StdHeaderKey::Body_Transfer,
   chunked_transfer_header_val())`），其余代码一行都不用改——收发两侧都只看头来分派。

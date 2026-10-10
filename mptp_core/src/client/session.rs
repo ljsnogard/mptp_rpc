@@ -68,12 +68,12 @@ impl<C> TrSession<C> for Session<C>
 where
     C: TrClientConfig,
 {
-    type RecvRespAsync<'f>
+    type RecvRespHeaderAsync<'f>
         = SessionRecvRespAsync<'f, 'f, C>
     where
         Self: 'f;
 
-    fn recv_response_async<'f>(&'f mut self) -> Self::RecvRespAsync<'f> {
+    fn recv_resp_header_async<'f>(&'f mut self) -> Self::RecvRespHeaderAsync<'f> {
         SessionRecvRespAsync::new(self)
     }
 
@@ -83,7 +83,7 @@ where
         Self: 'f,
         T: 'f + DeserializeOwned + 'static;
 
-    fn recv_response_body_async<'f, T>(
+    fn recv_resp_body_async<'f, T>(
         &'f mut self,
         prefix: &'f RespPrefix,
     ) -> Self::RecvRespBodyAsync<'f, T>

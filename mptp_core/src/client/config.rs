@@ -3,9 +3,10 @@
 //! 本模块只描述「使用者要提供什么、客户端能做什么」，不含实现：具体实现见
 //! [`super::client_`] 与 [`super::session`]。
 
+use serde::de::DeserializeOwned;
+
 use abs_buff::x_deps::abs_cancel;
 use abs_cancel::TrMayCancel;
-use serde::de::DeserializeOwned;
 use abs_smux::{
     chan::TrChannelHandle,
     conf::TrMuxConfig,
@@ -75,7 +76,7 @@ pub trait TrSession<C>
 where
     C: TrClientConfig,
 {
-    type RecvRespAsync<'f>: TrMayCancel<'f, MayCancelOutput =
+    type RecvRespHeaderAsync<'f>: TrMayCancel<'f, MayCancelOutput =
         Result<RespPrefix, ClientError>>
     where
         Self: 'f;
@@ -84,9 +85,10 @@ where
     ///
     /// 前缀本身说明不了回复的全部：体是可选的，长度写在 `Body_Size` 头里。要不要读、
     /// 读多少，由 [`TrSession::recv_response_body_async`] 按协议判定。
-    fn recv_response_async<'f>(&'f mut self) -> Self::RecvRespAsync<'f>;
+    fn recv_resp_header_async<'f>(&'f mut self) -> Self::RecvRespHeaderAsync<'f>;
 
-    type RecvRespBodyAsync<'f, T>: TrMayCancel<'f, MayCancelOutput = Result<Option<T>, ClientError>>
+    type RecvRespBodyAsync<'f, T>: TrMayCancel<'f, MayCancelOutput =
+        Result<Option<T>, ClientError>>
     where
         Self: 'f,
         T: 'f + DeserializeOwned + 'static;
@@ -99,7 +101,7 @@ where
     /// `Body_Size`，都会按协议违规报错，而不是猜一个长度读下去。
     ///
     /// 解码**直接从 ring 的接收半边进行**，中间没有中转缓冲。
-    fn recv_response_body_async<'f, T>(
+    fn recv_resp_body_async<'f, T>(
         &'f mut self,
         prefix: &'f RespPrefix,
     ) -> Self::RecvRespBodyAsync<'f, T>

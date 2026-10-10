@@ -1,4 +1,4 @@
-//! 协议层的单元测试：报文前缀、报文体，以及回复体的读取决策。
+//! 协议层的单元测试：报文前缀、报文体的两种传输方式，以及回复体的读取决策。
 //!
 //! # 为什么这些用例要跑在后端运行时里
 //!
@@ -13,18 +13,18 @@
 use std::io::Write;
 
 use abs_buff::x_deps::abs_cancel;
-use abs_cancel::NonCancellableToken;
-
 use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
+use abs_cancel::NonCancellableToken;
 
 use super::{
     MessageIoError, Nothing, ProtocolViolation, Request, RespPrefix, Response,
-    ResponseBodyDecision, TrRpcBody, TrRpcRequest,
-    basic::EncodedBody,
+    ResponseBodyDecision, TrRpcBody,
+    basic::CodableBody,
     body::{
-        BodyTransfer, body_reader, body_transfer_of, chunked_transfer_header_val, send_body_async,
+        BodyTransfer, body_reader, body_transfer_of, chunked_transfer_header_val,
+        is_chunked_body, send_body_from_reader_async, send_content_async,
     },
-    chunked::ChunkedWrite,
+    chunked::{ChunkedSink, ChunkedWrite},
     limit::{LimitedRead, LimitedWrite},
     request::{RequestBuildError, RequestBuilder, recv_request_prefix_async, send_request_async},
     response::{recv_response_body_async, recv_response_prefix_async, send_response_async},
@@ -32,6 +32,7 @@ use super::{
 use crate::{
     access_method::AccessMethod,
     client::HeadersBuilder,
+    codec::Codec,
     specs::{HeaderVal, Status, StdHeaderKey, StdHeaderVal},
 };
 
@@ -141,469 +142,16 @@ fn prefix_with_size_(status: Status, size: Option<usize>) -> RespPrefix {
     RespPrefix(status, Option::Some(headers))
 }
 
-//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
-
-backend_async_test! {
-    /// 测试无 body 的请求能原样往返，且读完前缀后紧跟的字节一个都没被吃掉。
-    /// - 手段：构造一条 `View /hello`（体是 [`Nothing`]）的请求，写进内存缓冲，再手工追加
-    ///   一个哨兵字节 `0xAB`；随后从这段字节里解出请求前缀。
-    /// - 判断：解出的 method / location 与构造时一致；`Body_Size` 头不存在；且**读源切片
-    ///   推进到只剩哨兵那一字节**——这正是「没有 body 就不多读一个字节」的直接证据
-    ///   （这里没有预读缓冲，多读的字节无处可藏）。
-    fn request_prefix_without_body_roundtrips_() {
-        let req: Request<Nothing, Nothing> = Request::new(AccessMethod::View, "/hello");
-        let mut wire = write_to_vec!(|tx| send_request_async(
-            &req,
-            tx,
-            NonCancellableToken::new()
-        ));
-        // 前缀之后追加哨兵：它代表「同一条 channel 上的后续数据」。
-        wire.push(0xABu8);
-
-        let mut src: &[u8] = wire.as_slice();
-        let prefix = recv_request_prefix_async(&mut src, NonCancellableToken::new())
-            .await
-            .expect("前缀应当解得出来");
-
-        assert_eq!(prefix.0, AccessMethod::View, "method 应当原样往返");
-        assert_eq!(prefix.1, "/hello", "location 应当原样往返");
-        assert_eq!(
-            super::io_::try_get_body_size_(prefix.2.as_ref()).expect("头应当可解"),
-            0usize,
-            "不该有体"
-        );
-        assert_eq!(src, &[0xABu8], "哨兵字节不应当被前缀读取吃掉");
-    }
-}
-
-backend_async_test! {
-    /// 测试带 body 的请求能原样往返。
-    /// - 手段：构造一条 `Call /rpc/echo`，体是 MessagePack 编出来的字符串；用
-    ///   [`Request::with_measured_body`] 自动写好 `Body_Size` 头，写出去再解回来，
-    ///   随后按头声明的长度直接解出体。
-    /// - 判断：解码出的前缀字段与构造时一致；读出 String 等于原来那个；且**读源被恰好
-    ///   耗尽**（体之后没有多余字节）。
-    fn request_with_body_roundtrips_() {
-        // 发送路径要求体的字节**现成可借出**，因此这里先编成 `EncodedBody`：
-        // MessagePack 的 "hello" 是 fixstr 头 1 字节 + 正文 5 字节。
-        let req = Request::<EncodedBody, Nothing>::with_measured_body(
-            AccessMethod::Call,
-            "/rpc/echo",
-            EncodedBody::new(rmp_serde::to_vec("hello").expect("编码不该失败")),
-        )
-        .expect("量长度不该失败");
-        let wire = write_to_vec!(|tx| send_request_async(
-            &req,
-            tx,
-            NonCancellableToken::new()
-        ));
-
-        let mut src: &[u8] = wire.as_slice();
-        let prefix = recv_request_prefix_async(&mut src, NonCancellableToken::new())
-            .await
-            .expect("前缀应当解得出来");
-        assert_eq!(prefix.0, AccessMethod::Call, "method 应当原样往返");
-        assert_eq!(prefix.1, "/rpc/echo", "location 应当原样往返");
-
-        let body: Option<String> =
-            super::recv_request_body_async(&mut src, prefix.2.as_ref(), NonCancellableToken::new())
-                .await
-                .expect("体应当解得出来");
-        assert_eq!(body, Some("hello".to_string()), "体应当与写出去的一致");
-        assert!(src.is_empty(), "读完体之后不应当还有剩余字节");
-    }
-}
-
-backend_async_test! {
-    /// 测试带体的回复能原样往返，客户端侧按前缀读体。
-    /// - 手段：构造一条 `Status::Ok` + 体的回复（体长度由 `with_measured_body` 量好），
-    ///   写出去后从字节里先解前缀，交给 [`ResponseBodyDecision`] 判边界，再按判决读体。
-    /// - 判断：状态码一致；决策给出 `Present(5)`；读出的字符串与写出去的一致。
-    fn response_with_body_roundtrips_() {
-        let resp = Response::<EncodedBody, Nothing>::with_measured_body(
-            Status::Ok,
-            EncodedBody::new(rmp_serde::to_vec("resp").expect("编码不该失败")),
-        )
-        .expect("量长度不该失败");
-        let wire = write_to_vec!(|tx| send_response_async(
-            &resp,
-            tx,
-            NonCancellableToken::new()
-        ));
-
-        let mut src: &[u8] = wire.as_slice();
-        let prefix = recv_response_prefix_async(&mut src, NonCancellableToken::new())
-            .await
-            .expect("回复前缀应当解得出来");
-        assert_eq!(prefix.status(), Status::Ok, "状态码应当原样往返");
-
-        let decision = ResponseBodyDecision::decide(AccessMethod::Call, &prefix)
-            .expect("Call 的回复带体是合法的");
-        assert_eq!(
-            decision,
-            ResponseBodyDecision::Present(5usize),
-            "MessagePack 的 \"resp\" 是 fixstr 头 1 字节加正文 4 字节"
-        );
-        let body: Option<String> =
-            recv_response_body_async(&mut src, &prefix, NonCancellableToken::new())
-                .await
-                .expect("体应当解得出来");
-        assert_eq!(body, Some("resp".to_string()), "体应当与写出去的一致");
-    }
-}
-
-backend_async_test! {
-    /// 测试「没有回复体」时一个字节都不读，后续数据保持完整。
-    /// - 手段：造一条只有 `Status::Ok`、没有任何 body 头的回复，写出去后手工追加哨兵；
-    ///   先解前缀，再让决策判一次，然后按其结论（0 字节）走读体路径。
-    /// - 判断：决策必须是 `Absent`；读体返回 `None`；且**读源推进到只剩哨兵**。
-    fn absent_response_body_consumes_nothing_() {
-        let resp = Response::<Nothing, Nothing>::new(Status::Ok);
-        let mut wire = write_to_vec!(|tx| send_response_async(
-            &resp,
-            tx,
-            NonCancellableToken::new()
-        ));
-        wire.push(0xCDu8);
-
-        let mut src: &[u8] = wire.as_slice();
-        let prefix = recv_response_prefix_async(&mut src, NonCancellableToken::new())
-            .await
-            .expect("回复前缀应当解得出来");
-
-        let decision = ResponseBodyDecision::decide(AccessMethod::View, &prefix)
-            .expect("两个头都没有，是「没有体」而不是违规");
-        assert_eq!(decision, ResponseBodyDecision::Absent, "应当判定为没有体");
-
-        let body: Option<String> =
-            recv_response_body_async(&mut src, &prefix, NonCancellableToken::new())
-                .await
-                .expect("读 0 字节不应当失败");
-        assert!(body.is_none(), "没有体时应当读出 None");
-        assert_eq!(src, &[0xCDu8], "哨兵字节不应当被读体路径吃掉");
-    }
-}
-
-backend_async_test! {
-    /// 测试体读到一半对端关闭时按「提前结束」报出。
-    /// - 手段：造一条体为 8 字节的回复，写出后把线上字节削掉 5 个（前缀仍声明 8 字节），
-    ///   再按头声明的长度去读体。
-    /// - 判断：返回 `Err(Truncated)`——协议头已经承诺了长度，流却在长度满足前结束，属于
-    ///   必须报出来的错误，不能当成功。
-    fn truncated_body_is_reported_() {
-        let resp = Response::<EncodedBody, Nothing>::with_measured_body(
-            Status::Ok,
-            EncodedBody::new(rmp_serde::to_vec("abcdefgh").expect("编码不该失败")),
-        )
-        .expect("量长度不该失败");
-        let mut wire = write_to_vec!(|tx| send_response_async(
-            &resp,
-            tx,
-            NonCancellableToken::new()
-        ));
-        // 削掉 5 个字节：头仍然声明 8 字节的体，而流里只剩 3 个。
-        let cut = wire.len() - 5usize;
-        wire.truncate(cut);
-
-        let mut src: &[u8] = wire.as_slice();
-        let prefix = recv_response_prefix_async(&mut src, NonCancellableToken::new())
-            .await
-            .expect("前缀仍然解得出来");
-        let err: MessageIoError =
-            recv_response_body_async::<String, _, _>(&mut src, &prefix, NonCancellableToken::new())
-                .await
-                .expect_err("体不足时应当报错");
-        assert!(
-            matches!(err, MessageIoError::Truncated(_)),
-            "应当是 Truncated，实际是 {err}"
-        );
-    }
-}
-
-backend_async_test! {
-    /// 测试「`Body_Size` 声明得比体实际字节多」时按截断报出。
-    /// - 手段：手工把 `Body_Size` 设成 5 而体只有 3 字节，再调用 `send_request_async`。
-    /// - 判断：返回 `Err(Truncated)`——定长搬运要求源恰好给得出声明的那么多字节，源提前
-    ///   结束就是「对端会按错误的长度切分后续字节」的前兆，必须报出来而不是照发。
-    fn send_reports_truncated_when_body_shorter_than_declared_() {
-        let req = Request::<EncodedBody, Nothing>::new(AccessMethod::Post, "/upload")
-            .with_headers(HeadersBuilder::new().set_body_size(5usize).build())
-            .with_body(EncodedBody::new(b"abc".to_vec()));
-        let mut storage = vec![0u8; K_BUFFER];
-        let mut sink: &mut [u8] = storage.as_mut_slice();
-        let err = send_request_async(&req, &mut sink, NonCancellableToken::new())
-            .await
-            .expect_err("体不足声明长度时应当报截断");
-        assert!(
-            matches!(err, MessageIoError::Truncated(_)),
-            "应当是 Truncated，实际是 {err}"
-        );
-    }
-}
-
-//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
-// 纯逻辑：不碰 IO，因此不需要后端上下文
-//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
-
-/// 测试 `Head` 的回复带了体时按协议违规报出，而不是猜一个长度读下去。
-/// - 手段：构造一个声明了 `Body_Size` 的回复前缀，用 `AccessMethod::Head` 去决策。
-/// - 判断：返回 `Err(BodyNotAllowed)`，且其中的 `declared` 就是头里声明的长度——按自己
-///   的理解读下去只会让两端越错越远，所以这里必须失败。
-#[test]
-fn head_reply_with_body_is_a_violation_() {
-    let prefix = prefix_with_size_(Status::Ok, Option::Some(8usize));
-    let err =
-        ResponseBodyDecision::decide(AccessMethod::Head, &prefix).expect_err("Head 的回复不该带体");
-    match err {
-        ProtocolViolation::BodyNotAllowed { method, declared } => {
-            assert_eq!(method, AccessMethod::Head, "违规的应当是 Head");
-            assert_eq!(declared, Option::Some(8usize), "声明的长度应当原样带出来");
-        }
-        other => panic!("应当是 BodyNotAllowed，实际是 {other}"),
-    }
-}
-
-/// 测试「只有 `Body_Type` 没有 `Body_Size`」按协议违规报出。
-/// - 手段：造一个只设 `Body_Type` 的回复头，拼成前缀后用 `View` 去决策。
-/// - 判断：返回 `Err(MissingBodySize)`——没有长度就无法确定边界，此时任何「读一点看看」
-///   的做法都会破坏后续字节的对齐。
-#[test]
-fn body_type_without_size_is_a_violation_() {
-    let headers = HeadersBuilder::new()
-        .set_body_type(&HeaderVal::from(StdHeaderVal::Mime_Body_Type_MsgPack))
-        .build();
-    let prefix = RespPrefix(Status::Ok, Option::Some(headers));
-    let err = ResponseBodyDecision::decide(AccessMethod::View, &prefix)
-        .expect_err("只有类型没有长度应当被判违规");
-    assert!(
-        matches!(err, ProtocolViolation::MissingBodySize),
-        "应当是 MissingBodySize，实际是 {err}"
-    );
-}
-
-/// 测试只声明 `Body_Size`、没有 `Body_Type` 的回复仍然被正常读取。
-/// - 手段：造一个只有 `Body_Size` 的回复前缀，用 `View` 去决策。
-/// - 判断：决策给出 `Present(2)` 而不是违规——「有长度、没类型」是合法的原始字节体。
-#[test]
-fn body_without_type_is_allowed_() {
-    let prefix = prefix_with_size_(Status::Ok, Option::Some(2usize));
-    let decision =
-        ResponseBodyDecision::decide(AccessMethod::View, &prefix).expect("有长度没类型是合法的");
-    assert_eq!(
-        decision,
-        ResponseBodyDecision::Present(2usize),
-        "应当读 2 字节"
-    );
-}
-
-/// 测试 `TrRpcBody` 对「没有体」与「有体」的回答，以及长度预量与实际写出一致。
-/// - 手段：对 [`Nothing`] 与字符串分别取长度，并把字符串编进一个 `Vec` 数出实际字节。
-/// - 判断：`Nothing` 的长度是 `None`（没有体）；字符串长度是 `Some(3)`，且与真正编出来
-///   的字节数相等——预量与实际编码走的是同一个编码器，两者必须对得上。
-#[test]
-fn body_view_reports_length_() {
-    assert!(
-        TrRpcBody::try_encoded_len(&Nothing)
-            .expect("不该失败")
-            .is_none(),
-        "Nothing 表示没有体"
-    );
-
-    let len = TrRpcBody::try_encoded_len(&"hi")
-        .expect("不该失败")
-        .expect("字符串是有体的");
-    let mut sink = Vec::new();
-    TrRpcBody::try_encode_into(&"hi", &mut sink).expect("编码不该失败");
-    assert_eq!(len, sink.len(), "预量出来的长度必须与实际写出量一致");
-    assert_eq!(sink, b"\xa2hi", "MessagePack 的 \"hi\" 应当是这两个字节");
-}
-
-/// 测试 `RequestBuilder` 会把 `Body_Size` 与 `Body_Type` 两个头一并写好。
-/// - 手段：用 `RequestBuilder` 的 `body` 入口编一个字符串，再读回请求的头与体长度。
-/// - 判断：`Body_Size` 等于编出来的字节数；`Body_Type` 是 `Mime_Body_Type_MsgPack`；
-///   `try_body_len` 给出的也是同一个数。
-#[test]
-fn builder_writes_body_headers_() {
-    let req = RequestBuilder::new()
-        .method(AccessMethod::Call)
-        .path("/rpc/echo")
-        .body("ping")
-        .build()
-        .expect("builder 应当构造成功");
-
-    assert_eq!(
-        super::io_::try_get_body_size_(req.headers()).expect("头应当可解"),
-        5usize,
-        "MessagePack 的 \"ping\" 是 fixstr 头 1 字节加正文 4 字节"
-    );
-    let body_type = req
-        .headers()
-        .expect("应当有头")
-        .try_get_header(&StdHeaderKey::Body_Type.into())
-        .expect("Body_Type 应当写好");
-    assert_eq!(
-        body_type.try_as_header_val().expect("应当是数字形态"),
-        StdHeaderVal::Mime_Body_Type_MsgPack,
-        "body 入口写的应当是 MessagePack"
-    );
-    assert_eq!(
-        req.try_body_len().expect("体可编码"),
-        Some(5usize),
-        "体长度应当与头里的一致"
-    );
-}
-
-/// 测试 `RequestBuilder` 在缺少 method / path 时明确失败。
-/// - 手段：分别构造「只有 path」「只有 method」两个 builder 并 `build`。
-/// - 判断：前者报 `MissingMethod`、后者报 `MissingPath`——两者都不该产出一条「猜一个
-///   默认值」的请求。
-#[test]
-fn builder_requires_method_and_path_() {
-    let no_method = RequestBuilder::new().path("/hello").build();
-    assert!(
-        matches!(no_method, Result::Err(RequestBuildError::MissingMethod)),
-        "缺少 method 时应当报 MissingMethod"
-    );
-
-    let no_path = RequestBuilder::new().method(AccessMethod::View).build();
-    assert!(
-        matches!(no_path, Result::Err(RequestBuildError::MissingPath)),
-        "缺少 path 时应当报 MissingPath"
-    );
-}
-
-/// 测试 `RequestBuilder` 不容忍「手工设了 Body_Size 又与体不符」。
-/// - 手段：先用 `body_bytes` 给 3 字节，再用 `headers` 把 `Body_Size` 覆盖成 9。
-/// - 判断：`build` 报 `BodySizeMismatch`，而不是静默把头改成 3——静默改写会把「调用方
-///   以为自己在传 9 字节」这类装配错误藏起来。
-#[test]
-fn builder_rejects_inconsistent_body_size_() {
-    let built = RequestBuilder::new()
-        .method(AccessMethod::Post)
-        .path("/upload")
-        .body_bytes(b"abc".to_vec())
-        .headers(HeadersBuilder::new().set_body_size(9usize).build())
-        .build();
-    match built {
-        Result::Err(RequestBuildError::BodySizeMismatch { declared, actual }) => {
-            assert_eq!(declared, 9usize, "头里写的是 9");
-            assert_eq!(actual, 3usize, "体是 3 字节");
-        }
-        other => panic!("应当是 BodySizeMismatch，实际是 {other:?}"),
-    }
-}
-
-/// 测试 `HeadersBuilder` 的 `Body_Size` 按大小自动选形态，`Data_Type_Id` 走文本形态。
-/// - 手段：分别用小长度（能进 `u16`）与大长度（超出 `u16`）设 `Body_Size`，并用
-///   `set_data_type` 写一个 `u64` 标识；随后逐个取回头的值。
-/// - 判断：小长度是数字形态且值相等；大长度是文本形态且能解析回原值；`Data_Type_Id`
-///   是文本形态，内容等于该标识的十进制写法。
-#[test]
-fn headers_builder_chooses_value_forms_() {
-    let small = HeadersBuilder::new().set_body_size(1024usize).build();
-    let small_val = small
-        .try_get_header(&StdHeaderKey::Body_Size.into())
-        .expect("Body_Size 应当写好");
-    assert_eq!(
-        small_val
-            .try_as_header_val()
-            .expect("小长度应当是数字形态")
-            .into_inner(),
-        1024u16,
-        "数字形态的值应当就是 1024"
-    );
-
-    let big_size = usize::from(u16::MAX) + 10usize;
-    let big = HeadersBuilder::new().set_body_size(big_size).build();
-    let big_val = big
-        .try_get_header(&StdHeaderKey::Body_Size.into())
-        .expect("Body_Size 应当写好");
-    assert_eq!(
-        big_val.try_as_str().expect("超大长度应当是文本形态"),
-        big_size.to_string(),
-        "文本形态应当能解析回原值"
-    );
-
-    let type_id: u64 = 0x1234_5678_9abc_def0u64;
-    let typed = HeadersBuilder::new().set_data_type(type_id).build();
-    let id_val = typed
-        .try_get_header(&StdHeaderKey::Data_Type_Id.into())
-        .expect("Data_Type_Id 应当写好");
-    assert_eq!(
-        id_val.try_as_str().expect("标识应当是文本形态"),
-        type_id.to_string(),
-        "标识应当按十进制写进头里"
-    );
-}
-
-/// 测试 `EncodedBody` 交出的就是那串字节本身，不做二次编码。
-/// - 手段：用 3 个字节构造一个 `EncodedBody`，取长度并编进一个 `Vec`。
-/// - 判断：长度是 3、编出来的字节与输入逐字节相同——它是「已经编好」的载体，不该再被
-///   MessagePack 包一层。
-#[test]
-fn encoded_body_passes_bytes_through_() {
-    let body = EncodedBody::new(vec![1u8, 2, 3]);
-    assert_eq!(
-        TrRpcBody::try_encoded_len(&body).expect("不该失败"),
-        Some(3usize)
-    );
-    let mut sink = Vec::new();
-    TrRpcBody::try_encode_into(&body, &mut sink).expect("编码不该失败");
-    assert_eq!(sink, vec![1u8, 2, 3], "应当原样写出字节");
-    // 顺带确认 `Write` 的引入没有问题（`try_encode_into` 用的就是它）。
-    let _ = sink.write(&[]);
-}
-
-//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
-
-backend_async_test! {
-    /// 测试写出请求的路径**不为报文攒缓冲**。
-    /// - 手段：在全局分配器的**本线程**字节计数下，把一条带 32 KiB 体的请求写进内存
-    ///   缓冲（体本身与缓冲都在计数开始前就绪）。
-    /// - 判断：本次写出的分配总量必须落在 8 KiB 的预算内。预算不是「零」：底层适配器
-    ///   在个别后端下每次同步等待会有固定的小额分配（实测 tokio 约 2 KiB），那份开销与
-    ///   报文大小无关。而「把整条报文攒进一块缓冲」这类违规的分配量必然与报文同阶
-    ///   （≥ 32 KiB），两者差一个数量级，一测就露——这正是 README §7 第 1 条纪律要守住
-    ///   的东西。
-    fn writing_request_does_not_buffer_message_() {
-        /// 分配预算：容纳底层适配器的固定开销，远小于报文大小。
-        const K_ALLOC_BUDGET: usize = 8usize * 1024usize;
-
-        let payload = "x".repeat(32usize * 1024usize);
-        // 编码发生在计数开始**之前**：这正是新模型要求的——体在发送时已经是可借出的
-        // 字节，协议层不再为它临时分配任何缓存。
-        let encoded = rmp_serde::to_vec(&payload).expect("编码不该失败");
-        let req = Request::<EncodedBody, Nothing>::with_measured_body(
-            AccessMethod::Call,
-            "/rpc/echo",
-            EncodedBody::new(encoded),
-        )
-        .expect("量长度不该失败");
-        let mut storage = vec![0u8; K_BUFFER * 16usize];
-        let mut sink: &mut [u8] = storage.as_mut_slice();
-
-        alloc_probe_::reset_();
-        send_request_async(&req, &mut sink, NonCancellableToken::new())
-            .await
-            .expect("写应当成功");
-        let allocated = alloc_probe_::count_();
-        assert!(
-            allocated < K_ALLOC_BUDGET,
-            "写出 32 KiB 的请求不该为报文攒缓冲（实际分配 {allocated} 字节，预算 {K_ALLOC_BUDGET}）"
-        );
-    }
-}
-
-//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
-// 体的传输模式判定（纯逻辑，不碰 IO）
-//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
-
 /// 造一组「声明了分块传输」的报文头。
 fn chunked_headers_() -> crate::specs::Headers {
     HeadersBuilder::new()
         .set(StdHeaderKey::Body_Transfer, chunked_transfer_header_val())
         .build()
 }
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 体的传输模式判定（纯逻辑，不碰 IO）
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 测试模式判定只看「哪些头在场」，三种声明各归各位。
 /// - 手段：分别造「没有头」「只有 Body_Size」「只有分块声明」三组头，交给
@@ -705,6 +253,558 @@ fn head_reply_with_chunked_body_is_a_violation_() {
     }
 }
 
+/// 测试 `Head` 的回复带了**定长**体时按协议违规报出，而不是猜一个长度读下去。
+/// - 手段：构造一个声明了 `Body_Size` 的回复前缀，用 `AccessMethod::Head` 去决策。
+/// - 判断：返回 `Err(BodyNotAllowed)`，且其中的 `declared` 就是头里声明的长度。
+#[test]
+fn head_reply_with_body_is_a_violation_() {
+    let prefix = prefix_with_size_(Status::Ok, Option::Some(8usize));
+    let err =
+        ResponseBodyDecision::decide(AccessMethod::Head, &prefix).expect_err("Head 的回复不该带体");
+    match err {
+        ProtocolViolation::BodyNotAllowed { method, declared } => {
+            assert_eq!(method, AccessMethod::Head, "违规的应当是 Head");
+            assert_eq!(declared, Option::Some(8usize), "声明的长度应当原样带出来");
+        }
+        other => panic!("应当是 BodyNotAllowed，实际是 {other}"),
+    }
+}
+
+/// 测试「只有 `Body_Type`、没有任何边界声明」按协议违规报出。
+/// - 手段：造一个只设 `Body_Type` 的回复头，拼成前缀后用 `View` 去决策。
+/// - 判断：返回 `Err(MissingBodySize)`——没有长度也没有分块声明就无法确定边界，此时任何
+///   「读一点看看」的做法都会破坏后续字节的对齐。
+#[test]
+fn body_type_without_size_is_a_violation_() {
+    let headers = HeadersBuilder::new()
+        .set_body_type(&HeaderVal::from(StdHeaderVal::Mime_Body_Type_MsgPack))
+        .build();
+    let prefix = RespPrefix(Status::Ok, Option::Some(headers));
+    let err = ResponseBodyDecision::decide(AccessMethod::View, &prefix)
+        .expect_err("只有类型没有边界应当被判违规");
+    assert!(
+        matches!(err, ProtocolViolation::MissingBodySize),
+        "应当是 MissingBodySize，实际是 {err}"
+    );
+}
+
+/// 测试只声明 `Body_Size`、没有 `Body_Type` 的回复仍然被正常读取。
+/// - 手段：造一个只有 `Body_Size` 的回复前缀，用 `View` 去决策。
+/// - 判断：决策给出 `Present(2)` 而不是违规——「有长度、没类型」是合法的原始字节体。
+#[test]
+fn body_without_type_is_allowed_() {
+    let prefix = prefix_with_size_(Status::Ok, Option::Some(2usize));
+    let decision =
+        ResponseBodyDecision::decide(AccessMethod::View, &prefix).expect("有长度没类型是合法的");
+    assert_eq!(
+        decision,
+        ResponseBodyDecision::Present(2usize),
+        "应当读 2 字节"
+    );
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 体的载体：编码被推迟到发送时
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 测试 [`CodableBody`] 构造时**不做**编码，编码发生在写出去的那一刻。
+/// - 手段：用 `CodableBody::new` 打包一个字符串，先查它自述的长度，再把它写进一个 `Vec`。
+/// - 判断：构造后自述长度是 `None`（因为还没编过）；写出去之后得到的字节恰好是
+///   MessagePack 的 `"hi"`，且回报的写出量与之相等。
+#[test]
+fn codable_body_defers_encoding_() {
+    let body = CodableBody::new("hi".to_string(), Codec::MsgPack);
+    assert!(
+        body.try_known_len().expect("不该失败").is_none(),
+        "还没编码，长度自然不知道"
+    );
+
+    let mut sink = Vec::new();
+    let written = body.try_encode_into(&mut sink).expect("编码不该失败");
+    assert_eq!(written, sink.len(), "回报的写出量应当等于实际字节数");
+    assert_eq!(sink, b"\xa2hi", "MessagePack 的 \"hi\" 应当是这两个字节");
+    assert_eq!(
+        body.body_type_val(),
+        Option::Some(StdHeaderVal::Mime_Body_Type_MsgPack),
+        "体应当自报它用的格式"
+    );
+}
+
+/// 测试 `Vec<u8>` 直接就是体，长度是**已知**的并且会如实报出来。
+/// - 手段：直接拿一个 3 字节的 `Vec<u8>` 当体，读它的长度、写出去。
+/// - 判断：`try_known_len` 给出 `Some(3)`；写出的字节与输入逐字节相同（不做二次编码）。
+#[test]
+fn byte_vec_body_reports_known_len_() {
+    let body = vec![1u8, 2, 3];
+    assert_eq!(
+        body.try_known_len().expect("不该失败"),
+        Option::Some(3usize)
+    );
+    assert!(body.has_body(), "3 个字节算有体");
+    let mut sink = Vec::new();
+    assert_eq!(body.try_encode_into(&mut sink).expect("不该失败"), 3usize);
+    assert_eq!(sink, vec![1u8, 2, 3], "应当原样写出字节");
+
+    let empty = Vec::new();
+    assert!(!empty.has_body(), "0 字节等价于没有体");
+    let _ = sink.write(&[]);
+}
+
+/// 测试 [`Nothing`] 表示「没有体」，而不是「体恰好是 0 字节」。
+/// - 手段：读它的 `has_body` 与写出量。
+/// - 判断：`has_body` 为 `false`，写出量为 0，且自述长度是 `None`。
+#[test]
+fn nothing_has_no_body_() {
+    assert!(!Nothing.has_body(), "Nothing 就是没有体");
+    let mut sink = Vec::new();
+    assert_eq!(
+        Nothing.try_encode_into(&mut sink).expect("不该失败"),
+        0usize
+    );
+    assert!(sink.is_empty());
+    assert_eq!(Nothing.try_known_len().expect("不该失败"), Option::None);
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// RequestBuilder：只打包，不编码
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 测试 `body` 入口默认按 MessagePack 打包，并给出分块传输声明。
+/// - 手段：用 builder 的 `body` 装一个业务值，`build` 后检查头。
+/// - 判断：头里是分块声明（值体的默认，因为长度事先不知道）、`Body_Type` 是
+///   MessagePack；且体**没有被编码过**（自述长度仍是 `None`）。
+#[test]
+fn builder_defaults_to_chunked_msgpack_() {
+    let req = RequestBuilder::new()
+        .method(AccessMethod::Post)
+        .path("/topic/chat")
+        .body("hi".to_string())
+        .build()
+        .expect("builder 应当构造成功");
+
+    assert!(
+        is_chunked_body(req.headers()).expect("头不该违规"),
+        "值体默认分块：总长事先不知道"
+    );
+    let body_type = req
+        .headers()
+        .expect("应当有头")
+        .try_get_header(&StdHeaderKey::Body_Type.into())
+        .expect("Body_Type 应当写好");
+    assert_eq!(
+        body_type.try_as_header_val().expect("应当是数字形态"),
+        StdHeaderVal::Mime_Body_Type_MsgPack,
+        "不指定格式时默认 MessagePack"
+    );
+    assert!(
+        req.body()
+            .expect("应当有体")
+            .try_known_len()
+            .expect("不该失败")
+            .is_none(),
+        "builder 不编码，体自述长度应当是 None"
+    );
+}
+
+/// 测试 `body_with` 会按指定的编码格式写下 `Body_Type`。
+/// - 手段：用 `body_with(.., Codec::Json)` 装体并 `build`。
+/// - 判断：`Body_Type` 是 JSON 而不是默认的 MessagePack——格式由调用方明确指定时，
+///   默认值不再参与。
+#[test]
+fn builder_body_with_sets_body_type_() {
+    let req = RequestBuilder::new()
+        .method(AccessMethod::Post)
+        .path("/topic/chat")
+        .body_with("hi".to_string(), Codec::Json)
+        .build()
+        .expect("builder 应当构造成功");
+
+    let body_type = req
+        .headers()
+        .expect("应当有头")
+        .try_get_header(&StdHeaderKey::Body_Type.into())
+        .expect("Body_Type 应当写好");
+    assert_eq!(
+        body_type.try_as_header_val().expect("应当是数字形态"),
+        StdHeaderVal::Mime_Body_Type_Json,
+        "指定了 JSON 就该写 JSON"
+    );
+}
+
+/// 测试 `body_size` 把传输模式切成定长，并靠体自述的长度做装配期核对。
+/// - 手段：`body_bytes` 给 3 个字节、`body_size(3)` 声明定长，再构造一次声明成 5。
+/// - 判断：前者 `build` 成功且头里是 `Body_Size = 3`；后者报 `BodySizeMismatch`——
+///   声明长度与体自述长度不一致时，宁可在装配期失败，也不要写出一条让接收方错位的报文。
+#[test]
+fn builder_body_size_declares_sized_transfer_() {
+    let req = RequestBuilder::new()
+        .method(AccessMethod::Post)
+        .path("/upload")
+        .body_bytes(b"abc".to_vec())
+        .body_size(3usize)
+        .build()
+        .expect("长度一致时应当构造成功");
+    assert_eq!(
+        body_transfer_of(req.headers()).expect("头不该违规"),
+        BodyTransfer::Sized(3usize),
+        "声明了长度就是定长"
+    );
+
+    let mismatched = RequestBuilder::new()
+        .method(AccessMethod::Post)
+        .path("/upload")
+        .body_bytes(b"abc".to_vec())
+        .body_size(5usize)
+        .build();
+    match mismatched {
+        Result::Err(RequestBuildError::BodySizeMismatch { declared, actual }) => {
+            assert_eq!(declared, 5usize, "头里声明的是 5");
+            assert_eq!(actual, 3usize, "体自述是 3");
+        }
+        other => panic!("应当是 BodySizeMismatch，实际是 {other:?}"),
+    }
+}
+
+/// 测试 builder 不容忍「自己声明定长、头里却写了分块」这种自相矛盾。
+/// - 手段：`body_size(3)` 的同时，用 `headers` 写下一组分块声明。
+/// - 判断：`build` 报 `ConflictingTransfer`——两种边界声明互斥，编译器帮不上忙的地方
+///   就得在装配期拦住。
+#[test]
+fn builder_rejects_conflicting_body_declarations_() {
+    let built = RequestBuilder::new()
+        .method(AccessMethod::Post)
+        .path("/upload")
+        .body_bytes(b"abc".to_vec())
+        .body_size(3usize)
+        .headers(chunked_headers_())
+        .build();
+    assert!(
+        matches!(
+            built,
+            Result::Err(RequestBuildError::ConflictingTransfer(_))
+        ),
+        "两种体声明同时出现应当报冲突，实际是 {built:?}"
+    );
+}
+
+/// 测试 `RequestBuilder` 在缺少 method / path 时明确失败。
+/// - 手段：分别构造「只有 path」「只有 method」两个 builder 并 `build`。
+/// - 判断：前者报 `MissingMethod`、后者报 `MissingPath`——两者都不该产出一条「猜一个
+///   默认值」的请求。
+#[test]
+fn builder_requires_method_and_path_() {
+    let no_method = RequestBuilder::new().path("/hello").build();
+    assert!(
+        matches!(no_method, Result::Err(RequestBuildError::MissingMethod)),
+        "缺少 method 时应当报 MissingMethod"
+    );
+
+    let no_path = RequestBuilder::new().method(AccessMethod::View).build();
+    assert!(
+        matches!(no_path, Result::Err(RequestBuildError::MissingPath)),
+        "缺少 path 时应当报 MissingPath"
+    );
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 报文往返
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+backend_async_test! {
+    /// 测试无 body 的请求能原样往返，且读完前缀后紧跟的字节一个都没被吃掉。
+    /// - 手段：构造一条 `View /hello`（体是 [`Nothing`]）的请求，写进内存缓冲，再手工追加
+    ///   一个哨兵字节 `0xAB`；随后从这段字节里解出请求前缀。
+    /// - 判断：解出的 method / location 与构造时一致；`Body_Size` 头不存在；且**读源切片
+    ///   推进到只剩哨兵那一字节**——这正是「没有 body 就不多读一个字节」的直接证据
+    ///   （这里没有预读缓冲，多读的字节无处可藏）。
+    fn request_prefix_without_body_roundtrips_() {
+        let req: Request<Nothing, Nothing> = Request::new(AccessMethod::View, "/hello");
+        let mut wire = write_to_vec!(|tx| send_request_async(
+            &req,
+            tx,
+            NonCancellableToken::new()
+        ));
+        // 前缀之后追加哨兵：它代表「同一条 channel 上的后续数据」。
+        wire.push(0xABu8);
+
+        let mut src: &[u8] = wire.as_slice();
+        let prefix = recv_request_prefix_async(&mut src, NonCancellableToken::new())
+            .await
+            .expect("前缀应当解得出来");
+
+        assert_eq!(prefix.0, AccessMethod::View, "method 应当原样往返");
+        assert_eq!(prefix.1, "/hello", "location 应当原样往返");
+        assert_eq!(
+            super::io_::try_get_body_size_(prefix.2.as_ref()).expect("头应当可解"),
+            0usize,
+            "不该有体"
+        );
+        assert_eq!(src, &[0xABu8], "哨兵字节不应当被前缀读取吃掉");
+    }
+}
+
+backend_async_test! {
+    /// 测试**分块**请求体（builder 的默认形态）能原样往返。
+    /// - 手段：用 builder 的 `body` 装一个字符串（默认分块 + MessagePack），写出去后先解
+    ///   前缀，再按头声明的模式解出体。
+    /// - 判断：前缀字段一致；读回的字符串等于原来那个；读源恰好耗尽——分块的终止块就是
+    ///   体的边界。
+    fn request_with_chunked_body_roundtrips_() {
+        let req = RequestBuilder::new()
+            .method(AccessMethod::Call)
+            .path("/rpc/echo")
+            .body("hello".to_string())
+            .build()
+            .expect("builder 应当构造成功");
+        let wire = write_to_vec!(|tx| send_request_async(
+            &req,
+            tx,
+            NonCancellableToken::new()
+        ));
+
+        let mut src: &[u8] = wire.as_slice();
+        let prefix = recv_request_prefix_async(&mut src, NonCancellableToken::new())
+            .await
+            .expect("前缀应当解得出来");
+        assert_eq!(prefix.0, AccessMethod::Call, "method 应当原样往返");
+        assert_eq!(prefix.1, "/rpc/echo", "location 应当原样往返");
+
+        let body: Option<String> =
+            super::recv_request_body_async(&mut src, prefix.2.as_ref(), NonCancellableToken::new())
+                .await
+                .expect("体应当解得出来");
+        assert_eq!(body, Option::Some("hello".to_string()), "体应当与写出去的一致");
+        assert!(src.is_empty(), "读完终止块之后不应当还有剩余字节");
+    }
+}
+
+backend_async_test! {
+    /// 测试**定长**请求体（显式声明长度）能原样往返。
+    /// - 手段：把编好的字节交给 `body_bytes`，用 `body_size` 声明它的长度，写出去再解回来。
+    /// - 判断：头里是 `Body_Size`；读回的字符串等于原来那个；读源恰好耗尽。
+    fn request_with_sized_body_roundtrips_() {
+        let encoded = rmp_serde::to_vec("hello").expect("编码不该失败");
+        let len = encoded.len();
+        let req = RequestBuilder::new()
+            .method(AccessMethod::Call)
+            .path("/rpc/echo")
+            .body_bytes(encoded)
+            .body_size(len)
+            .build()
+            .expect("builder 应当构造成功");
+        assert_eq!(
+            body_transfer_of(req.headers()).expect("头不该违规"),
+            BodyTransfer::Sized(len),
+            "声明了长度就是定长"
+        );
+
+        let wire = write_to_vec!(|tx| send_request_async(
+            &req,
+            tx,
+            NonCancellableToken::new()
+        ));
+        let mut src: &[u8] = wire.as_slice();
+        let prefix = recv_request_prefix_async(&mut src, NonCancellableToken::new())
+            .await
+            .expect("前缀应当解得出来");
+        let body: Option<String> =
+            super::recv_request_body_async(&mut src, prefix.2.as_ref(), NonCancellableToken::new())
+                .await
+                .expect("体应当解得出来");
+        assert_eq!(body, Option::Some("hello".to_string()), "体应当与写出去的一致");
+        assert!(src.is_empty(), "读完声明长度之后不应当还有剩余字节");
+    }
+}
+
+backend_async_test! {
+    /// 测试带体的回复能原样往返，客户端侧按前缀读体。
+    /// - 手段：用 `Response::with_sized_body` 造一条 `Status::Ok` + 体的回复（体是已经编好
+    ///   的字节，长度已知），写出去后从字节里先解前缀，交给 [`ResponseBodyDecision`] 判
+    ///   边界，再按判决读体。
+    /// - 判断：状态码一致；决策给出 `Present(5)`；读出的字符串与写出去的一致。
+    fn response_with_body_roundtrips_() {
+        let resp = Response::<Vec<u8>, Nothing>::with_sized_body(
+            Status::Ok,
+            rmp_serde::to_vec("resp").expect("编码不该失败"),
+        )
+        .expect("长度已知，应当构造成功");
+        let wire = write_to_vec!(|tx| send_response_async(
+            &resp,
+            tx,
+            NonCancellableToken::new()
+        ));
+
+        let mut src: &[u8] = wire.as_slice();
+        let prefix = recv_response_prefix_async(&mut src, NonCancellableToken::new())
+            .await
+            .expect("回复前缀应当解得出来");
+        assert_eq!(prefix.status(), Status::Ok, "状态码应当原样往返");
+
+        let decision = ResponseBodyDecision::decide(AccessMethod::Call, &prefix)
+            .expect("Call 的回复带体是合法的");
+        assert_eq!(
+            decision,
+            ResponseBodyDecision::Present(5usize),
+            "MessagePack 的 \"resp\" 是 fixstr 头 1 字节加正文 4 字节"
+        );
+        let body: Option<String> =
+            recv_response_body_async(&mut src, &prefix, NonCancellableToken::new())
+                .await
+                .expect("体应当解得出来");
+        assert_eq!(body, Option::Some("resp".to_string()), "体应当与写出去的一致");
+    }
+}
+
+backend_async_test! {
+    /// 测试「没有回复体」时一个字节都不读，后续数据保持完整。
+    /// - 手段：造一条只有 `Status::Ok`、没有任何 body 头的回复，写出去后手工追加哨兵；
+    ///   先解前缀，再让决策判一次，然后按其结论（0 字节）走读体路径。
+    /// - 判断：决策必须是 `Absent`；读体返回 `None`；且**读源推进到只剩哨兵**。
+    fn absent_response_body_consumes_nothing_() {
+        let resp = Response::<Nothing, Nothing>::new(Status::Ok);
+        let mut wire = write_to_vec!(|tx| send_response_async(
+            &resp,
+            tx,
+            NonCancellableToken::new()
+        ));
+        wire.push(0xCDu8);
+
+        let mut src: &[u8] = wire.as_slice();
+        let prefix = recv_response_prefix_async(&mut src, NonCancellableToken::new())
+            .await
+            .expect("回复前缀应当解得出来");
+
+        let decision = ResponseBodyDecision::decide(AccessMethod::View, &prefix)
+            .expect("两个头都没有，是「没有体」而不是违规");
+        assert_eq!(decision, ResponseBodyDecision::Absent, "应当判定为没有体");
+
+        let body: Option<String> =
+            recv_response_body_async(&mut src, &prefix, NonCancellableToken::new())
+                .await
+                .expect("读 0 字节不应当失败");
+        assert!(body.is_none(), "没有体时应当读出 None");
+        assert_eq!(src, &[0xCDu8], "哨兵字节不应当被读体路径吃掉");
+    }
+}
+
+backend_async_test! {
+    /// 测试体读到一半对端关闭时按「提前结束」报出。
+    /// - 手段：造一条体为 9 字节的回复，写出后把线上字节削掉 5 个（前缀仍声明 9 字节），
+    ///   再按头声明的长度去读体。
+    /// - 判断：返回 `Err(Truncated)`——协议头已经承诺了长度，流却在长度满足前结束，属于
+    ///   必须报出来的错误，不能当成功。
+    fn truncated_body_is_reported_() {
+        let resp = Response::<Vec<u8>, Nothing>::with_sized_body(
+            Status::Ok,
+            rmp_serde::to_vec("abcdefgh").expect("编码不该失败"),
+        )
+        .expect("长度已知，应当构造成功");
+        let mut wire = write_to_vec!(|tx| send_response_async(
+            &resp,
+            tx,
+            NonCancellableToken::new()
+        ));
+        // 削掉 5 个字节：头仍然声明 9 字节的体，而流里只剩 4 个。
+        let cut = wire.len() - 5usize;
+        wire.truncate(cut);
+
+        let mut src: &[u8] = wire.as_slice();
+        let prefix = recv_response_prefix_async(&mut src, NonCancellableToken::new())
+            .await
+            .expect("前缀仍然解得出来");
+        let err: MessageIoError =
+            recv_response_body_async::<String, _, _>(&mut src, &prefix, NonCancellableToken::new())
+                .await
+                .expect_err("体不足时应当报错");
+        assert!(
+            matches!(err, MessageIoError::Truncated(_)),
+            "应当是 Truncated，实际是 {err}"
+        );
+    }
+}
+
+backend_async_test! {
+    /// 测试「`Body_Size` 声明得比体实际字节多」时被装配期核对拦住。
+    /// - 手段：手工把 `Body_Size` 设成 5 而体只有 3 字节，再调用 `send_request_async`。
+    /// - 判断：返回 `Err(BodySizeMismatch)`——定长搬运要求体恰好给得出声明的那么多字节，
+    ///   少一个都意味着接收方会按错误的长度切分后续字节。
+    fn send_reports_mismatch_when_body_shorter_than_declared_() {
+        let req = Request::<Vec<u8>, Nothing>::new(AccessMethod::Post, "/upload")
+            .with_headers(HeadersBuilder::new().set_body_size(5usize).build())
+            .with_body(b"abc".to_vec());
+        let mut storage = vec![0u8; K_BUFFER];
+        let mut sink: &mut [u8] = storage.as_mut_slice();
+        let err = send_request_async(&req, &mut sink, NonCancellableToken::new())
+            .await
+            .expect_err("体不足声明长度时应当报错");
+        assert!(
+            matches!(
+                err,
+                MessageIoError::BodySizeMismatch {
+                    declared: 5usize,
+                    actual: 3usize
+                }
+            ),
+            "应当是 BodySizeMismatch(5, 3)，实际是 {err}"
+        );
+    }
+}
+
+backend_async_test! {
+    /// 测试体自述长度比声明长时，在写出之前就被装配期核对拦住。
+    /// - 手段：声明 `Body_Size` 为 5，体给 8 个字节（`Vec<u8>` 自述长度 8），发送。
+    /// - 判断：返回 `Err(BodySizeMismatch)`——体自己知道有多长，就不该等写出去才发现对不上；
+    ///   越早失败，越少有机会在网上留下一条半截的报文。
+    fn sized_send_rejects_body_longer_than_declared_() {
+        let req = Request::<Vec<u8>, Nothing>::new(AccessMethod::Post, "/upload")
+            .with_headers(HeadersBuilder::new().set_body_size(5usize).build())
+            .with_body(b"abcdefgh".to_vec());
+        let mut storage = vec![0u8; K_BUFFER];
+        let mut sink: &mut [u8] = storage.as_mut_slice();
+        let err = send_request_async(&req, &mut sink, NonCancellableToken::new())
+            .await
+            .expect_err("体比声明长时应当报错");
+        assert!(
+            matches!(
+                err,
+                MessageIoError::BodySizeMismatch {
+                    declared: 5usize,
+                    actual: 8usize
+                }
+            ),
+            "应当是 BodySizeMismatch(5, 8)，实际是 {err}"
+        );
+    }
+}
+
+backend_async_test! {
+    /// 测试体自述长度**未知**时，限长写口是最后一道防线。
+    /// - 手段：体是尚未编码的值（`CodableBody`，编出来 6 字节，但它自己说不上来），头里
+    ///   却声明了 `Body_Size = 3`，发送。
+    /// - 判断：返回错误——装配期核对对它无能为力（它不知道有多长），于是限长写口在写第 4
+    ///   个字节时把额度用完，编码器当场失败，多出来的字节一个都没落到流上。
+    fn sized_send_caps_unknown_len_body_at_declared_() {
+        let headers = HeadersBuilder::new().set_body_size(3usize).build();
+        // "hello" 编成 MessagePack 是 6 个字节，而体自己说不上来长度。
+        let body = CodableBody::new("hello".to_string(), Codec::MsgPack);
+        let mut storage = vec![0u8; K_BUFFER];
+        let mut dst: &mut [u8] = storage.as_mut_slice();
+        let err = super::body::send_body_async(
+            &body,
+            &mut dst,
+            Option::Some(&headers),
+            NonCancellableToken::new(),
+        )
+        .await
+        .expect_err("写出量超出声明长度时应当报错");
+        let used = K_BUFFER - dst.len();
+        assert!(
+            used <= 3usize,
+            "额度之外的字节一个都不该落出去（实际写出 {used} 字节）；错误是 {err}"
+        );
+    }
+}
+
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // 限长读写
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -781,30 +881,67 @@ backend_async_test! {
 }
 
 backend_async_test! {
+    /// 测试 [`ChunkedSink`] 把**每一次 `write` 封成一个块**，块长就是这一次写出的字节数。
+    /// - 手段：往同一个 sink 上分别写 2 字节与 3 字节，再收尾。
+    /// - 判断：线上是 `00 02 .. 00 03 .. 00 00`——两次写成为两块，而不是攒成一块；这正是
+    ///   「序列化器边编边写、块长由它决定」所依赖的语义。
+    fn chunked_sink_seals_one_chunk_per_write_() {
+        let mut storage = [0u8; 32usize];
+        let rest = {
+            let mut sink: &mut [u8] = storage.as_mut_slice();
+            let mut chunked = ChunkedSink::new(&mut sink, NonCancellableToken::new());
+            assert_eq!(chunked.write(b"ab").expect("写不该失败"), 2usize);
+            assert_eq!(chunked.write(b"cde").expect("写不该失败"), 3usize);
+            chunked.finish().expect("收尾不该失败");
+            sink.len()
+        };
+        let written = storage.len() - rest;
+        assert_eq!(
+            &storage[..written],
+            b"\x00\x02ab\x00\x03cde\x00\x00",
+            "每一次 write 应当各自成为一个块"
+        );
+    }
+}
+
+backend_async_test! {
     /// 测试分块体可以跨多个块完整往返（内容比单块上限还大）。
     /// - 手段：造 70000 字节的体（超过 65535 的单块上限，必然被切成多块），声明分块后
-    ///   用 [`send_body_async`] 写进内存缓冲，再用 [`body_reader`] 把它读回来。
+    ///   写进内存缓冲，再用体读视图把它读回来。
     /// - 判断：读回的字节与原体逐字节相同；且线上长度 = 体长度 + 每块 2 字节前缀 +
     ///   终止块 2 字节——前缀记的是**各块实际的字节数**，不是固定值。
     fn chunked_body_roundtrips_across_chunks_() {
         const LEN: usize = 70_000usize;
         let payload: Vec<u8> = (0..LEN).map(|i| (i % 251usize) as u8).collect();
         let headers = chunked_headers_();
+        let body = payload.clone();
 
         let mut wire = vec![0u8; LEN + 64usize];
         // 借用期间不能同时读 `wire`，因此先把剩余长度带出来。
         let rest = {
-            let mut src: &[u8] = payload.as_slice();
             let mut dst: &mut [u8] = wire.as_mut_slice();
-            let written = send_body_async(&mut src, &mut dst, Option::Some(&headers), NonCancellableToken::new())
-                .await
-                .expect("分块发送不该失败");
-            assert_eq!(written, LEN, "返回的是体字节数");
+            let written = super::body::send_body_async(
+                &body,
+                &mut dst,
+                Option::Some(&headers),
+                NonCancellableToken::new(),
+            )
+            .await
+            .expect("分块发送不该失败");
+            assert_eq!(
+                written,
+                LEN + 3usize * 2usize,
+                "返回值应当是线上字节数（含块前缀与终止块）"
+            );
             dst.len()
         };
         let body_len = wire.len() - rest;
         // 70000 = 65535 + 4465，两块；线上 = 70000 + 2*2(前缀) + 2(终止块)。
-        assert_eq!(body_len, LEN + 3usize * 2usize, "线上长度应当含块前缀与终止块");
+        assert_eq!(
+            body_len,
+            LEN + 3usize * 2usize,
+            "线上长度应当含块前缀与终止块"
+        );
 
         let mut rx: &[u8] = &wire[..body_len];
         let mut reader = body_reader(&mut rx, Option::Some(&headers)).expect("头声明合法");
@@ -825,14 +962,19 @@ backend_async_test! {
     ///   属于 suffix stream（Push / Pull 的数据从那里开始）。
     fn chunked_body_leaves_suffix_untouched_() {
         let headers = chunked_headers_();
+        let body = b"hello".to_vec();
         let mut wire = vec![0u8; 64usize];
         // 借用期间不能同时读 `wire`，因此先把剩余长度带出来。
         let rest = {
-            let mut src: &[u8] = b"hello";
             let mut dst: &mut [u8] = wire.as_mut_slice();
-            send_body_async(&mut src, &mut dst, Option::Some(&headers), NonCancellableToken::new())
-                .await
-                .expect("分块发送不该失败");
+            super::body::send_body_async(
+                &body,
+                &mut dst,
+                Option::Some(&headers),
+                NonCancellableToken::new(),
+            )
+            .await
+            .expect("分块发送不该失败");
             dst.len()
         };
         let used = wire.len() - rest;
@@ -909,31 +1051,118 @@ backend_async_test! {
     }
 }
 
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 分配纪律
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
 backend_async_test! {
-    /// 测试定长发送只搬声明的字节数，源里多出来的一个都不碰。
-    /// - 手段：声明 `Body_Size` 为 5，源给 8 个字节，用 [`send_body_async`] 写进内存缓冲。
-    /// - 判断：线上只落了 5 个字节；源恰好推进到剩下的 `b"fgh"`——多出来的字节留在源上，
-    ///   既不会被这条报文发出去，也不会被丢掉。
-    fn sized_send_moves_only_declared_bytes_() {
+    /// 测试**编码与写出这条路径不为报文攒缓冲**。
+    /// - 手段：在全局分配器的**本线程**字节计数下，把一条带 32 KiB 值体的请求写进内存
+    ///   缓冲。业务值与缓冲都在计数开始前就绪；builder 的 `body` 只做打包、不做编码，
+    ///   因此这次测量覆盖的正是「编码 + 写出」的全过程。
+    /// - 判断：本次分配总量必须落在 8 KiB 的预算内。预算不是「零」：底层适配器在个别
+    ///   后端下每次同步等待会有固定的小额分配（实测 tokio 约 2 KiB），那份开销与报文大小
+    ///   无关。而「先把整个体编进一块 `Vec`」这类违规的分配量必然与报文同阶（≥ 32 KiB），
+    ///   两者差一个数量级，一测就露——这正是 README §7 第 1 条纪律要守住的东西，也是
+    ///   「边序列化边发送」能不能成立的硬指标。
+    fn encoding_and_writing_does_not_buffer_message_() {
+        /// 分配预算：容纳底层适配器的固定开销，远小于报文大小。
+        const K_ALLOC_BUDGET: usize = 8usize * 1024usize;
+
+        let payload = "x".repeat(32usize * 1024usize);
+        let req = RequestBuilder::new()
+            .method(AccessMethod::Call)
+            .path("/rpc/echo")
+            .body(payload)
+            .build()
+            .expect("builder 应当构造成功");
+        let mut storage = vec![0u8; K_BUFFER * 16usize];
+        let mut sink: &mut [u8] = storage.as_mut_slice();
+
+        alloc_probe_::reset_();
+        send_request_async(&req, &mut sink, NonCancellableToken::new())
+            .await
+            .expect("写应当成功");
+        let allocated = alloc_probe_::count_();
+        assert!(
+            allocated < K_ALLOC_BUDGET,
+            "编码并写出 32 KiB 的体不该为它攒缓冲（实际分配 {allocated} 字节，预算 {K_ALLOC_BUDGET}）"
+        );
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 字节流源：底层搬运入口与它的便利包装
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+backend_async_test! {
+    /// 测试 `&[u8]` 直接当源就能按定长搬出去（便利方法落到 `TrBuffRead` 搬运上）。
+    /// - 手段：声明 `Body_Size` 为 5，用 `b"abcdefgh"` 作内容，走
+    ///   [`send_content_async`]——它内部只是把 `&[u8]` 当成 [`TrBuffRead`] 交给底层搬运。
+    /// - 判断：只搬出声明的 5 个字节，源里多出来的部分一个都不碰。「已经有字节、直接发」
+    ///   这条最常见的路径因此不需要任何中间类型。
+    fn content_send_sized_stops_at_declared_() {
         let headers = HeadersBuilder::new().set_body_size(5usize).build();
-        let mut payload: &[u8] = b"abcdefgh";
-        let mut wire = vec![0u8; 32usize];
+        let mut storage = vec![0u8; K_BUFFER];
         let rest = {
-            let mut dst: &mut [u8] = wire.as_mut_slice();
-            let moved = send_body_async(
-                &mut payload,
+            let mut dst: &mut [u8] = storage.as_mut_slice();
+            let moved = send_content_async(
+                b"abcdefgh",
                 &mut dst,
                 Option::Some(&headers),
                 NonCancellableToken::new(),
             )
             .await
-            .expect("定长发送不该失败");
-            assert_eq!(moved, 5usize, "返回的应当是声明长度");
+            .expect("定长搬运不该失败");
+            assert_eq!(moved, 5usize, "只应当搬出声明的 5 个字节");
             dst.len()
         };
-        let used = wire.len() - rest;
-        assert_eq!(used, 5usize, "线上只应当落下声明的 5 个字节");
-        assert_eq!(&wire[..used], b"abcde", "内容应当是源的前 5 个字节");
-        assert_eq!(payload, b"fgh", "源里多出来的字节应当留在源上");
+        let used = storage.len() - rest;
+        assert_eq!(&storage[..used], b"abcde", "线上应当只有声明的那 5 个字节");
+    }
+}
+
+backend_async_test! {
+    /// 测试字节流源按分块搬出去时可以跨多个块，块长就是源让出的那一段。
+    /// - 手段：70 KiB 的 `&[u8]` 内容 + 分块声明，走 [`send_body_from_reader_async`]（底层
+    ///   入口），再用体读视图读回来。
+    /// - 判断：线上长度 = 体长度 + 每块 2 字节前缀 + 终止块；读回内容逐字节相同；读源恰好
+    ///   耗尽——段到段的搬运确实消费了源。
+    fn reader_send_chunked_roundtrips_across_chunks_() {
+        const LEN: usize = 70_000usize;
+        let payload: Vec<u8> = (0..LEN).map(|i| (i % 251usize) as u8).collect();
+        let headers = chunked_headers_();
+
+        let mut wire = vec![0u8; LEN + 64usize];
+        let rest = {
+            let mut src: &[u8] = payload.as_slice();
+            let mut dst: &mut [u8] = wire.as_mut_slice();
+            let moved = send_body_from_reader_async(
+                &mut src,
+                &mut dst,
+                Option::Some(&headers),
+                NonCancellableToken::new(),
+            )
+            .await
+            .expect("分块搬运不该失败");
+            assert_eq!(moved, LEN, "返回的是体字节数");
+            assert!(src.is_empty(), "搬完之后源应当恰好耗尽");
+            dst.len()
+        };
+        let body_len = wire.len() - rest;
+        assert_eq!(
+            body_len,
+            LEN + 3usize * 2usize,
+            "线上长度应当含块前缀与终止块"
+        );
+
+        let mut rx: &[u8] = &wire[..body_len];
+        let mut reader = body_reader(&mut rx, Option::Some(&headers)).expect("头声明合法");
+        let mut out = Vec::new();
+        {
+            let mut read = AsStdRead::new(&mut reader, NonCancellableToken::new());
+            std::io::Read::read_to_end(&mut read, &mut out).expect("读回不该失败");
+        }
+        assert_eq!(out, payload, "分块往返后内容应当逐字节相同");
     }
 }

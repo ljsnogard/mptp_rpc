@@ -1,3 +1,5 @@
+use std::io;
+
 use abs_buff::{TrBuffRead, TrBuffWrite, buffer::TrProducerState, x_deps::abs_cancel};
 use abs_buff_stdio_adapt::AsStdWrite;
 use abs_cancel::TrCancellationToken;
@@ -5,17 +7,23 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    basic::{EncodedBody, Nothing, Request, set_body_size_header_},
-    body::{body_transfer_of, send_body_async},
+    basic::{
+        BodyEncodeError, CodableBody, Nothing, Request, TrRpcBody,
+        set_body_size_header_,
+        set_body_type_from_body_,
+        set_chunked_transfer_header_,
+    },
+    body::send_body_async,
     io_::{
-        CountingWrite, MessageIoError, WaitingTx, decode_from_async_, read_body_async_,
-        try_get_body_size_,
+        CountingWrite, MessageIoError, WaitingTx,
+        decode_from_async_, read_body_async_, try_get_body_size_,
     },
 };
 use crate::{
     access_method::{AccessMethod, TrAccessMethod, method_of},
+    codec::Codec,
     messaging,
-    specs::{HeaderVal, Headers, StdHeaderKey, StdHeaderVal},
+    specs::{Headers, StdHeaderKey},
 };
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -37,86 +45,95 @@ pub enum RequestBuildError {
     #[error("请求体编码失败：{0}")]
     BodyEncode(String),
 
-    /// `Body_Size` 头声明的长度与实际体字节数不符。
+    /// 显式声明的定长长度与体自述的长度不符。
     ///
     /// 这是装配错误：两者不一致时接收方会按头声明的长度切分字节，从而破坏流对齐。
-    #[error("Body_Size 头声明 {declared} 字节，实际体有 {actual} 字节")]
+    #[error("Body_Size 头声明 {declared} 字节，体自述 {actual} 字节")]
     BodySizeMismatch { declared: usize, actual: usize },
+
+    /// 体声明自相矛盾（例如既声明定长、又声明分块）。
+    #[error("请求的体声明自相矛盾：{0}")]
+    ConflictingTransfer(String),
 }
 
 /// [`RequestBuilder`] 的内部状态。
 ///
-/// 放在 `Box` 里是为了让 [`RequestBuilder`] 自身保持瘦指针：builder 沿着调用链一路
-/// 按值传递（每个 setter 都返回 `Self`），把状态挂在堆上可以让这些传递只搬指针。
-struct ReqBuilderInner {
+/// 放在 `Box` 里是为了让 builder 自身保持瘦指针：它沿着调用链一路按值传递（每个 setter
+/// 都返回 `Self`），把状态挂在堆上可以让这些传递只搬指针。
+struct ReqBuilderInner<TyBody> {
     method_: Option<AccessMethod>,
 
     path_: Option<String>,
 
     headers_: Option<Headers>,
 
-    /// **已经编好**的报文体字节。
-    body_: Option<Vec<u8>>,
+    /// 报文体。**它还没有被编码过**——`body` 入口存下的只是「业务值 + 编码格式」的打包，
+    /// 真正编码发生在发送时（见 [`TrRpcBody`]）。
+    body_: Option<TyBody>,
 
-    /// 体编码失败的原因。setter 一律返回 `Self`，没有位置报错，于是失败被记在这里，
-    /// 等 [`RequestBuilder::build`] 一并交还调用方。
-    body_err_: Option<String>,
+    /// 调用方显式声明的定长长度；`None` 表示体按**分块**传输（值体的默认）。
+    declared_size_: Option<usize>,
 }
 
-impl ReqBuilderInner {
+impl<TyBody> ReqBuilderInner<TyBody> {
     const fn new() -> Self {
         ReqBuilderInner {
             method_: Option::None,
             path_: Option::None,
             headers_: Option::None,
             body_: Option::None,
-            body_err_: Option::None,
+            declared_size_: Option::None,
         }
     }
 }
 
 /// 一次请求的构造器：`method + path + headers + body`。
 ///
-/// # 体的两种给法
+/// # 体的给法
 ///
-/// - [`RequestBuilder::body`]：给一个业务类型，按 MessagePack 编成字节，并自动写上
-///   `Body_Size` 与 `Body_Type`（`Mime_Body_Type_MsgPack`）；
-/// - [`RequestBuilder::body_bytes`]：直接给已经编好的字节，只写 `Body_Size`。
+/// - [`RequestBuilder::body`]：给一个业务值，**默认按 MessagePack 编码**；它不会在这里
+///   被编码，只是与编码格式一起打包存下；
+/// - [`RequestBuilder::body_with`]：给业务值并明确指定编码格式——不指定才用默认值；
+/// - [`RequestBuilder::body_bytes`]：给已经编好的字节。
 ///
-/// # 构造器会在构造期把体编掉
+/// 三者的共同点是：**编码都发生在发送的那一刻**，而不是构造请求的这一刻。因此大 body
+/// 不会卡住构造这一行，序列化器也可以边编边写、不必先把结果攒齐。
 ///
-/// builder 自身不是泛型的，存不下任意业务类型，所以 [`RequestBuilder::body`] 在**构造
-/// 期**完成编码，产出的体是 [`EncodedBody`]。这对「攒一条请求再发出去」的用法没有额外
-/// 往返（编码总要做一次），但如果你希望编码发生在**写出时**、字节直接落进 ring，那就
-/// 绕过 builder，用 [`Request::with_measured_body`] 直接挂上业务类型——那条路径连这次
-/// 构造期编码也不会有。
+/// # 传输模式
+///
+/// **值体默认分块**：总长事先不知道，也不该为了填 `Body_Size` 先编一遍。要用定长，显式
+/// 调 [`RequestBuilder::body_size`] 声明长度（此时体自述的长度必须与之一致）。
 ///
 /// # Examples
 ///
 /// ```
 /// use mptp_core::{
 ///     access_method::AccessMethod,
-///     messaging::{TrRpcRequest, request::RequestBuilder},
+///     messaging::{CodableBody, TrRpcBody, request::RequestBuilder},
 /// };
 ///
 /// let req = RequestBuilder::new()
 ///     .method(AccessMethod::Post)
 ///     .path("/topic/chat")
-///     .body("hi")
+///     .body("hi".to_string())
 ///     .build()
 ///     .expect("method 与 path 都给齐了，应当构造成功");
 ///
 /// assert_eq!(req.method(), AccessMethod::Post);
 /// assert_eq!(req.location(), "/topic/chat");
-/// // MessagePack 的 "hi" 是 3 个字节，`body` 入口顺手把 Body_Size 也写好了。
-/// assert_eq!(req.try_body_len().expect("体可编码"), Some(3usize));
+/// // 体没有被编码过，长度自然也不知道。
+/// assert!(req.body().expect("有体").try_known_len().expect("不该失败").is_none());
 /// ```
-pub struct RequestBuilder(Box<ReqBuilderInner>);
+pub struct RequestBuilder<TyBody = Nothing> {
+    inner_: Box<ReqBuilderInner<TyBody>>,
+}
 
-impl RequestBuilder {
+impl RequestBuilder<Nothing> {
     /// 创建一个空构造器。
     pub fn new() -> Self {
-        RequestBuilder(Box::new(ReqBuilderInner::new()))
+        RequestBuilder {
+            inner_: Box::new(ReqBuilderInner::new()),
+        }
     }
 
     /// 创建一个 access method 已经定好的构造器。
@@ -126,16 +143,18 @@ impl RequestBuilder {
     pub fn builder<M: TrAccessMethod>() -> Self {
         Self::new().method(method_of::<M>())
     }
+}
 
+impl<TyBody> RequestBuilder<TyBody> {
     /// 指定 access method。
     pub fn method(mut self, method: AccessMethod) -> Self {
-        self.0.method_ = Option::Some(method);
+        self.inner_.method_ = Option::Some(method);
         self
     }
 
     /// 指定资源路径。
     pub fn path(mut self, path: impl Into<String>) -> Self {
-        self.0.path_ = Option::Some(path.into());
+        self.inner_.path_ = Option::Some(path.into());
         self
     }
 
@@ -146,59 +165,109 @@ impl RequestBuilder {
         let Result::Ok(headers) = headers.try_into() else {
             return self;
         };
-        self.0.headers_ = Option::Some(headers);
+        self.inner_.headers_ = Option::Some(headers);
         self
     }
 
-    /// 按 MessagePack 编入一个业务类型作为报文体。
+    /// 声明本次体是**定长**传输，长度恰好 `size` 字节。
     ///
-    /// 同时写上两个标准头：`Body_Size`（编出来的字节数）与 `Body_Type`
-    /// （`Mime_Body_Type_MsgPack`）。`Data_Type_Id` **不**在这里写：泛型函数拿不到
-    /// 具体类型名，需要它的调用方用
-    /// [`HeadersBuilder`](crate::client::HeadersBuilder) 显式设置。
+    /// 不调用它时体按分块传输（值体的默认）。声明之后：体若自述长度就当场核对，写出时
+    /// 也会核对实际写出量，少一个字节都算截断。
+    pub fn body_size(mut self, size: usize) -> Self {
+        self.inner_.declared_size_ = Option::Some(size);
+        self
+    }
+
+    /// 按 MessagePack 打包一个业务值作为报文体。
     ///
-    /// 编码失败不会在这里暴露，而是在 [`RequestBuilder::build`] 时以
-    /// [`RequestBuildError::BodyEncode`] 报出。
-    pub fn body<T>(mut self, body: T) -> Self
-    where
-        T: Serialize,
-    {
-        match rmp_serde::to_vec(&body) {
-            Result::Ok(bytes) => self.set_body_bytes_(bytes),
-            Result::Err(err) => {
-                self.0.body_ = Option::None;
-                self.0.body_err_ = Option::Some(err.to_string());
-            }
+    /// 这里**不做编码**：存下的是「值 + `Codec::MsgPack`」，编码发生在发送时。想指定别的
+    /// 格式用 [`RequestBuilder::body_with`]。
+    pub fn body<TyData>(
+        self,
+        data: TyData,
+    ) -> RequestBuilder<CodableBody<TyData>> {
+        self.body_with(data, Codec::MsgPack)
+    }
+
+    /// 打包一个业务值，并**明确指定**它的编码格式。
+    ///
+    /// 同时记下这个格式对应的 `Body_Type`——对端据此知道该用什么解，不需要调用方再手写
+    /// 一遍头。
+    pub fn body_with<TyData>(
+        self,
+        data: TyData,
+        codec: Codec,
+    ) -> RequestBuilder<CodableBody<TyData>> {
+        let RequestBuilder { inner_ } = self;
+        let ReqBuilderInner {
+            method_,
+            path_,
+            headers_,
+            declared_size_,
+            ..
+        } = *inner_;
+        RequestBuilder {
+            inner_: Box::new(ReqBuilderInner {
+                method_,
+                path_,
+                headers_,
+                body_: Option::Some(CodableBody::new(data, codec)),
+                declared_size_,
+            }),
         }
-        self
     }
 
-    /// 直接给**已经编好**的报文体字节，只写 `Body_Size` 头。
-    pub fn body_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
-        self.set_body_bytes_(bytes.into());
-        self
+    /// 直接给**已经编好**的体字节。
+    ///
+    /// 字节串自己就是体（`Vec<u8>` 实现了 [`TrRpcBody`]），不必再套一层壳。长度因此是
+    /// 已知的：想按定长发就再调一次 [`RequestBuilder::body_size`]；否则一样走分块。
+    pub fn body_bytes(
+        self,
+        bytes: impl Into<Vec<u8>>,
+    ) -> RequestBuilder<Vec<u8>> {
+        let RequestBuilder { inner_ } = self;
+        let ReqBuilderInner {
+            method_,
+            path_,
+            headers_,
+            declared_size_,
+            ..
+        } = *inner_;
+        RequestBuilder {
+            inner_: Box::new(ReqBuilderInner {
+                method_,
+                path_,
+                headers_,
+                body_: Option::Some(bytes.into()),
+                declared_size_,
+            }),
+        }
     }
 
     /// 收尾：产出一条可发送的请求。
     ///
-    /// 体的长度会与 `Body_Size` 头对齐：头缺失就补上；头已存在但不等于实际字节数则报
-    /// [`RequestBuildError::BodySizeMismatch`]——**不静默改写**，那会把装配错误藏起来。
+    /// 体**不会**在这一步被编码，这里只决定传输模式并把它写进头：
+    ///
+    /// 1. 头里已经显式写了 `Body_Size` 或分块声明 → 尊重调用方的写法；
+    /// 2. 否则调过 [`RequestBuilder::body_size`] → 写 `Body_Size`；
+    /// 3. 否则（有体）→ 写分块声明；
+    /// 4. `Body_Type` 只在头里没有时才由体的编码格式补上。
     ///
     /// # Errors
     ///
-    /// method 或 path 缺失、体编码失败、体长度与头声明不符时返回错误。
-    pub fn build(self) -> Result<Request<EncodedBody, Nothing>, RequestBuildError> {
+    /// method / path 缺失、显式声明与体自述的长度不符、头里已有冲突的体声明时返回错误。
+    pub fn build(self) -> Result<Request<TyBody, Nothing>, RequestBuildError>
+    where
+        TyBody: TrRpcBody,
+    {
         let ReqBuilderInner {
             method_,
             path_,
             headers_,
             body_,
-            body_err_,
-        } = *self.0;
+            declared_size_,
+        } = *self.inner_;
 
-        if let Option::Some(err) = body_err_ {
-            return Result::Err(RequestBuildError::BodyEncode(err));
-        }
         let Option::Some(method) = method_ else {
             return Result::Err(RequestBuildError::MissingMethod);
         };
@@ -206,46 +275,89 @@ impl RequestBuilder {
             return Result::Err(RequestBuildError::MissingPath);
         };
 
-        let actual = body_.as_ref().map_or(0usize, Vec::len);
-        let declared = try_get_body_size_(headers_.as_ref())
-            .map_err(|err| RequestBuildError::BodyEncode(err.to_string()))?;
         let mut headers = headers_.unwrap_or_default();
-        if headers
-            .try_get_header(&StdHeaderKey::Body_Size.into())
-            .is_some()
-        {
-            if declared != actual {
-                return Result::Err(RequestBuildError::BodySizeMismatch { declared, actual });
+        let has_body = body_.as_ref().is_some_and(TrRpcBody::has_body);
+
+        if has_body {
+            // 头里已有的体声明优先：调用方显式写下的东西，builder 不去改写它。
+            let declared_in_header =
+                try_get_body_size_(Option::Some(&headers)).map_err(|err| {
+                    RequestBuildError::BodyEncode(err.to_string())
+                })?;
+            let has_size_header = headers
+                .try_get_header(&StdHeaderKey::Body_Size.into())
+                .is_some();
+            let has_transfer_header = headers
+                .try_get_header(&StdHeaderKey::Body_Transfer.into())
+                .is_some();
+
+            if has_size_header && has_transfer_header {
+                return Result::Err(RequestBuildError::ConflictingTransfer(
+                    "Body_Size 与 Body_Transfer 同时在场，体边界无从判定".to_string(),
+                ));
             }
-        } else if actual > 0usize {
-            set_body_size_header_(&mut headers, actual);
+
+            match declared_size_ {
+                // 调用方在 builder 上声明了定长。
+                Option::Some(size) => {
+                    if has_transfer_header {
+                        return Result::Err(RequestBuildError::ConflictingTransfer(
+                            "builder 声明了定长，头里却写了分块传输".to_string(),
+                        ));
+                    }
+                    if has_size_header && declared_in_header != size {
+                        return Result::Err(RequestBuildError::BodySizeMismatch {
+                            declared: declared_in_header,
+                            actual: size,
+                        });
+                    }
+                    if let Option::Some(body) = body_.as_ref()
+                        && let Option::Some(known) = body
+                            .try_known_len()
+                            .map_err(|err| RequestBuildError::BodyEncode(err.to_string()))?
+                        && known != size
+                    {
+                        return Result::Err(RequestBuildError::BodySizeMismatch {
+                            declared: size,
+                            actual: known,
+                        });
+                    }
+                    if !has_size_header {
+                        set_body_size_header_(&mut headers, size);
+                    }
+                }
+                // 没有声明长度：走分块（值体的默认）。
+                Option::None => {
+                    if has_size_header {
+                        // 调用方自己写了长度，就按定长走，builder 不插手。
+                    } else if !has_transfer_header {
+                        set_chunked_transfer_header_(&mut headers);
+                    }
+                }
+            }
+
+            // `Body_Type` 由编码格式决定，只在头里没有时才补。
+            if headers
+                .try_get_header(&StdHeaderKey::Body_Type.into())
+                .is_none()
+                && let Option::Some(body) = body_.as_ref()
+            {
+                set_body_type_from_body_(&mut headers, body);
+            }
         }
 
-        let mut req: Request<EncodedBody, Nothing> = Request::new(method, path);
+        let mut req: Request<TyBody, Nothing> = Request::new(method, path);
         if headers.iter_headers().into_iter().next().is_some() {
             req = req.with_headers(headers);
         }
-        if let Option::Some(bytes) = body_ {
-            req = req.with_body(EncodedBody::new(bytes));
+        if let Option::Some(body) = body_ {
+            req = req.with_body(body);
         }
         Result::Ok(req)
     }
-
-    /// 记下体字节，并同步 `Body_Size` / `Body_Type` 两个头。
-    fn set_body_bytes_(&mut self, bytes: Vec<u8>) {
-        let size = bytes.len();
-        self.0.body_err_ = Option::None;
-        self.0.body_ = Option::Some(bytes);
-        let headers = self.0.headers_.get_or_insert_with(Headers::new);
-        set_body_size_header_(headers, size);
-        headers.add_or_set_header(
-            &StdHeaderKey::Body_Type.into(),
-            &HeaderVal::from(StdHeaderVal::Mime_Body_Type_MsgPack),
-        );
-    }
 }
 
-impl Default for RequestBuilder {
+impl Default for RequestBuilder<Nothing> {
     fn default() -> Self {
         Self::new()
     }
@@ -329,26 +441,39 @@ where
 {
     let written = send_request_prefix_async(req, tx, tok.child_token()).await?;
 
-    let Some(bytes) = req
-        .try_body_bytes()
-        .map_err(|err| MessageIoError::Encode(err.to_string()))?
-    else {
-        // 体给不出字节：头里若也声明了体，那就是「有内容却发不出去」，必须报出来，
-        // 而不是静默发一条没有体的请求。
-        let transfer = body_transfer_of(req.headers())
-            .map_err(|err| MessageIoError::Protocol(err.to_string()))?;
-        if transfer.has_body() {
-            return Result::Err(MessageIoError::Protocol(
-                "请求头声明了报文体，但体的字节不是现成可借出的（请先编码到一块内存，例如 EncodedBody）"
-                    .to_string(),
-            ));
-        }
-        return Result::Ok(written);
-    };
-
-    let mut src: &[u8] = bytes;
-    let body = send_body_async(&mut src, tx, req.headers(), tok).await?;
+    // 体按头里声明的模式写出去：编码就发生在这一步，而不是构造请求的那一刻。
+    let body_view = ReqBodyView { req_: req };
+    let body = send_body_async(&body_view, tx, req.headers(), tok).await?;
     Result::Ok(written + body)
+}
+
+/// 把「一条请求的体」适配成 [`TrRpcBody`]，好交给统一的搬运入口。
+///
+/// 请求类型只承诺「能把体写出去」（[`messaging::TrRpcRequest::try_write_body`]），
+/// 而搬运入口要的是一个体；这一层薄适配把两者接上，顺便把「没有体」翻译成
+/// [`TrRpcBody::has_body`] 的 `false`。
+struct ReqBodyView<'a, TyReq> {
+    req_: &'a TyReq,
+}
+
+impl<TyReq> TrRpcBody for ReqBodyView<'_, TyReq>
+where
+    TyReq: messaging::TrRpcRequest,
+{
+    #[inline]
+    fn has_body(&self) -> bool {
+        self.req_.has_body()
+    }
+
+    #[inline]
+    fn try_known_len(&self) -> Result<Option<usize>, BodyEncodeError> {
+        self.req_.try_body_known_len()
+    }
+
+    #[inline]
+    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<usize, BodyEncodeError> {
+        Ok(self.req_.try_write_body(sink)?.unwrap_or(0usize))
+    }
 }
 
 /// 解码请求前缀（`method` / `location` / `headers`）。

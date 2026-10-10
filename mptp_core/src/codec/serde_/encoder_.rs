@@ -70,7 +70,7 @@ where
     }
 }
 
-#[gen_may_cancel_future(CountingWriteEncode, pub, new(pub(in crate::codec)))]
+#[gen_may_cancel_future(CountingWriterEncode, pub, new(pub(in crate::codec)))]
 async fn count_write_encode_async_<'f, T, C, K>(
     codec: &'f Codec,
     data: &'f T,
@@ -89,7 +89,11 @@ where
     match codec {
         Codec::MsgPack => rmp_serde::encode::write(&mut write, data)
             .map_err(|err| CodecError::Encode(err.to_string()))?,
-        Codec::Json => todo!("Support JSON codec at the moment."),
+        Codec::Json => {
+            return Result::Err(CodecError::Encode(
+                "JSON 编码尚未实现".to_string(),
+            ));
+        }
     }
     Result::Ok(write.written())
 }

@@ -13,7 +13,7 @@ use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use super::{
     codec_::CodecError,
     config_::TrCodecConfig,
-    serde_::{Codec, CountingWriteEncodeAsync, CountingWriteEncodeFuture},
+    serde_::{Codec, CountingWriterEncodeAsync, CountingWriterEncodeFuture},
 };
 
 /// 编码的目标缓冲。
@@ -113,7 +113,7 @@ where
     {
         match self.driver_ {
             EncodeDriver::Serde(codec) => {
-                let async_ = CountingWriteEncodeAsync::new(codec, self.data_, self.buff_);
+                let async_ = CountingWriterEncodeAsync::new(codec, self.data_, self.buff_);
                 EncodeMayCancelFuture::Serde(async_.may_cancel_with(cancel))
             }
         }
@@ -134,7 +134,7 @@ where
     K: TrCancellationToken,
 {
     /// 内置的 serde 类实现。
-    Serde(CountingWriteEncodeFuture<'f, 'f, T, C, K>),
+    Serde(CountingWriterEncodeFuture<'f, 'f, T, C, K>),
 }
 
 impl<'f, T, C, K> Future for EncodeMayCancelFuture<'f, T, C, K>

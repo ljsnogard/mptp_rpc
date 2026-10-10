@@ -14,7 +14,7 @@ use mm_ptr::{Owned, Shared, x_deps::abs_mm};
 use mptp_core::{
     access_method::AccessMethod,
     client::{Client, TrClienAllocConfig, TrClient, TrSession, config::TrClientConfig},
-    messaging::{EncodedBody, Nothing, Request, Response},
+    messaging::{Nothing, Request, Response},
     specs::Status,
 };
 use smux_v1::{
@@ -78,9 +78,9 @@ impl TrClientConfig for DemoClientCfg {
 
     type SharedConn = Shared<Conn, CoreAlloc>;
 
-    type Request = Request<EncodedBody, Nothing>;
+    type Request = Request<Vec<u8>, Nothing>;
 
-    type Response = Response<EncodedBody, Nothing>;
+    type Response = Response<Vec<u8>, Nothing>;
 
     type Err = DemoCfgError;
 }
@@ -101,13 +101,14 @@ pub async fn run_client_(
 ) -> Result<String> {
     let client = Client::<DemoClientCfg>::new(conn, Dock::new(remote_dock));
 
-    // 体的字节必须**现成可借出**，因此这里在构造请求时就把业务值编成字节，再挂成
-    // `EncodedBody`；`with_measured_body` 顺手写下 `Body_Size`，声明这是定长传输。
+    // 这里演示「内容已经在内存里、按定长发出去」这条最常见的路：业务值先编成字节，
+    // 字节串自己就是体（`Vec<u8>` 实现了 `TrRpcBody`），`with_sized_body` 顺手写下
+    // `Body_Size`。要发业务值本身，用 `body` / `body_with`（编码推迟到发送时）。
     let encoded = rmp_serde::to_vec(payload).map_err(|err| anyhow!("编码请求体失败：{err}"))?;
-    let request = Request::<EncodedBody, Nothing>::with_measured_body(
+    let request = Request::<Vec<u8>, Nothing>::with_sized_body(
         AccessMethod::Call,
         K_ECHO_PATH,
-        EncodedBody::new(encoded),
+        encoded,
     )
     .map_err(|err| anyhow!("攒请求失败：{err}"))?;
 
@@ -118,7 +119,7 @@ pub async fn run_client_(
         .map_err(|err| anyhow!("发起请求失败：{err}"))?;
 
     let prefix = session
-        .recv_response_async()
+        .recv_resp_header_async()
         .may_cancel_with(NonCancellableToken::new())
         .await
         .map_err(|err| anyhow!("接收响应前缀失败：{err}"))?;
@@ -129,7 +130,7 @@ pub async fn run_client_(
     // 读回复体：`Head` / `Drop` 的回复一个字节都不会读；这里用的是 `Call`，
     // 服务端声明了体，于是按 `Body_Size` 直接从 ring 上解出来。
     let echoed: Option<String> = session
-        .recv_response_body_async::<String>(&prefix)
+        .recv_resp_body_async::<String>(&prefix)
         .may_cancel_with(NonCancellableToken::new())
         .await
         .map_err(|err| anyhow!("接收响应体失败：{err}"))?;

@@ -1,3 +1,5 @@
+use std::io;
+
 use abs_buff::{TrBuffRead, TrBuffWrite, buffer::TrProducerState, x_deps::abs_cancel};
 use abs_buff_stdio_adapt::AsStdWrite;
 use abs_cancel::TrCancellationToken;
@@ -5,6 +7,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
+    basic::{BodyEncodeError, TrRpcBody},
     body::{BodyTransfer, body_transfer_of, send_body_async},
     io_::{CountingWrite, MessageIoError, WaitingTx, decode_from_async_, read_body_async_},
 };
@@ -225,24 +228,36 @@ where
 {
     let written = send_response_prefix_async(resp, tx, tok.child_token()).await?;
 
-    let Some(bytes) = resp
-        .try_body_bytes()
-        .map_err(|err| MessageIoError::Encode(err.to_string()))?
-    else {
-        let transfer = body_transfer_of(resp.headers())
-            .map_err(|err| MessageIoError::Protocol(err.to_string()))?;
-        if transfer.has_body() {
-            return Result::Err(MessageIoError::Protocol(
-                "回复头声明了报文体，但体的字节不是现成可借出的（请先编码到一块内存，例如 EncodedBody）"
-                    .to_string(),
-            ));
-        }
-        return Result::Ok(written);
-    };
-
-    let mut src: &[u8] = bytes;
-    let body = send_body_async(&mut src, tx, resp.headers(), tok).await?;
+    // 体按头里声明的模式写出去：编码就发生在这一步，而不是构造回复的那一刻。
+    let body_view = RespBodyView { resp_: resp };
+    let body = send_body_async(&body_view, tx, resp.headers(), tok).await?;
     Result::Ok(written + body)
+}
+
+/// 把「一条回复的体」适配成 [`TrRpcBody`]，理由同
+/// [`ReqBodyView`](super::request::send_request_async)。
+struct RespBodyView<'a, TyResp> {
+    resp_: &'a TyResp,
+}
+
+impl<TyResp> TrRpcBody for RespBodyView<'_, TyResp>
+where
+    TyResp: messaging::TrRpcResponse,
+{
+    #[inline]
+    fn has_body(&self) -> bool {
+        self.resp_.has_body()
+    }
+
+    #[inline]
+    fn try_known_len(&self) -> Result<Option<usize>, BodyEncodeError> {
+        self.resp_.try_body_known_len()
+    }
+
+    #[inline]
+    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<usize, BodyEncodeError> {
+        Ok(self.resp_.try_write_body(sink)?.unwrap_or(0usize))
+    }
 }
 
 /// 解码回复前缀（`status` / `headers`）。

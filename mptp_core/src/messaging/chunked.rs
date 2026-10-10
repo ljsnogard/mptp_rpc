@@ -37,7 +37,7 @@
 //! ```
 
 use core::error::Error;
-use std::io::Write;
+use std::io::{self, Write};
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffWrite, gen_may_cancel_future,
@@ -156,6 +156,118 @@ where
         .flush()
         .map_err(|err| MessageIoError::Io(err.to_string()))?;
     Ok(written)
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 写侧的 io::Write 适配
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 把「往一个写缓冲里写字节」的动作**帧化**成一个个块。
+///
+/// 它实现 [`std::io::Write`]，但每一次 [`Write::write`] 写出的就是一整块（长度前缀 +
+/// 内容）：**调用方写多少，块就有多大**。于是「序列化器边编边写、块长就是它这一次写出的
+/// 字节数」这条链路不需要任何中转缓冲，也不需要事先知道体的总长——这正是分块机制存在的
+/// 意义（见 `dev-notes/body-transfer-20261010-2020.md` §1）。
+///
+/// 写完内容记得调 [`ChunkedSink::finish`] 补上长度 `0` 的终止块；没有它，接收方无从知道
+/// 分块体到此结束。
+///
+/// 单次 `write` 最多写 [`K_MAX_CHUNK_PAYLOAD`] 字节，超出的部分留给下一次调用
+/// （`write_all` 会自动续上）。
+///
+/// # Examples
+///
+/// ```
+/// use mptp_core::{
+///     messaging::chunked::ChunkedSink,
+///     x_deps::abs_cancel::NonCancellableToken,
+/// };
+///
+/// # async fn demo() {
+/// let mut storage = [0u8; 64];
+/// let mut sink: &mut [u8] = &mut storage;
+/// let mut chunked = ChunkedSink::new(&mut sink, NonCancellableToken::new());
+/// # }
+/// ```
+pub struct ChunkedSink<'a, TyTx, TyTok>
+where
+    TyTx: TrBuffWrite<u8>,
+    TyTok: TrCancellationToken,
+{
+    inner_: &'a mut TyTx,
+    cancel_: TyTok,
+
+    /// 已经写出的**线上**字节数：各块的 2 字节前缀 + 内容，以及终止块。
+    wire_written_: usize,
+}
+
+impl<'a, TyTx, TyTok> ChunkedSink<'a, TyTx, TyTok>
+where
+    TyTx: TrBuffWrite<u8>,
+    TyTok: TrCancellationToken,
+{
+    /// 包住一个写缓冲。
+    pub const fn new(inner: &'a mut TyTx, cancel: TyTok) -> Self {
+        ChunkedSink {
+            inner_: inner,
+            cancel_: cancel,
+            wire_written_: 0usize,
+        }
+    }
+
+    /// 已经写出的**线上**字节数（含块前缀与终止块）。
+    pub const fn wire_written(&self) -> usize {
+        self.wire_written_
+    }
+
+    /// 写出终止块（长度 0），宣告分块体到此结束。
+    ///
+    /// # Errors
+    ///
+    /// 写目标失败时返回 [`std::io::Error`]。
+    pub fn finish(&mut self) -> io::Result<()> {
+        let mut waiting = WaitingTx::new_(self.inner_);
+        let mut write = AsStdWrite::new(&mut waiting, self.cancel_.child_token());
+        write.write_all(0u16.to_be_bytes().as_slice())?;
+        self.wire_written_ += 2usize;
+        Result::Ok(())
+    }
+
+    /// 取回底层缓冲的引用。
+    pub const fn inner(&self) -> &TyTx {
+        self.inner_
+    }
+}
+
+impl<TyTx, TyTok> Write for ChunkedSink<'_, TyTx, TyTok>
+where
+    TyTx: TrBuffWrite<u8>,
+    TyTok: TrCancellationToken,
+{
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            // 空内容不构成一个块：长度 0 的块是**终止块**，不能在这里误发。
+            return Result::Ok(0usize);
+        }
+        let take = core::cmp::min(buf.len(), K_MAX_CHUNK_PAYLOAD);
+        let mut waiting = WaitingTx::new_(self.inner_);
+        let mut write = AsStdWrite::new(&mut waiting, self.cancel_.child_token());
+        write.write_all(
+            u16::try_from(take)
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .to_be_bytes()
+                .as_slice(),
+        )?;
+        write.write_all(&buf[..take])?;
+        // 2 字节长度前缀 + 本块内容。
+        self.wire_written_ += 2usize + take;
+        Result::Ok(take)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // 每一块在写出去时就已经提交给底层了，这里没有可刷的东西。
+        Result::Ok(())
+    }
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----

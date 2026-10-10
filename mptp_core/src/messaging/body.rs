@@ -1,14 +1,17 @@
 //! 报文体的传输：**模式判定**、**发送搬运**与**接收视图**。
 //!
-//! # 体的来源是一个流，不是一个值
+//! # 发送体有两条路，取决于内容是什么形状
 //!
-//! 协议层不负责把业务值序列化成字节——那是「谁产生内容谁负责」的事。这里统一把体看成
-//! 一个 [`TrBuffRead`]：发送就是把这股字节按头里声明的模式搬到子流的写半边。
+//! | 内容是什么 | 走哪个入口 | 怎么发 |
+//! | --- | --- | --- |
+//! | **字节流**（`&[u8]`、环的读半边、文件、上游转发来的字节） | [`send_body_from_reader_async`]（便利包装 [`send_content_async`]） | 从源借段、往目标借段、段到段搬；**不预量长度、不分配缓存** |
+//! | **业务值 + 编码格式** | [`send_body_async`] | 编码器把字节逐段**直接编进目标半边**（外面按模式套写口），边编边发 |
 //!
-//! 这样做的直接好处是：**长度不必事先知道**。业务值要在构造请求时编码成一块内存
-//! （例如 `EncodedBody`）也好，边序列化边写进一块环、再从环的读半边取出来也好，对
-//! 协议层都是同一件事——而且分块模式下「一块有多长」正好由源让出的那一段决定，不需要
-//! 任何额外的中转缓冲。
+//! 两条路都遵守同一件事：**协议层不事先知道体有多长**。区别只在字节是谁产生的——
+//! 已经存在（pull：去源里借）还是正在产生（push：往目标里写）。协议层不替调用方做格式
+//! 选择，也不替它把值编成字节：那是「谁产生内容谁负责」的事。
+//!
+//! 常见的那条是第一条：`&[u8]` 本身就实现了 [`TrBuffRead<u8>`]，不需要任何中间类型。
 //!
 //! # 两种模式
 //!
@@ -44,19 +47,22 @@ use core::error::Error;
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffWrite, gen_may_cancel_future,
-    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView},
+    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrProducerState},
     error::{ReadErrTag, TrTaggedError},
     x_deps::{abs_cancel, anylr},
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use anylr::SomeOf;
 
+use abs_buff_stdio_adapt::AsStdWrite;
+
 use super::{
-    chunked::{ChunkedReadError, chunked_read_step_, chunked_try_read_},
-    io_::{MessageIoError, race_cancel_},
+    basic::TrRpcBody,
+    chunked::{ChunkedReadError, ChunkedSink, chunked_read_step_, chunked_try_read_},
+    io_::{MessageIoError, WaitingTx, race_cancel_},
     limit::{
-        LimitReadError, LimitedRead, LimitedRefSegm, limited_read_step_, limited_try_read_,
-        split_some_of_,
+        LimitReadError, LimitedRead, LimitedRefSegm, LimitedWrite, limited_read_step_,
+        limited_try_read_, split_some_of_,
     },
     response::ProtocolViolation,
 };
@@ -414,23 +420,156 @@ where
 // 发送搬运
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
-/// 把报文体从 `src` 搬到 `dst`；**怎么搬由 `headers` 里声明的模式决定**。
+/// 按报文头声明的模式，把体写进 `dst`。
 ///
-/// 搬运全程是**段到段**的直接拷贝：从源借一段、往目标借一段、把前者搬进后者，路径上
-/// 没有任何中转缓冲，也不要求源的字节数事先已知。
+/// **怎么写出头决定，写什么由体决定**：
 ///
-/// - 没有体：一个字节都不读、不写；
-/// - 定长：只搬 `Body_Size` 声明的那么多；源提前结束报截断，源有多余的字节**不碰**
-///   （那属于同一条 channel 上的后续数据）；
-/// - 分块：源每让出一段就封一块，块长就是该段的实际字节数（超过 65535 会自动切开），
-///   源耗尽后补一个长度 `0` 的块收尾。
+/// - 没有体：一个字节都不写；
+/// - 定长：`dst` 外面套一个限长写口，写出量必须**恰好**等于 `Body_Size` 声明的长度
+///   ——少了报截断，多了会被限长写口挡下；
+/// - 分块：`dst` 外面套一个分块写口，体每写一次就封一块，**块长就是这一次写出的字节数**，
+///   最后补一个长度 `0` 的终止块。体的总长直到发完都不必知道。
+///
+/// 编码发生在这一刻：体（例如 [`CodableBody`](super::basic::CodableBody)）在此之前只是
+/// 业务值与编码格式的打包，没有被编过，因此大 body 不会卡住构造请求的那一行。
 ///
 /// # Errors
 ///
-/// 头部声明本身违规、源提前结束（定长不足）、读写任一侧失败，或期间被取消时返回
-/// [`MessageIoError`]。
+/// 头部声明违规、体自称的长度与声明不符、定长体写出量对不上、编码失败，或写 `dst` 失败时
+/// 返回 [`MessageIoError`]。
 #[gen_may_cancel_future(SendBody, pub, new(pub(crate)))]
-async fn send_body_async_<'f, TySrc, TyDst, TyTok>(
+async fn send_body_async_<'f, TyBody, TyDst, TyTok>(
+    body: &'f TyBody,
+    dst: &'f mut TyDst,
+    headers: Option<&'f Headers>,
+    cancel: TyTok,
+) -> Result<usize, MessageIoError>
+where
+    TyBody: TrRpcBody,
+    TyDst: TrBuffWrite<u8> + TrProducerState,
+    TyTok: TrCancellationToken,
+{
+    let transfer = body_transfer_of(headers)
+        .map_err(|err| MessageIoError::Protocol(err.to_string()))?;
+    if !transfer.has_body() || !body.has_body() {
+        // 「头里没有体」与「体自己说没有内容」都意味着一个字节都不写。
+        return Result::Ok(0usize);
+    }
+    match transfer {
+        BodyTransfer::Absent => Result::Ok(0usize),
+        BodyTransfer::Sized(size) => write_sized_async_(body, dst, size, cancel).await,
+        BodyTransfer::Chunked => write_chunked_async_(body, dst, cancel).await,
+    }
+}
+
+/// 定长：把体写进一个**恰好 `size` 字节**的限长写口。
+async fn write_sized_async_<'f, TyBody, TyDst, TyTok>(
+    body: &'f TyBody,
+    dst: &'f mut TyDst,
+    size: usize,
+    tok: TyTok,
+) -> Result<usize, MessageIoError>
+where
+    TyBody: TrRpcBody,
+    TyDst: TrBuffWrite<u8> + TrProducerState,
+    TyTok: TrCancellationToken,
+{
+    // 装配期核对：体若自称长度已知，就必须与头里声明的一致——不一致说明两端对这条报文的
+    // 理解已经不同，宁可当场失败，也不要写出一条会让接收方错位的报文。
+    if let Option::Some(known) = body
+        .try_known_len()
+        .map_err(|err| MessageIoError::Encode(err.to_string()))?
+        && known != size
+    {
+        return Result::Err(MessageIoError::BodySizeMismatch {
+            declared: size,
+            actual: known,
+        });
+    }
+
+    let written = {
+        let mut limited = LimitedWrite::new(dst, size);
+        // `WaitingTx` 让 `AsStdWrite` 走「等对端腾空间」那条路：环满时它等，而不是把
+        // 字节攒在别处。额度耗尽时限长写口会报「不能再写」，写超出的体因此立刻失败。
+        let mut waiting = WaitingTx::new_(&mut limited);
+        let mut write = AsStdWrite::new(&mut waiting, tok.child_token());
+        body.try_encode_into(&mut write)
+            .map_err(|err| MessageIoError::Encode(err.to_string()))?
+    };
+    if written != size {
+        return Result::Err(MessageIoError::Truncated(format!(
+            "体声明为 {size} 字节，实际只写出 {written} 字节"
+        )));
+    }
+    Result::Ok(written)
+}
+
+/// 分块：把体写进一个**写多少就封多大块**的分块写口，末尾补终止块。
+async fn write_chunked_async_<'f, TyBody, TyDst, TyTok>(
+    body: &'f TyBody,
+    dst: &'f mut TyDst,
+    tok: TyTok,
+) -> Result<usize, MessageIoError>
+where
+    TyBody: TrRpcBody,
+    TyDst: TrBuffWrite<u8> + TrProducerState,
+    TyTok: TrCancellationToken,
+{
+    let mut chunked = ChunkedSink::new(dst, tok.child_token());
+    body.try_encode_into(&mut chunked)
+        .map_err(|err| MessageIoError::Encode(err.to_string()))?;
+    chunked
+        .finish()
+        .map_err(|err| MessageIoError::Io(err.to_string()))?;
+    // 回报的是线上字节数（含块前缀与终止块），调用方据此知道这条体占用了多少字节。
+    Result::Ok(chunked.wire_written())
+}
+
+/// 把报文体按报文头声明的模式写进 `dst`。语义与参数见 [`send_body_async_`] 的文档。
+///
+/// 返回实际写出的**线上**字节数：定长时就是体的长度，分块时含各块的 2 字节前缀与终止块。
+pub fn send_body_async<'f, TyBody, TyDst, TyTok>(
+    body: &'f TyBody,
+    dst: &'f mut TyDst,
+    headers: Option<&'f Headers>,
+    tok: TyTok,
+) -> SendBodyFuture<'f, 'f, TyBody, TyDst, TyTok>
+where
+    TyBody: TrRpcBody,
+    TyDst: TrBuffWrite<u8> + TrProducerState,
+    TyTok: TrCancellationToken + 'f,
+{
+    SendBodyAsync::new(body, dst, headers).may_cancel_with(tok)
+}
+
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 从字节流搬运
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 把一个 `TrBuffRead<u8>` **源**按报文头声明的模式搬进 `dst`。
+///
+/// 这是发送体的**底层真实入口**：体在别处已经是一股字节流时（`&[u8]`、环的读半边、
+/// 文件、上游报文转发的字节……）都走这里。协议层只负责搬运，不预量长度、不为体分配缓存：
+///
+/// - 没有体：一个字节都不搬；
+/// - 定长：源被套上限长读，只搬 `Body_Size` 声明的那么多；源提前结束报截断，源有多余
+///   的字节**不碰**；
+/// - 分块：源每让出一段就封一块，**块长就是那一段实际的字节数**（超 65535 自动切开），
+///   源耗尽后补一个长度 `0` 的块收尾。
+///
+/// 搬运全程是**段到段**的直接拷贝：从源借一段、往目标借一段、把前者搬进后者。这既免掉了
+/// 中转缓冲，也保证了源**真的被消费**——只读一眼段的字节是不会推进源的（段的消费量只在
+/// 段被回收时结算）。
+///
+/// [`send_content_async`] 是它在「内容就在内存里」时的便利包装。
+///
+/// # Errors
+///
+/// 头部声明违规、源提前结束（定长不足）、读写任一侧失败，或期间被取消时返回
+/// [`MessageIoError`]。
+#[gen_may_cancel_future(SendBodyFromReader, pub, new(pub(crate)))]
+async fn send_body_from_reader_async_<'f, TySrc, TyDst, TyTok>(
     src: &'f mut TySrc,
     dst: &'f mut TyDst,
     headers: Option<&'f Headers>,
@@ -445,7 +584,7 @@ where
         .map_err(|err| MessageIoError::Protocol(err.to_string()))?;
     match transfer {
         // 没有体：一个字节都不搬。
-        BodyTransfer::Absent => Ok(0usize),
+        BodyTransfer::Absent => Result::Ok(0usize),
         BodyTransfer::Sized(size) => copy_sized_async_(src, dst, size, cancel).await,
         BodyTransfer::Chunked => copy_chunked_async_(src, dst, cancel).await,
     }
@@ -463,7 +602,7 @@ where
     TyDst: TrBuffWrite<u8>,
     TyTok: TrCancellationToken,
 {
-    // 源被套上限长读：即使对端写得比声明的多，也不会被这条报文搬走。
+    // 源被套上限长读：即使上游写得比声明的多，也不会被这条报文搬走。
     let mut limited = LimitedRead::new(src, size);
     let mut total = 0usize;
     while total < size {
@@ -516,20 +655,14 @@ where
         }
         total += moved;
     }
-    Ok(total)
+    Result::Ok(total)
 }
 
 /// 分块搬运：源每让出一段就封一块，末尾补终止块。
 ///
-/// # 为什么是「段到段」而不是「读出来再写出去」
-///
-/// 段接口的消费量只在段被回收时结算：**仅仅读一眼段的字节并不会推进源的位置**。
-/// 因此这里必须把源段的字节真正**搬进**目标段（`move_items_from_segm`），源才会前进；
-/// 顺带也就免掉了任何中转缓冲——块前缀是栈上的 2 字节数组，内容直接从源段搬进目标段。
-///
 /// 每个块的长度前缀取的是**这一块实际搬走的字节数**：块边界就是源让出的那一段（首片）
-/// 的边界，最多 [`K_MAX_CHUNK_PAYLOAD`] 字节；更大的段会被切成多个块，剩下的部分留在
-/// 源里等下一轮借出。
+/// 的边界，最多 [`K_MAX_CHUNK_PAYLOAD`](super::chunked::K_MAX_CHUNK_PAYLOAD) 字节；更大的
+/// 段会被切成多个块，剩下的部分留在源里等下一轮借出。
 async fn copy_chunked_async_<'f, TySrc, TyDst, TyTok>(
     src: &'f mut TySrc,
     dst: &'f mut TyDst,
@@ -628,21 +761,64 @@ where
     Result::Ok(total)
 }
 
-/// 按报文头把体从 `src` 搬到 `dst`。语义与参数见 [`send_body_async_`] 的文档。
+/// 把一个 `TrBuffRead<u8>` 源按头声明的模式搬进 `dst`。语义与参数见
+/// [`send_body_from_reader_async_`] 的文档。
 ///
-/// 返回实际搬运的体字节数（分块模式下**不含**块前缀与终止块）。
-pub fn send_body_async<'f, TySrc, TyDst, TyTok>(
+/// 返回实际搬运的**体**字节数（分块模式下不含块前缀与终止块）。
+pub fn send_body_from_reader_async<'f, TySrc, TyDst, TyTok>(
     src: &'f mut TySrc,
     dst: &'f mut TyDst,
     headers: Option<&'f Headers>,
     tok: TyTok,
-) -> SendBodyFuture<'f, 'f, TySrc, TyDst, TyTok>
+) -> SendBodyFromReaderFuture<'f, 'f, TySrc, TyDst, TyTok>
 where
     TySrc: TrBuffRead<u8>,
     TyDst: TrBuffWrite<u8>,
     TyTok: TrCancellationToken + 'f,
 {
-    SendBodyAsync::new(src, dst, headers).may_cancel_with(tok)
+    SendBodyFromReaderAsync::new(src, dst, headers).may_cancel_with(tok)
+}
+
+/// 把一段**已经在内存里**的内容按头声明的模式发出去。
+///
+/// 它是 [`send_body_from_reader_async`] 的便利包装：`&[u8]` 本身就实现了
+/// [`TrBuffRead<u8>`]，因此不需要任何中间类型——调用方少写一次 `let mut src = content;`
+/// 而已。
+///
+/// 这是「直接塞一串字节发出去」的推荐入口；要发的是**业务值**时用 [`send_body_async`]
+/// （编码器边编边写）。
+///
+/// # Errors
+///
+/// 同 [`send_body_from_reader_async`]。
+#[gen_may_cancel_future(SendContent, pub, new(pub(crate)))]
+async fn send_content_async_<'f, TyDst, TyTok>(
+    content: &'f [u8],
+    dst: &'f mut TyDst,
+    headers: Option<&'f Headers>,
+    cancel: TyTok,
+) -> Result<usize, MessageIoError>
+where
+    TyDst: TrBuffWrite<u8>,
+    TyTok: TrCancellationToken,
+{
+    // `&[u8]` 自己就是源；这里只是给它一个可推进的落脚点。
+    let mut src: &[u8] = content;
+    send_body_from_reader_async_(&mut src, dst, headers, cancel).await
+}
+
+/// [`send_content_async_`] 的公开入口。
+pub fn send_content_async<'f, TyDst, TyTok>(
+    content: &'f [u8],
+    dst: &'f mut TyDst,
+    headers: Option<&'f Headers>,
+    tok: TyTok,
+) -> SendContentFuture<'f, 'f, TyDst, TyTok>
+where
+    TyDst: TrBuffWrite<u8>,
+    TyTok: TrCancellationToken + 'f,
+{
+    SendContentAsync::new(content, dst, headers).may_cancel_with(tok)
 }
 
 /// 头里是否把报文体声明成「分块传输」。

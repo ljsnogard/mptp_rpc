@@ -147,7 +147,8 @@ MPTP 定义了 7 种资源访问方法：
 | 前缀与报文体的字节 IO | `mptp_core/src/messaging/io_.rs` | 已实现（直接读写 ring，无中转缓冲） |
 | 限长读写（只借出预设额度） | `mptp_core/src/messaging/limit.rs` | 已实现（`TrBuffRead` / `TrBuffWrite` 的衍生类型） |
 | 分块帧（块自带长度、显式结束） | `mptp_core/src/messaging/chunked.rs` | 已实现（`ChunkedWrite` / `ChunkedRead`） |
-| 体的模式判定 / 发送搬运 / 接收视图 | `mptp_core/src/messaging/body.rs` | 已实现（`BodyTransfer` / `send_body_async` / `body_reader`） |
+| 体的模式判定 / 发送 / 接收视图 | `mptp_core/src/messaging/body.rs` | 已实现（`BodyTransfer` / `send_body_async` / `body_reader`） |
+| 体的载体与编码格式 | `mptp_core/src/messaging/basic.rs`、`mptp_core/src/codec/` | 已实现（`Vec<u8>` 直接是体 / `CodableBody` / `Codec`；编码推迟到发送时） |
 | RequestBuilder / HeadersBuilder | `mptp_core/src/messaging/request.rs`、`client/headers_.rs` | 已实现 |
 | 回复体决策 | `mptp_core/src/messaging/response.rs` | 已实现（`ResponseBodyDecision`） |
 | 客户端会话（发请求、读前缀与体） | `mptp_core/src/client/` | 已实现（前缀与体分两步，体按头声明的模式搬运） |
@@ -207,21 +208,8 @@ cargo run -p rpc_demo -- client
 1. 能画出上述 5 层分层图，并能说清每个 crate 的职责。
 2. 能在 `mptp_core` 中给出每一层的向下层依赖的 API 是什么，对上提供的 API 是什么。这些 API 可能会在后续有修改，但必须有一个阶段性的成果，确保生成的代码功能是合理设计的。
 
-### Phase 1：打通传输层
+### Phase 1：打通传输层（已在 mptp_cs_smoke 验证）
 
-任务：
-
-1. 在 `crates/rpc_transport_iroh` 中实现 `TrMuxConn` / `TrChannel`；
-2. 基于 iroh QUIC 的 `open_bi` / `accept_bi` 得到双向 stream；
-3. 将 iroh 的异步流桥接到 `abs_buff` 的 `TrBuffTryRead` / `TrBuffTryWrite`。可以先将 iroh 中的流数据写入到一个 RingBuffer （该依赖已经引入），不要重新发明过多的 abs_buff 中的 trait 所需要的类型，而是使用现有的；
-4. 提供 `connect_by_id`、`connect_by_addr`、`accept` 等构造方式（可参考 git 历史中的旧实现）；
-5. 抽象出一个根据 header 查找必要的 serializer 和 deserializer 的功能，可以暂时先固定满足几个测试类。
-5. 为传输层写一个端到端 roundtrip 测试：打开 channel，写数据，读回并校验。
-
-**完成标准**：
-
-- `cargo test -p mptp_rpc_transport_iroh` 通过；
-- 能证明一条 connection 上可同时开多条 channel 并各自读写。
 
 ### Phase 2：完善 core 消息与客户端（已完成）
 
@@ -238,46 +226,11 @@ cargo run -p rpc_demo -- client
 - 单元测试覆盖：无 body 请求、有 body 请求、回复体存在/不存在、协议违规检测；
 - `cargo test -p mptp_core` 通过。
 
-**落地记录**（与上面这份原始计划的差异及理由）：
-
-- **回复体决策换成 `ResponseBodyDecision`**：原计划的 `should_read_response_body` 只回答
-  「读不读」，而边界一旦确定，读多少字节也就定了。现在由它一次给出 `Absent` /
-  `Present(size)`，并把两类协议违规明确报错而不是静默按「不读」处理——`Head` / `Drop`
-  的回复声明了体、以及只有 `Body_Type` 没有 `Body_Size`。
-- **体的类型是「能把自己编进一条流」而不是「能给出字节」**：`TrRpcBody` 由
-  `try_encoded_len` + `try_encode_into` 两个方法组成。若换成 `fn try_body_bytes() -> &[u8]`，
-  每个体类型都被迫先把编码结果落在某块内存里，而那正是 §2 禁止的那次分配。长度用
-  「只数不写」的 sink 量出来，字节直接写进 ring 的可用段。
-- **`Body_Size` 与实际长度由写出方核对**：不一致时拒绝写出，而不是静默把头改对——
-  那样的报文会让接收方按错误的长度切分后续字节。
-- **codec 抽象尚未接线**：`EncodeBuffWrite` / `DecodeBuffRead` / `CodecRegistry` 仍是
-  「按 `Data_Type_Id` 分派编解码器」的接口，没有接到真实半边；本阶段的体一律按字节处理。
-  接线留到需要按类型标识分派时再做。
-
-**第二轮落地记录**（分块 / 定长两种传输机制，见
-`dev-notes/body-transfer-20261010-2020.md` 与 `dev-notes/body-transfer-impl-20261010-2102.md`）：
-
-- **体的传输模式由报文头声明、由调用方选择**：`Body_Size` 是定长，`Body_Transfer: Chunked`
-  是分块，两者互斥；同时在场、或只有 `Body_Type` 而没有边界，都按协议违规报出。协议层
-  不再「试探体类型、推断模式」。
-- **发送体的统一形状是一个 `TrBuffRead<u8>`**：`send_body_async(src, dst, headers, tok)`
-  只按头搬字节，不预量长度、不为体分配缓存；定长用限长读钉住边界，分块则「源让出一段就
-  封一块」，块长就是那一段实际的字节数。代价是体在发送时必须已经落在某块内存里——
-  `EncodedBody` 是值体的标准载体，任意 `Serialize` 值要在构造请求时编进去。
-- **接收侧给的是「体读视图」而不是解好的值**：`body_reader(rx, headers)` 返回一个实现了
-  `TrBuffRead<u8>` 的 `BodyReader`（没有体 / 定长 / 分块三态），上层先拿前缀、再决定要不要
-  读、怎么读；没有体时它一个字节都不会碰。
-- **prefix 与 body 彻底分成两个收发单元**：`send_*_prefix_async` 先走（前缀的内容构造时
-  就完全确定，先把 ring 的空间腾出来），`send_body_async` 再按模式搬体。
-- **新标准头**：`StdHeaderKey::Body_Transfer`（`0xA5`）与
-  `StdHeaderVal::Body_Transfer_Chunked`（`0x20`）；chunk 前缀是定长 2 字节大端 `u16`，
-  `0` 兼作终止块。
-
 ### Phase 3：实现资源 CRUD Demo
 
 任务：
 
-1. 在 `rpc_cs_demo` 中实现一个简单的内存资源表；
+1. 在 `rpc_demo` 中实现一个简单的内存资源表；
 2. 服务端处理 `Head / View / Post / Drop`；
 3. 客户端通过 `RequestBuilder` 发起这些请求并打印结果；
 4. 验证 `Post -> View -> Head -> Drop` 的完整资源生命周期。
@@ -300,7 +253,7 @@ cargo run -p rpc_demo -- client
 
 - 一个客户端 `Pull /topic/chat` 后，另一个客户端 `Push /topic/chat` 的消息能被实时收到；
 - 多个订阅者同时在线时，广播互不串流；
-- Push/Pull 会话结束后，服务端能正确清理订阅关系。
+- Push/Pull 会话结束或者中断时，服务端能正确清理订阅关系。
 
 ### Phase 5：并发与回归验证
 

@@ -303,6 +303,12 @@ where
     let mut reader = BodyReader::new(rx, transfer);
     let mut read = AsStdRead::new(&mut reader, tok);
     let value = rmp_serde::from_read::<_, T>(&mut read).map_err(map_decode_err_)?;
+    // 解出一个值并不等于「这条体读完了」：解码器只知道值在哪里结束，不知道体的边界在哪里。
+    // 剩下的部分必须一并读掉——分块体的终止块就在其中，不消费它，同一条 channel 上紧随
+    // 其后的字节（suffix stream）就会被下一条报文当成自己的开头。读干净的终点由体视图给
+    // 出：定长到声明长度为止，分块到终止块为止。
+    std::io::copy(&mut read, &mut std::io::sink())
+        .map_err(|err| MessageIoError::Io(err.to_string()))?;
     Ok(Option::Some(value))
 }
 

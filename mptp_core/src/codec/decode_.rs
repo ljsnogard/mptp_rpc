@@ -14,7 +14,7 @@ use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use super::{
     codec_::CodecError,
     config_::TrCodecConfig,
-    serde_::{Codec, CoundReadDecodeAsync, CoundReadDecodeFuture},
+    serde_::{Codec, CountingReaderDecodeAsync, CountingReaderDecodeFuture},
 };
 
 /// 解码的来源缓冲。
@@ -112,7 +112,7 @@ where
     {
         match self.driver_ {
             DecodeDriver::Serde(codec) => {
-                let async_ = CoundReadDecodeAsync::new(codec, self.data_, self.buff_);
+                let async_ = CountingReaderDecodeAsync::new(codec, self.data_, self.buff_);
                 DecodeMayCancelFuture::Serde(async_.may_cancel_with(cancel))
             }
         }
@@ -130,7 +130,7 @@ where
     K: TrCancellationToken,
 {
     /// 内置的 serde 类实现。
-    Serde(CoundReadDecodeFuture<'f, 'f, T, C, K>),
+    Serde(CountingReaderDecodeFuture<'f, 'f, T, C, K>),
 }
 
 impl<'f, T, C, K> Future for DecodeMayCancelFuture<'f, T, C, K>

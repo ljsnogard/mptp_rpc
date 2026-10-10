@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::{
     access_method::AccessMethod,
+    codec::Codec,
     specs::{HeaderVal, Headers, Status, StdHeaderKey, StdHeaderVal},
 };
 
@@ -13,68 +14,63 @@ use crate::{
 // TrRpcBody
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
-/// 报文体的**线上编码**。
+/// 报文体的**内容来源**。
 ///
-/// 实现这一个 trait 同时回答两个问题：体有多少字节、以及怎么把它写出去。两者都
-/// **不经过任何中转缓冲**——长度用「只数不写」的 sink 量出来，字节直接写进调用方给的
-/// `sink`（通常就是 ring 的写半边）。
+/// 实现这一个 trait 回答两件事：这条报文**有没有体**、以及怎么把它**写出去**。
 ///
-/// # 为什么不是「体的字节视图」
+/// # 为什么编码发生在「写出去」的那一刻
 ///
-/// 换成 `fn try_body_bytes(&self) -> Option<&[u8]>` 会逼着每个体类型先把编码结果落在
-/// 某块内存里（否则交不出 `&[u8]`），而那正是要杜绝的那次分配。这里反过来：体自己知道
-/// 怎么把内容**流进**一个 `Write`，调用方给什么就写什么。
+/// 体的编码规则属于业务类型（谁产生内容谁决定），而不属于协议层。协议层不预量长度、
+/// 不为体攒缓冲，只是在发送时把 `sink` 递过去：
 ///
-/// # 为什么这两个方法是同步的
+/// - **定长**：`sink` 是一个限长写口，写出量必须恰好等于头里声明的长度；
+/// - **分块**：`sink` 是一个分块写口，**写多少就是一块多大**——序列化器边编边写，
+///   体的总长直到发完都不必知道（见 `dev-notes/body-transfer-20261010-2020.md` §1、§3.1）。
 ///
-/// 它们包住的正是 `serde`——本框架唯一允许暂时用同步代码的地方。同步停在这一层，
-/// 不会外溢成调用方的语义：协议层的每个 IO 入口仍然是 `async`。
+/// 因此这里没有「先编一遍量长度」的方法：那要求体可重放，也把「边编边发」堵死。
 ///
-/// # Examples
+/// # 为什么体不是「任意 `Serialize` 类型」
 ///
-/// ```
-/// use mptp_core::messaging::{Nothing, TrRpcBody};
-///
-/// // 「没有体」是一个明确的类型，而不是一个恰好编成 nil 的值。
-/// assert!(TrRpcBody::try_encoded_len(&Nothing).expect("不该失败").is_none());
-///
-/// // 任何 `Serialize` 类型都可以直接当体，长度与写出量由同一个编码器决定。
-/// assert_eq!(TrRpcBody::try_encoded_len(&"hi").expect("不该失败"), Some(3usize));
-/// ```
+/// 「用什么格式编」是调用方的选择，不是类型系统能推出来的事实。业务值要用
+/// [`CodableBody`] 显式配上编码格式；已经编好的字节就是 `Vec<u8>` 自己；没有体用
+/// [`Nothing`]。协议层不接受「恰好实现了 `Serialize`」就自动成为体的做法——那会把
+/// 格式写死成某一种，也不是这个库该替使用者做的决定。
 pub trait TrRpcBody {
-    /// 体在线上占多少字节；`None` 表示这条报文**没有体**。
+    /// 本条报文是否有体。
     ///
-    /// # Errors
-    ///
-    /// 体编码失败时返回错误。
-    fn try_encoded_len(&self) -> Result<Option<usize>, BodyEncodeError>;
+    /// 返回 `false` 时发送路径**不会**调用 [`TrRpcBody::try_encode_into`]，接收方也
+    /// 一个字节都不读。
+    fn has_body(&self) -> bool {
+        true
+    }
 
-    /// 把自己编进 `sink`，返回写出的字节数；`None` 表示没有体。
-    ///
-    /// 返回的数目必须与 [`TrRpcBody::try_encoded_len`] 一致——写出方会当场核对。
+    /// 把体的内容写进 `sink`，返回写出的字节数。
     ///
     /// # Errors
     ///
     /// 体编码失败或写 `sink` 失败时返回错误。
-    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError>;
+    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<usize, BodyEncodeError>;
 
-    /// **借出**本体的全部线上字节（如果它本来就在内存里）。
+    /// 若长度**事先已知**，给出它；未知则 `None`。
     ///
-    /// 发送路径把体看成一个 [`TrBuffRead`](abs_buff::TrBuffRead) 流，因此需要**已经
-    /// 存在的字节**；`try_encode_into` 是 push 语义，给不出引用。于是这里回答另一个
-    /// 问题：「你的字节现在能不能直接借出来？」
-    ///
-    /// - [`EncodedBody`] 与任何「字节已在手上」的体：`Ok(Some(bytes))`；
-    /// - [`Nothing`]：`Ok(None)`（没有体，不是「借不出」）；
-    /// - 只有编码过程才知道字节长什么样的体（例如任意 `Serialize` 值）：默认实现返回
-    ///   [`BodyEncodeError::NotByteAccessible`]。这类体要在发送前先编码到一块内存
-    ///   （例如构造时就编进 [`EncodedBody`]），协议层**不会**为它临时分配缓存。
+    /// 它不是「能不能算出来」的问题，而是「现在手上有没有」：已经编好的字节有长度，
+    /// 尚未编码的业务值没有。协议层只用它做装配期的核对（声明了定长、而体又自称长度
+    /// 不同，就当场报错），**不**拿它去找长度。
     ///
     /// # Errors
     ///
-    /// 体有内容、却无法以借出的形式给出字节时返回错误。
-    fn try_as_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
-        Result::Err(BodyEncodeError::NotByteAccessible)
+    /// 体编码失败时返回错误。
+    fn try_known_len(&self) -> Result<Option<usize>, BodyEncodeError> {
+        Ok(Option::None)
+    }
+
+    /// 本体的编码格式对应的 `Body_Type` 标准头取值；答不出来就返回 `None`。
+    ///
+    /// 已经编好的原始字节（`Vec<u8>`）不携带格式信息，因此默认是 `None`；配上
+    /// 编码格式的 [`CodableBody`] 会给出它实际用的格式——`Body_Type` 该由**编码格式**
+    /// 决定，不该让调用方手写第二遍。
+    fn body_type_val(&self) -> Option<StdHeaderVal> {
+        Option::None
     }
 }
 
@@ -88,138 +84,129 @@ pub enum BodyEncodeError {
     /// 往 `sink` 写出时失败。
     #[error("体写出失败：{0}")]
     Io(String),
-
-    /// 体有内容，但其字节不是现成可借出的：发送路径要求体已经落在一块内存里。
-    ///
-    /// 这类体（例如任意 `Serialize` 值）应当先编码进一块内存——最直接的做法是构造请求
-    /// 时就编成 [`EncodedBody`]——协议层不会替它临时分配缓存（见 README §7 第 1 条）。
-    #[error("体的字节不是现成可借出的，请先把它编码到一块内存（例如 EncodedBody）再发送")]
-    NotByteAccessible,
 }
 
 /// 「什么都没有」：既表示报文**没有体**，也用作 suffix stream 的缺省标记。
 ///
-/// 它是一个**独立类型**而不是 `()`：`()` 也实现了 `Serialize`，若拿它当「没有体」的
-/// 标记，就会与 [`TrRpcBody`] 的批量实现撞在一起（编译器无法区分「`()` 表示空」与
-/// 「`()` 编成 nil」）。这里刻意让它**不实现** `Serialize`，两件事于是泾渭分明。
+/// 它是一个**独立类型**而不是 `()`：`()` 也可以被序列化成 nil，若拿它当「没有体」的
+/// 标记，就分不清「没有体」与「体是一个 nil」了。这里刻意让它不参与任何编码。
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Nothing;
 
 impl TrRpcBody for Nothing {
     #[inline]
-    fn try_encoded_len(&self) -> Result<Option<usize>, BodyEncodeError> {
-        Ok(Option::None)
+    fn has_body(&self) -> bool {
+        false
     }
 
     #[inline]
-    fn try_encode_into(
-        &self,
-        _sink: &mut dyn io::Write,
-    ) -> Result<Option<usize>, BodyEncodeError> {
-        Ok(Option::None)
-    }
-
-    #[inline]
-    fn try_as_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
-        Ok(Option::None)
+    fn try_encode_into(&self, _sink: &mut dyn io::Write) -> Result<usize, BodyEncodeError> {
+        Ok(0usize)
     }
 }
 
-/// 已经按 MessagePack **编好**的报文体。
+/// 字节串直接就是体：已经编好的内容不必再套一层壳。
 ///
-/// 它是「体已经在内存里了」这条事实的显式载体：构造它的那一刻编码就已经完成，写出时
-/// 只是把这串字节原样搬进 ring，不再二次编码。
+/// `Vec<u8>` 是「内容已经在手上」这条事实的最朴素载体——从别处转发来的字节、调用方自己
+/// 用别的工具编好的内容、乃至一段原始二进制，都是它。写出时原样交给 `sink`，不做二次
+/// 编码；长度因此是**已知**的（[`TrRpcBody::try_known_len`] 会给出它），定长模式下可以
+/// 直接声明 `Body_Size`。
 ///
-/// 想省掉这次内存里的编码，就直接把业务类型本身当体（`Request<MyMsg, Nothing>`）：
-/// 那样编码发生在写出时，字节直接落进 ring。
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct EncodedBody {
-    bytes_: Vec<u8>,
-}
-
-impl EncodedBody {
-    /// 由已经编好的字节构造。
-    pub const fn new(bytes: Vec<u8>) -> Self {
-        EncodedBody { bytes_: bytes }
-    }
-
-    /// 已编好的字节。
-    pub fn as_bytes(&self) -> &[u8] {
-        self.bytes_.as_slice()
-    }
-
-    /// 交出内部的字节。
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes_
-    }
-}
-
-impl TrRpcBody for EncodedBody {
+/// 要发的是**业务值**时用 [`CodableBody`]；要把一段 `&[u8]` 按流的形状发出去（不构造
+/// 报文对象）时，用 [`send_content_async`](super::body::send_content_async)。
+impl TrRpcBody for Vec<u8> {
     #[inline]
-    fn try_encoded_len(&self) -> Result<Option<usize>, BodyEncodeError> {
-        Ok(Option::Some(self.bytes_.len()))
+    fn has_body(&self) -> bool {
+        !self.is_empty()
     }
 
-    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError> {
-        sink.write_all(self.bytes_.as_slice())
+    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<usize, BodyEncodeError> {
+        sink.write_all(self.as_slice())
             .map_err(|err| BodyEncodeError::Io(err.to_string()))?;
-        Ok(Option::Some(self.bytes_.len()))
+        Ok(self.len())
     }
 
     #[inline]
-    fn try_as_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
-        Ok(Option::Some(self.bytes_.as_slice()))
+    fn try_known_len(&self) -> Result<Option<usize>, BodyEncodeError> {
+        Ok(Option::Some(self.len()))
     }
 }
 
-/// 只累加长度、不保存任何字节的 sink。
+/// **随发送而编码**的体：业务值与它的编码格式打包在一起。
 ///
-/// 它是「先编码一次拿长度」这件事不落缓冲的关键：编码器照样跑一遍，产物只留一个计数。
-#[derive(Clone, Copy, Debug, Default)]
-struct CountSink {
-    count_: usize,
+/// 它是「值体」的标准载体，也是 [`RequestBuilder`](super::request::RequestBuilder) 的
+/// `body` / `body_with` 入口存下来的东西。构造它**不做任何编码**——编码发生在
+/// [`TrRpcBody::try_encode_into`]，也就是真正往连接里写的那一刻：
+///
+/// - 大 body 不会卡住构造请求的那一行；
+/// - 编码器把字节逐段写进 `sink`，路径上没有中转缓冲，因此天然支持「边序列化边发送」；
+/// - 总长在写出去之前谁都不知道，所以它只配合**分块**传输（`try_known_len` 恒为 `None`）。
+///
+/// # Examples
+///
+/// ```
+/// use mptp_core::{
+///     codec::Codec,
+///     messaging::{CodableBody, TrRpcBody},
+/// };
+///
+/// let body = CodableBody::new("hi".to_string(), Codec::MsgPack);
+/// // 构造它不会做任何编码，长度自然也不知道。
+/// assert!(body.try_known_len().expect("不该失败").is_none());
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodableBody<TyData> {
+    data_: TyData,
+    codec_: Codec,
 }
 
-impl io::Write for CountSink {
-    #[inline]
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.count_ += buf.len();
-        Ok(buf.len())
+impl<TyData> CodableBody<TyData> {
+    /// 把业务值与它的编码格式打包。
+    pub const fn new(data: TyData, codec: Codec) -> Self {
+        CodableBody {
+            data_: data,
+            codec_: codec,
+        }
     }
 
-    #[inline]
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+    /// 本体的编码格式。
+    pub const fn codec(&self) -> Codec {
+        self.codec_
+    }
+
+    /// 业务值本身。
+    pub const fn data(&self) -> &TyData {
+        &self.data_
+    }
+
+    /// 交出业务值。
+    pub fn into_data(self) -> TyData {
+        self.data_
     }
 }
 
-/// 量出一个 `Serialize` 值按 MessagePack 编出来会占多少字节。
-fn measure_<T>(value: &T) -> Result<usize, BodyEncodeError>
+impl<TyData> TrRpcBody for CodableBody<TyData>
 where
-    T: Serialize,
+    TyData: Serialize,
 {
-    let mut sink = CountSink::default();
-    rmp_serde::encode::write(&mut sink, value)
-        .map_err(|err| BodyEncodeError::Encode(err.to_string()))?;
-    Ok(sink.count_)
-}
-
-// 任何 `Serialize` 类型都可以**直接**当报文体：编成 MessagePack，字节流进 sink。
-// `Nothing` 与 `EncodedBody` 都不实现 `Serialize`，因此与这条批量实现不冲突。
-impl<T> TrRpcBody for T
-where
-    T: Serialize,
-{
-    #[inline]
-    fn try_encoded_len(&self) -> Result<Option<usize>, BodyEncodeError> {
-        measure_(self).map(Option::Some)
-    }
-
-    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError> {
+    fn try_encode_into(&self, sink: &mut dyn io::Write) -> Result<usize, BodyEncodeError> {
         let mut count = CountingSink::new_(sink);
-        rmp_serde::encode::write(&mut count, self)
-            .map_err(|err| BodyEncodeError::Encode(err.to_string()))?;
-        Ok(Option::Some(count.written_()))
+        match self.codec_ {
+            // 编码器逐段写进 `sink`：不经过任何中转缓冲，写出多少字节只有写完才知道。
+            Codec::MsgPack => rmp_serde::encode::write(&mut count, &self.data_)
+                .map_err(|err| BodyEncodeError::Encode(err.to_string()))?,
+            Codec::Json => {
+                return Result::Err(BodyEncodeError::Encode(
+                    "JSON 编码尚未实现".to_string(),
+                ));
+            }
+        }
+        Ok(count.written_())
+    }
+
+    #[inline]
+    fn body_type_val(&self) -> Option<StdHeaderVal> {
+        Option::Some(self.codec_.body_type_val())
     }
 }
 
@@ -236,30 +223,27 @@ pub(crate) fn set_body_size_header_(headers: &mut Headers, size: usize) {
     headers.add_or_set_header(&key, &val);
 }
 
-/// 按体的实际长度攒出 `Body_Size` / `Body_Type` 两个头。
-///
-/// 长度用「只数不写」的方式量出来，因此这一步**不落任何缓冲**。没有体
-/// （`try_encoded_len` 给出 `None`）时返回空头：此时协议上也就不该出现这两个头。
-///
-/// # Errors
-///
-/// 体编码失败时返回错误。
-pub(crate) fn measured_headers_<TyBody>(body: &TyBody) -> Result<Headers, BodyEncodeError>
+/// 往头里写下「体是分块传输的」这条声明。
+pub(crate) fn set_chunked_transfer_header_(headers: &mut Headers) {
+    headers.add_or_set_header(
+        &StdHeaderKey::Body_Transfer.into(),
+        &HeaderVal::from(StdHeaderVal::Body_Transfer_Chunked),
+    );
+}
+
+/// 按体的自述补上 `Body_Type` 头（体答不出格式时什么都不做）。
+pub(crate) fn set_body_type_from_body_<TyBody>(headers: &mut Headers, body: &TyBody)
 where
     TyBody: TrRpcBody,
 {
-    let mut headers = Headers::new();
-    if let Option::Some(len) = body.try_encoded_len()? {
-        set_body_size_header_(&mut headers, len);
-        headers.add_or_set_header(
-            &StdHeaderKey::Body_Type.into(),
-            &HeaderVal::from(StdHeaderVal::Mime_Body_Type_MsgPack),
-        );
+    if let Option::Some(val) = body.body_type_val() {
+        headers.add_or_set_header(&StdHeaderKey::Body_Type.into(), &HeaderVal::from(val));
     }
-    Ok(headers)
 }
 
-/// 给 `&mut dyn Write` 套一层计数，好让体的批量实现能回报写出量。
+/// 给 `&mut dyn Write` 套一层计数：体要回报自己写出了多少字节。
+///
+/// 它只加一个 `usize`，不缓冲任何数据——记账与缓冲是两件事，这里刻意只做前者。
 struct CountingSink<'a> {
     inner_: &'a mut dyn io::Write,
     written_: usize,
@@ -329,32 +313,27 @@ where
 
     fn location(&self) -> &str;
 
-    /// 本条请求的体在线上占多少字节；`None` 表示没有体。
+    /// 本条请求**有没有体**。
+    fn has_body(&self) -> bool;
+
+    /// 体的长度若**事先已知**，给出它；未知则 `None`。
     ///
-    /// 写出方据此核对 `Body_Size` 头；`None` 对应「头缺省或为 0」，两者必须一致。
+    /// 它是装配期核对的依据：头里声明了定长、而体自述的长度不同，就应当在上网之前失败。
     ///
     /// # Errors
     ///
     /// 体编码失败时返回错误。
-    fn try_body_len(&self) -> Result<Option<usize>, BodyEncodeError>;
+    fn try_body_known_len(&self) -> Result<Option<usize>, BodyEncodeError>;
 
-    /// 把本条请求的体编进 `sink`。
+    /// 把本条请求的体编进 `sink`，返回写出的字节数；没有体时返回 `None`。
+    ///
+    /// `sink` 由发送路径按头里声明的模式给出：定长是一个限长写口（写出量必须恰好等于
+    /// 声明的长度），分块是一个分块写口（写多少就是一块多大）。
     ///
     /// # Errors
     ///
     /// 体编码失败或写 `sink` 失败时返回错误。
-    fn try_write_body(&self, sink: &mut dyn io::Write)
-    -> Result<Option<usize>, BodyEncodeError>;
-
-    /// 借出本条请求的**体字节**，供发送路径按头部声明的模式搬运。
-    ///
-    /// `Ok(None)` 表示没有体；体有内容却给不出字节时返回
-    /// [`BodyEncodeError::NotByteAccessible`]。
-    ///
-    /// # Errors
-    ///
-    /// 体的字节不是现成可借出的时返回错误。
-    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError>;
+    fn try_write_body(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError>;
 }
 
 pub trait TrRpcResponse
@@ -363,28 +342,23 @@ where
 {
     fn status(&self) -> Status;
 
-    /// 本条回复的体在线上占多少字节；`None` 表示没有体。语义同
-    /// [`TrRpcRequest::try_body_len`]。
+    /// 本条回复**有没有体**。
+    fn has_body(&self) -> bool;
+
+    /// 体的长度若**事先已知**，给出它；未知则 `None`。语义同
+    /// [`TrRpcRequest::try_body_known_len`]。
     ///
     /// # Errors
     ///
     /// 体编码失败时返回错误。
-    fn try_body_len(&self) -> Result<Option<usize>, BodyEncodeError>;
+    fn try_body_known_len(&self) -> Result<Option<usize>, BodyEncodeError>;
 
     /// 把本条回复的体编进 `sink`，语义同 [`TrRpcRequest::try_write_body`]。
     ///
     /// # Errors
     ///
     /// 体编码失败或写 `sink` 失败时返回错误。
-    fn try_write_body(&self, sink: &mut dyn io::Write)
-    -> Result<Option<usize>, BodyEncodeError>;
-
-    /// 借出本条回复的**体字节**，语义同 [`TrRpcRequest::try_body_bytes`]。
-    ///
-    /// # Errors
-    ///
-    /// 体的字节不是现成可借出的时返回错误。
-    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError>;
+    fn try_write_body(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError>;
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -393,8 +367,9 @@ where
 
 /// The content that a client will send to the server and ask for something.
 ///
-/// A request may or may not have a body, of which content length must be
-/// declared in the standard header with `StdHeaderKey::Body_Size` key.
+/// A request may or may not have a body. When it has one, the standard
+/// headers must declare **how it is transferred**: either its exact length
+/// (`Body_Size`) or that it comes in chunks (`Body_Transfer: Chunked`).
 ///
 /// A request does not include the stream that its content length is not
 /// declared in the header. However, a client could append content after the
@@ -435,23 +410,24 @@ impl<TyBody, TyPush> Request<TyBody, TyPush> {
 
     /// 给请求附加报文体。
     ///
-    /// 这里只按值存下体，**不做**序列化：体的线上编码由 [`TrRpcBody`] 决定，发生在
-    /// 写出的时候，字节直接落进 ring。要顺手把 `Body_Size` / `Body_Type` 头也写好，
-    /// 用 [`Request::with_measured_body`]。
+    /// 这里只按值存下体，**不做**任何编码：编码发生在发送的那一刻（见 [`TrRpcBody`]）。
+    /// 要顺手把传输模式的头也写好，用 [`Request::with_sized_body`] 或
+    /// [`Request::with_chunked_body`]——体的长度是否已知，决定了能用哪一个。
     pub fn with_body(mut self, body: TyBody) -> Self {
         self.body_ = Option::Some(body);
         self
     }
 
-    /// 由方法、路径与体造一条请求，并顺手把 `Body_Size` / `Body_Type` 两个头写好。
+    /// 由方法、路径与体造一条请求，并声明体按**定长**传输。
     ///
-    /// 这是「手工构造请求」的推荐入口：头里的长度与实际体长度必然一致，而核对这些正是
-    /// 写出方会做的事（不一致会被拒绝写出）。
+    /// 前提是体自己的长度**事先已知**（例如 `Vec<u8>`）：协议层不会为了填
+    /// `Body_Size` 去把体编一遍——那会要求体可重放，也把「边编边发」堵死。长度未知的体
+    /// 请走 [`Request::with_chunked_body`]。
     ///
     /// # Errors
     ///
-    /// 体编码失败时返回错误。
-    pub fn with_measured_body(
+    /// 体长度未知、或体编码失败时返回错误。
+    pub fn with_sized_body(
         method: AccessMethod,
         path: impl Into<String>,
         body: TyBody,
@@ -459,10 +435,37 @@ impl<TyBody, TyPush> Request<TyBody, TyPush> {
     where
         TyBody: TrRpcBody,
     {
-        let headers = measured_headers_(&body)?;
+        let Some(len) = body.try_known_len()? else {
+            return Result::Err(BodyEncodeError::Encode(
+                "体的长度事先未知，无法声明 Body_Size；请改用分块传输".to_string(),
+            ));
+        };
+        let mut headers = Headers::new();
+        set_body_size_header_(&mut headers, len);
+        set_body_type_from_body_(&mut headers, &body);
         Ok(Request::new(method, path)
             .with_headers(headers)
             .with_body(body))
+    }
+
+    /// 由方法、路径与体造一条请求，并声明体按**分块**传输。
+    ///
+    /// 这是「值体」的标准入口：总长直到发完都不必知道，编码器边编边写，写多少就是一块
+    /// 多大（见 `dev-notes/body-transfer-20261010-2020.md` §1）。
+    pub fn with_chunked_body(
+        method: AccessMethod,
+        path: impl Into<String>,
+        body: TyBody,
+    ) -> Self
+    where
+        TyBody: TrRpcBody,
+    {
+        let mut headers = Headers::new();
+        set_chunked_transfer_header_(&mut headers);
+        set_body_type_from_body_(&mut headers, &body);
+        Request::new(method, path)
+            .with_headers(headers)
+            .with_body(body)
     }
 
     pub const fn method(&self) -> AccessMethod {
@@ -522,29 +525,23 @@ where
     }
 
     #[inline]
-    fn try_body_len(&self) -> Result<Option<usize>, BodyEncodeError> {
+    fn has_body(&self) -> bool {
+        self.body_.as_ref().is_some_and(TrRpcBody::has_body)
+    }
+
+    #[inline]
+    fn try_body_known_len(&self) -> Result<Option<usize>, BodyEncodeError> {
         match self.body_.as_ref() {
-            Option::Some(body) => body.try_encoded_len(),
+            Option::Some(body) => body.try_known_len(),
             Option::None => Ok(Option::None),
         }
     }
 
     #[inline]
-    fn try_write_body(
-        &self,
-        sink: &mut dyn io::Write,
-    ) -> Result<Option<usize>, BodyEncodeError> {
+    fn try_write_body(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError> {
         match self.body_.as_ref() {
-            Option::Some(body) => body.try_encode_into(sink),
-            Option::None => Ok(Option::None),
-        }
-    }
-
-    #[inline]
-    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
-        match self.body_.as_ref() {
-            Option::Some(body) => body.try_as_bytes(),
-            Option::None => Ok(Option::None),
+            Option::Some(body) if body.has_body() => body.try_encode_into(sink).map(Option::Some),
+            _ => Ok(Option::None),
         }
     }
 }
@@ -554,8 +551,9 @@ where
 /// The content that the server will react to the client when being asked for
 /// something.
 ///
-/// A response may or may not have a body, of which content length must be
-/// declared in the standard header with `StdHeaderKey::Body_Size` key.
+/// A response may or may not have a body. When it has one, the standard
+/// headers must declare **how it is transferred**, with the same two
+/// mutually exclusive forms as a request.
 ///
 /// A response does not include the stream that its content length is not
 /// declared in the header. However, a server could append content after the
@@ -602,22 +600,41 @@ impl<TyBody, TyPush> Response<TyBody, TyPush> {
         self
     }
 
-    /// 由状态码与体造一条回复，并顺手把 `Body_Size` / `Body_Type` 两个头写好。
-    ///
-    /// 语义同 [`Request::with_measured_body`]：handler 回体时用这个入口，头里的长度与
-    /// 实际体长度必然一致。
+    /// 由状态码与体造一条回复，并声明体按**定长**传输。语义同
+    /// [`Request::with_sized_body`]。
     ///
     /// # Errors
     ///
-    /// 体编码失败时返回错误。
-    pub fn with_measured_body(status: Status, body: TyBody) -> Result<Self, BodyEncodeError>
+    /// 体长度未知、或体编码失败时返回错误。
+    pub fn with_sized_body(status: Status, body: TyBody) -> Result<Self, BodyEncodeError>
     where
         TyBody: TrRpcBody,
     {
-        let headers = measured_headers_(&body)?;
+        let Some(len) = body.try_known_len()? else {
+            return Result::Err(BodyEncodeError::Encode(
+                "体的长度事先未知，无法声明 Body_Size；请改用分块传输".to_string(),
+            ));
+        };
+        let mut headers = Headers::new();
+        set_body_size_header_(&mut headers, len);
+        set_body_type_from_body_(&mut headers, &body);
         Ok(Response::new(status)
             .with_headers(headers)
             .with_body(body))
+    }
+
+    /// 由状态码与体造一条回复，并声明体按**分块**传输。语义同
+    /// [`Request::with_chunked_body`]。
+    pub fn with_chunked_body(status: Status, body: TyBody) -> Self
+    where
+        TyBody: TrRpcBody,
+    {
+        let mut headers = Headers::new();
+        set_chunked_transfer_header_(&mut headers);
+        set_body_type_from_body_(&mut headers, &body);
+        Response::new(status)
+            .with_headers(headers)
+            .with_body(body)
     }
 
     pub const fn headers(&self) -> Option<&Headers> {
@@ -665,29 +682,23 @@ where
     }
 
     #[inline]
-    fn try_body_len(&self) -> Result<Option<usize>, BodyEncodeError> {
+    fn has_body(&self) -> bool {
+        self.body_.as_ref().is_some_and(TrRpcBody::has_body)
+    }
+
+    #[inline]
+    fn try_body_known_len(&self) -> Result<Option<usize>, BodyEncodeError> {
         match self.body_.as_ref() {
-            Option::Some(body) => body.try_encoded_len(),
+            Option::Some(body) => body.try_known_len(),
             Option::None => Ok(Option::None),
         }
     }
 
     #[inline]
-    fn try_write_body(
-        &self,
-        sink: &mut dyn io::Write,
-    ) -> Result<Option<usize>, BodyEncodeError> {
+    fn try_write_body(&self, sink: &mut dyn io::Write) -> Result<Option<usize>, BodyEncodeError> {
         match self.body_.as_ref() {
-            Option::Some(body) => body.try_encode_into(sink),
-            Option::None => Ok(Option::None),
-        }
-    }
-
-    #[inline]
-    fn try_body_bytes(&self) -> Result<Option<&[u8]>, BodyEncodeError> {
-        match self.body_.as_ref() {
-            Option::Some(body) => body.try_as_bytes(),
-            Option::None => Ok(Option::None),
+            Option::Some(body) if body.has_body() => body.try_encode_into(sink).map(Option::Some),
+            _ => Ok(Option::None),
         }
     }
 }

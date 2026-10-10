@@ -67,7 +67,7 @@ where
     }
 }
 
-#[gen_may_cancel_future(CoundReadDecode, pub, new(pub(in crate::codec)))]
+#[gen_may_cancel_future(CountingReaderDecode, pub, new(pub(in crate::codec)))]
 async fn count_read_decode_async_<'f, T, C, K>(
     codec: &'f Codec,
     data: &'f mut MaybeUninit<T>,
@@ -85,7 +85,11 @@ where
     let value = match codec {
         Codec::MsgPack => rmp_serde::from_read::<_, T>(&mut read)
             .map_err(|err| CodecError::Decode(err.to_string()))?,
-        Codec::Json => todo!("Support JSON codec at the moment."),
+        Codec::Json => {
+            return Result::Err(CodecError::Decode(
+                "JSON 解码尚未实现".to_string(),
+            ));
+        }
     };
     data.write(value);
     Result::Ok(read.read_count())
