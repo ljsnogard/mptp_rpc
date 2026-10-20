@@ -2,8 +2,6 @@
 resolver = "3"
 members = [
     "abs_mptp",
-    # "abs_rpc_client_mptp_smux",
-
     "core_rpc_mptp_smux_v1",
     "mptp_smux",
     "rpc_svc_macro",
