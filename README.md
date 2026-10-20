@@ -1,6 +1,6 @@
 # MPTP — Multiplexed RPC / Resource Protocol
 
-> **MPTP = Message Packing and Transportation Protocol**  
+> **MPTP = Multiplexed P2P Transportation Protocol**  
 > 一个建立在“支持多 stream / stream multiplexing 的底层连接”之上的 RPC / resource protocol。
 
 MPTP 不试图重新实现 TCP、QUIC 或连接复用，而是假定底层已经提供：
@@ -16,7 +16,7 @@ MPTP 不试图重新实现 TCP、QUIC 或连接复用，而是假定底层已经
 
 ## 1. 定位与目标
 
-MPTP 的目标是成为 **二进制优先的、面向资源与 RPC 的、天然支持流式通信** 的协议。
+MPTP 的目标是成为 **二进制优先的、面向资源与 RPC 的、支持多流并发通信** 的协议。
 
 它同时具备三种能力：
 
@@ -41,27 +41,25 @@ MPTP 的目标是成为 **二进制优先的、面向资源与 RPC 的、天然�
 
 ## 3. 协议分层设计
 
-MPTP 从下到上分为 5 层：
+MPTP 从下到上分为 4 层：
 
 ```text
-┌──────────────────────────────────────────────────────────┐
-│ L4 会话 / 流式语义层                                       │
-│   Push / Pull / Call、suffix stream、会话关联、实时双向流   │
-├──────────────────────────────────────────────────────────┤
-│ L3 资源访问语义层                                          │
-│   7 种 AccessMethod、Status、path 路由                     │
-├──────────────────────────────────────────────────────────┤
+┌────────────────────────────────────────────────────────────┐
+│ L3 RPC 资源访问 / 会话 / 流式语义层                        │
+│   7 种 AccessMethod, MessagePack 序列化                    │
+│   请求路由、消息广播和订阅                                 │
+├────────────────────────────────────────────────────────────┤
 │ L2 消息 / 编码层                                           │
-│   Request / Response、Headers、Body_Size / Body_Type      │
-│   MessagePack / rmp-serde 序列化                          │
-├──────────────────────────────────────────────────────────┤
-│ L1 通道抽象层                                              │
-│   TrMuxConn / TrChannel                                   │
-│   一个 Channel = 一对方向相反的流                          │
-├──────────────────────────────────────────────────────────┤
+│   Request / Response、Headers、Body、suffix stream         │
+│   请求/答复、会话、实时推送、拉取、Status、path            │
+├────────────────────────────────────────────────────────────┤
+│ L1 流复用通信抽象层                                        │
+│   abs_smux::TrConnection / TrDockBinding                   │
+│   一个 Channel 最基本的双向双工通信流                      │
+├────────────────────────────────────────────────────────────┤
 │ L0 底层多流连接                                            │
-│   TCP+多路复用 / QUIC / iroh / 自定义传输                   │
-└──────────────────────────────────────────────────────────┘
+│   TCP / QUIC / iroh / 自定义传输                           │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ### L0：底层多流连接
@@ -88,20 +86,26 @@ MPTP 只依赖底层提供的能力，不在协议内部重新实现：
 
 ### L2：消息 / 编码层
 
-对应 `crates/rpc_core/src/messaging.rs`。
+对应 `mptp_core/src/messaging/`。
 
 - `Request` 由 `method_ + path_ + headers_` 组成；
 - `Response` 由 `status_ + headers_` 组成；
-- 头部目前使用 `rmp-serde` / MessagePack 序列化，但这是可以替换的，不能写死
-- 如果有 body，通过标准头 `Body_Size` 声明长度、`Body_Type` 声明类型；
-- body 是跟随在消息头后面的原始二进制内容；
+- 前缀固定使用 MessagePack 序列化；业务体的编码由 `Body_Type` 声明，可以由使用者替换
+- 如果有 body，**必须**在头里声明它是怎么传的：`Body_Size` 声明定长，或者
+  `Body_Transfer: Chunked` 声明分块（两者互斥）；`Body_Type` 声明类型；
+- body 是跟随在消息头后面的原始二进制内容：定长体就是那么多字节，分块体是一串
+  「2 字节大端长度 + 内容」的块，以长度 `0` 的块收尾；
+- 头里用 `Data_Type_Id` **显式声明**这段字节是什么类型；标识由类型统一给出（
+  `impl_get_type_id_u64!` 声明的类型名稳定哈希），在**设定体的时候**自动写入，接收方据此
+  校验自己期待的类型，不靠「两边代码里恰好写着同一个 Rust 类型」这种默契
+  （见 `dev-notes/mptp-protocol-20261020-0200.md` 的类型标识一节）；
 - 在 body 之后，协议还允许同一 stream 上继续追加“suffix stream”数据，用于实时流。
 
 关键点：**头部不是 HTTP 文本**，而是二进制友好的 `String or u16` 联合体。
 
 ### L3：资源访问语义层
 
-对应 `crates/rpc_core/src/access_method.rs` 和 `specs.rs`。
+对应 `mptp_core/src/access_method.rs` 和 `specs.rs`。
 
 MPTP 定义了 7 种资源访问方法：
 
@@ -139,13 +143,22 @@ MPTP 定义了 7 种资源访问方法：
 
 | 概念 | 代码位置 | 状态 |
 |---|---|---|
-| 7 种访问方法 | `crates/rpc_core/src/access_method.rs` | 已定义 |
-| HeaderKey / HeaderVal / Status / 标准头 | `crates/rpc_core/src/specs.rs` | 已定义 |
-| Request / Response / 编解码 | `crates/rpc_core/src/messaging.rs` | 基础已定义，部分 `todo!` |
-| 客户端 RequestBuilder / 回复体决策 | `crates/rpc_core/src/client.rs` | 部分实现，含 `todo!` |
-| 多流连接 / Channel 抽象 | `crates/rpc_core/src/transport.rs` | 已定义 trait |
-| iroh / QUIC 传输实现 | `crates/rpc_transport_iroh/` | 当前为空，待实现/恢复 |
-| 可运行 Demo | `crates/rpc_cs_demo/` | 当前为空壳，待实现 |
+| 7 种访问方法 | `mptp_core/src/access_method.rs` | 已定义 |
+| HeaderKey / HeaderVal / Status / 标准头 | `mptp_core/src/specs.rs` | 已定义，含数字 / 文本两种形态的构造入口 |
+| Request / Response / 报文体的线上编码 | `mptp_core/src/messaging/basic.rs` | 已定义（`TrRpcBody`） |
+| 前缀与报文体的字节 IO | `mptp_core/src/messaging/io_.rs` | 已实现（直接读写 ring，无中转缓冲） |
+| 限长读写（只借出预设额度） | `mptp_core/src/messaging/limit.rs` | 已实现（`TrBuffRead` / `TrBuffWrite` 的衍生类型） |
+| 分块帧（块自带长度、显式结束） | `mptp_core/src/messaging/chunked.rs` | 已实现（`ChunkedWrite` / `ChunkedRead`） |
+| 体的模式判定 / 发送 / 接收视图 | `mptp_core/src/messaging/body.rs` | 已实现（`BodyTransfer` / `send_body_async` / `body_reader`） |
+| 体的载体与编码格式 | `mptp_core/src/messaging/basic.rs`、`mptp_core/src/codec/` | 已实现（`Vec<u8>` 直接是体 / `CodableBody` / `Codec`；编码推迟到发送时） |
+| 类型标识与解码分派 | `mptp_core/src/codec/type_id_.rs`、`mptp_core/src/messaging/body.rs`、`rpc_demo/src/protocol_.rs` | 已实现（`TrGetTypeId` 稳定哈希 → 设定体时自动写头 → `recv_body_as_async` 按类型校验）；`CodecRegistry` 尚未接进收发路径 |
+| RequestBuilder / HeadersBuilder | `mptp_core/src/messaging/request.rs`、`client/headers_.rs` | 已实现 |
+| 回复体决策 | `mptp_core/src/messaging/response.rs` | 已实现（`ResponseBodyDecision`） |
+| 客户端会话（发请求、读前缀与体） | `mptp_core/src/client/` | 已实现（前缀与体分两步，体按头声明的模式搬运） |
+| 服务端 dispatcher / handler 链 | `mptp_core/src/serving/` | 已实现 |
+| body 的语义编解码（按 `Data_Type_Id` 分派） | `mptp_core/src/codec/` | `Codec` 已用于报文体的编码格式；`CodecRegistry` 的注册与校验接口已定义，**尚未**接进收发路径 |
+| 多流连接 / Channel 抽象 | 由 `abs_smux` 提供 | 本 crate 只实现 trait，不自定义传输 |
+| 可运行 Demo | `rpc_demo/` | 真实 TCP socket 上的一次一问一答 |
 
 ---
 
@@ -174,11 +187,16 @@ MPTP 定义了 7 种资源访问方法：
 ### 建议 CLI
 
 ```text
-cargo run -p mptp_rpc_cs_demo -- server
-cargo run -p mptp_rpc_cs_demo -- client
+cargo run -p rpc_demo -- server
+cargo run -p rpc_demo -- client
 ```
 
-Demo 内部使用 `mptp_rpc_transport_iroh` 作为底层多流传输。
+传输走本机同级的 `smux_v1`（`abs_smux` 契约的现成实现）。
+
+> 当前 `rpc_demo` 在真实 TCP socket 上跑一轮**三次调用**：两次正常调用（`EchoRequest` 与
+> `SumRequest`，各带自己的 `Data_Type_Id`），外加一次故意用**未登记的类型标识**——用来证明
+> 类型是靠报文头里的声明确定的，而不是靠两端代码的默契。上面这份 CLI 形状已经就位
+> （角色 + `--listen` / `--peer` / `--dock`），资源 CRUD 与 Push / Pull 会沿着它继续长。
 
 ---
 
@@ -186,31 +204,18 @@ Demo 内部使用 `mptp_rpc_transport_iroh` 作为底层多流传输。
 
 ### Phase 0：理解现状
 
-- 阅读 `crates/rpc_core/src/transport.rs`、`messaging.rs`、`specs.rs`、`access_method.rs`、`client.rs`；
+- 阅读 `mptp_core/src/` 下的 `transport/`、`messaging/`、`specs.rs`、`access_method.rs`、`client/`；
 - 确认当前 `rpc_transport_iroh/src/` 和 `rpc_cs_demo/src/main.rs` 均为空壳；
-- 确认 `crates/rpc_core` 中仍存在 `todo!()`，需要按协议语义补齐。
+- 确认 `mptp_core` 中仍存在 `todo!()`，需要按协议语义补齐。
 
 **完成标准**：
 1. 能画出上述 5 层分层图，并能说清每个 crate 的职责。
-2. 能在 `crates/rpc_core` 中给出每一层的向下层依赖的 API 是什么，对上提供的 API 是什么。这些 API 可能会在后续有修改，但必须有一个阶段性的成果，确保生成的代码功能是合理设计的。
+2. 能在 `mptp_core` 中给出每一层的向下层依赖的 API 是什么，对上提供的 API 是什么。这些 API 可能会在后续有修改，但必须有一个阶段性的成果，确保生成的代码功能是合理设计的。
 
-### Phase 1：打通传输层
+### Phase 1：打通传输层（已在 mptp_cs_smoke 验证）
 
-任务：
 
-1. 在 `crates/rpc_transport_iroh` 中实现 `TrMuxConn` / `TrChannel`；
-2. 基于 iroh QUIC 的 `open_bi` / `accept_bi` 得到双向 stream；
-3. 将 iroh 的异步流桥接到 `abs_buff` 的 `TrBuffTryRead` / `TrBuffTryWrite`。可以先将 iroh 中的流数据写入到一个 RingBuffer （该依赖已经引入），不要重新发明过多的 abs_buff 中的 trait 所需要的类型，而是使用现有的；
-4. 提供 `connect_by_id`、`connect_by_addr`、`accept` 等构造方式（可参考 git 历史中的旧实现）；
-5. 抽象出一个根据 header 查找必要的 serializer 和 deserializer 的功能，可以暂时先固定满足几个测试类。
-5. 为传输层写一个端到端 roundtrip 测试：打开 channel，写数据，读回并校验。
-
-**完成标准**：
-
-- `cargo test -p mptp_rpc_transport_iroh` 通过；
-- 能证明一条 connection 上可同时开多条 channel 并各自读写。
-
-### Phase 2：完善 core 消息与客户端
+### Phase 2：完善 core 消息与客户端（已完成）
 
 任务：
 
@@ -223,20 +228,20 @@ Demo 内部使用 `mptp_rpc_transport_iroh` 作为底层多流传输。
 **完成标准**：
 
 - 单元测试覆盖：无 body 请求、有 body 请求、回复体存在/不存在、协议违规检测；
-- `cargo test -p mptp_rpc_core` 通过。
+- `cargo test -p mptp_core` 通过。
 
 ### Phase 3：实现资源 CRUD Demo
 
 任务：
 
-1. 在 `rpc_cs_demo` 中实现一个简单的内存资源表；
+1. 在 `rpc_demo` 中实现一个简单的内存资源表；
 2. 服务端处理 `Head / View / Post / Drop`；
 3. 客户端通过 `RequestBuilder` 发起这些请求并打印结果；
 4. 验证 `Post -> View -> Head -> Drop` 的完整资源生命周期。
 
 **完成标准**：
 
-- `cargo run -p mptp_rpc_cs_demo -- server` 与 `cargo run -p mptp_rpc_cs_demo -- client` 能完成一轮 CRUD；
+- `cargo run -p rpc_demo -- server` 与 `cargo run -p rpc_demo -- client` 能完成一轮 CRUD；
 - 多个 `View` 并发执行时不会互相阻塞。
 
 ### Phase 4：实现实时 Push / Pull
@@ -252,7 +257,7 @@ Demo 内部使用 `mptp_rpc_transport_iroh` 作为底层多流传输。
 
 - 一个客户端 `Pull /topic/chat` 后，另一个客户端 `Push /topic/chat` 的消息能被实时收到；
 - 多个订阅者同时在线时，广播互不串流；
-- Push/Pull 会话结束后，服务端能正确清理订阅关系。
+- Push/Pull 会话结束或者中断时，服务端能正确清理订阅关系。
 
 ### Phase 5：并发与回归验证
 
@@ -272,12 +277,8 @@ Demo 内部使用 `mptp_rpc_transport_iroh` 作为底层多流传输。
 
 ## 7. AI 开发注意事项
 
-- **保持分层边界**：传输层只实现 `TrMuxConn` / `TrChannel`，不要把协议语义塞进去。
-- **不要重新发明传输**：iroh 已经提供连接和流复用，Demo 只做适配。
-- **保持二进制协议**：不要引入 HTTP 文本解析；报文头按现有 `serde` / MessagePack 设计，body 按 `Body_Type` 声明的类型处理。
-- **注意 stream 对齐**：读取方必须严格按照 `Body_Size` 决定是否读取 body；协议违规时宁可丢弃当前 channel，也不要污染后续字节。
-- **优先参考现有代码注释**：`messaging.rs` 中关于 suffix stream、body 决策的注释是协议意图的第一手资料。
-- **每阶段可编译可测试**：先让 transport 独立通过，再做消息层，最后做 Demo，避免一次性大改导致难以定位问题。
+1. **IO 路径上不允许通过 `Vec` 等堆上数据结构，绕开对 ring 直接读写。**
+2. **整个 `mptp_rpc` 从底层到应用层协议全是 async**；本框架只在 `serde` 那里暂时妥协用同步的代码，不允许因为 `serde` 牵连改掉 async 的语义。
 
 ---
 

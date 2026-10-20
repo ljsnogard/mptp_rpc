@@ -1,0 +1,40 @@
+[package]
+edition = "2024"
+name = "mptp_smux"
+version = "0.1.0"
+
+description = "MPTP implementation based on `abs_smux`"
+repository = "https://github.com/ljsnogard/msgpk_rpc_core"
+keywords = ["rpc"]
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+# 协议层的形状全在这里：本 crate 只实现它规定的 trait，不重复定义协议。
+abs_mptp = { path = "../abs_mptp" }
+
+# **MPTP 前缀的线上格式由本 crate 自己拥有**：`mp_denco` 直接面向 `abs_buff` 的段接口，
+# 编解码器按值推进，不把整个前缀预攒进 `Vec`。`abs_denco` 是格式抽象，`denco_macro`
+# 提供头表的派生；`alloc-collections` 打开 `BTreeMap` 实现，头表因此可以直接转发给内部的
+# `Arc<BTreeMap<u16, HeaderVal>>`。
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git", features = ["alloc-collections"] }
+denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+
+# 派生代码会直接引用 `abs_cancel` 与 `gen_mcf2`；两者都取 `cancel_rs` 这一份，
+# 与 `abs_buff` / `mp_denco` 的依赖来源一致，避免同名不同源的 trait 实例。
+abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+
+mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
+
+thiserror = "2.0.20"
+
+# **本 crate 不选后端**：前缀编解码直接读写 ring 的段接口，不做任何同步等待，
+# 因此不需要 `abs_art_facade::Runtime`。后端的点亮是全图并集的，由**应用**（下游 crate）
+# 自己声明 `abs_art-facade/rt-*` 即可，不需要经本 crate 逐层转发。
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

@@ -1,0 +1,29 @@
+[package]
+edition = "2024"
+name = "rpc_svc_macro"
+version = "0.1.0"
+
+description = "`#[rpc(service = \"...\")]` 属性宏：从 service trait 生成 RPC 客户端 / 服务端样板。"
+readme = "README.md"
+license = "MIT/Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# 过程宏框架：`#[zyn::attribute]` 负责注册属性宏，`zyn!` 模板负责拼装展开结果。
+zyn = "0.5.4"
+
+# zyn 重导出 syn / proc-macro2；这里额外点亮 `visit` 两个 feature，分析借用与生命周期时
+# 用得上。feature 是并集，不会改变 zyn 自身的行为。
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "visit", "visit-mut"] }
+
+[dev-dependencies]
+# 集成测试要真实编译生成代码，因此需要 core 运行时与它用到的 denco / 取消令牌。
+abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+core_rpc_mptp_smux_v1 = { path = "../core_rpc_mptp_smux_v1", default-features = false }
+denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }

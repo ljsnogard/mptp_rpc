@@ -1,0 +1,30 @@
+[package]
+edition = "2024"
+name = "abs_mptp-tests"
+version = "0.1.0"
+publish = false
+
+description = "abs_mptp 的协议层集成测试：显式选后端，让后端选择留在测试侧"
+categories = ["no-std"]
+license = "MIT/Apache-2.0"
+
+[dependencies]
+
+[dev-dependencies]
+# 被测对象与被它透传的缓冲层。`abs_mptp` 自身不带任何 `rt-*`，后端由本仓显式选（见下）。
+abs_mptp = { path = "../abs_mptp" }
+abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+
+# **本仓就是「应用」**：后端由这里唯一决定，正是 `abs_mptp` 不该替使用者做的事。
+#
+# - `default-features = false` 是**必须**的：如果放任 `abs_art-facade` 的默认
+#   `rt-compio` 进来，全图会同时出现 `backend-compio` 与 `default-backend-tokio` 两条
+#   默认声明，撞上 `abs_art-bridge` 的「只能声明一个默认后端」守卫而编译失败；
+# - `rt-tokio` 是唯一默认声明，于是全图的裸名 `Runtime` 就是 tokio；
+# - `abs_buff_stdio_adapt` 走默认 feature 转发 `rt-compio` 只**链接** compio 后端、
+#   不占默认位，两者并存不冲突。
+abs_art-facade = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0", default-features = false, features = ["rt-tokio"] }
+# abs_art-facade = { path = "../../../abs_art/abs_art-facade", default-features = false, features = ["rt-tokio"] }
+
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

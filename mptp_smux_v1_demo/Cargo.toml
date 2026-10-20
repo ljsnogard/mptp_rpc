@@ -1,0 +1,49 @@
+[package]
+name = "mptp_smux_v1_demo"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+description = "mptp_smux 的下游实现：在 smux_v1 + denco 上跑通一问一答，用来验证 mptp_smux 的实现符合实际。"
+readme = "README.md"
+publish = false
+
+[dependencies]
+# 被测对象：`mptp_smux` 只认 `abs_mptp` 的形状与 `abs_smux` 的契约，本 crate 是它的**使用者**。
+mptp_smux = { path = "../mptp_smux" }
+abs_mptp = { path = "../abs_mptp" }
+
+
+# 连接侧的读写适配器（环 ↔ socket）。
+buffex_tokio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+
+abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+# 读体时把段接口临时暴露成 `Read`（只搬原始字节，不参与序列化）。
+abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+
+# 业务体序列化：`abs_denco` 是抽象层，`mp_denco` 是 MessagePack 实现，`denco_macro` 提供派生。
+# 前缀头表由 `mptp_smux::messaging` 拥有，本 crate 只派生自己的业务类型。
+# 派生代码还会直接引用 `abs_cancel` 与 `gen_mcf2`，因此两者也必须是本 crate 的直接依赖。
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+
+abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+abs_mm = { git = "https://gitee.com/lino_snsalias/abs_mm.git", branch = "dev/0.3.0" }
+smux_v1 = { git = "https://gitee.com/lino_snsalias/smux_v1.rs.git", default-features = false }
+mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
+
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+anyhow = "1"
+futures = "0.3"
+thiserror = "2.0.20"
+
+[features]
+# 只跑 tokio：`smux_v1` 的 socket 装配只在 tokio 下验证过。
+default = ["rt-tokio"]
+rt-tokio = ["smux_v1/test-tokio-runtime"]
+
+# crate 名与 bin 名都是下划线形式，nightly cargo 的 kebab-case 命名 lint 在这里纯属噪音。
+[lints.cargo]
+non_kebab_case_bins = "allow"

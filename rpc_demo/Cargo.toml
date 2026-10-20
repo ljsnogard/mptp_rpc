@@ -1,0 +1,43 @@
+[package]
+name = "rpc_demo"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+description = "MPTP RPC 的手动实现试验：UDS 上的 workspace/session CRUD。"
+readme = "README.md"
+publish = false
+
+[dependencies]
+# 只使用 Phase 0 保留的配置与分配骨架；RPC 层在本 demo 里手动实现。
+core_rpc_mptp_smux_v1 = { path = "../core_rpc_mptp_smux_v1", default-features = false }
+mptp_smux = { path = "../mptp_smux" }
+abs_mptp = { path = "../abs_mptp" }
+
+# UDS + smux_v1。
+smux_v1 = { git = "https://gitee.com/lino_snsalias/smux_v1.rs.git", default-features = false }
+buffex_tokio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+abs_art = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0" }
+
+# body 编解码：与 mptp_smux_v1_demo 同一套 denco / MessagePack 基础设施。
+abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+abs_mm = { git = "https://gitee.com/lino_snsalias/abs_mm.git", branch = "dev/0.3.0" }
+mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
+
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+anyhow = "1"
+thiserror = "2.0.20"
+
+[features]
+default = ["rt-tokio"]
+rt-tokio = ["smux_v1/test-tokio-runtime"]
+
+# crate 名与 bin 名都是下划线形式，nightly cargo 的 kebab-case 命名 lint 在这里纯属噪音。
+[lints.cargo]
+non_kebab_case_bins = "allow"
