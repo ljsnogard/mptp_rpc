@@ -33,10 +33,14 @@ use mptp_smux::{
 
 use crate::{
     body_::{
-        BodyRing_, K_BODY_RING_CAP_, decode_from_async_, encode_into_async_, read_body_async_,
+        BodyRing_, K_BODY_RING_CAP_,
+        decode_from_async_,
+        encode_into_async_,
+        read_body_async_,
     },
     error_::{RpcError, RpcResult},
     interface_::{TrRpcInterface, location},
+    x_deps::{abs_cancel, abs_mptp},
 };
 
 /// 客户端极简代理。

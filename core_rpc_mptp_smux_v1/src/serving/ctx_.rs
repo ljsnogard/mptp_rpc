@@ -25,6 +25,7 @@ use abs_mptp::{
     messaging::chunked::ChunkedEncode,
     spec::{Status, StdHeaderKey, StdHeaderVal},
 };
+use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::{
     messaging::{Headers, ResponsePrefix, write_response_prefix_async},
     serving::{
@@ -35,10 +36,14 @@ use mptp_smux::{
 
 use crate::{
     body_::{
-        BodyRing_, K_BODY_RING_CAP_, decode_body_from_async_, encode_into_async_, write_body_async_,
+        BodyRing_, K_BODY_RING_CAP_,
+        decode_body_from_async_,
+        encode_into_async_,
+        write_body_async_,
     },
     error_::{RpcError, RpcResult},
     serving::TrServingConfig,
+    x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };
 
 /// 一次 RPC 调用的服务端上下文。
@@ -158,7 +163,7 @@ impl<'a, C: TrServingConfig> RpcCallCtx<'a, C> {
 
 /// 解码请求 body 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
-#[crate::x_deps::gen_mcf2::gen_may_cancel_future(DecodeCall, pub(crate), new(pub(crate)))]
+#[gen_may_cancel_future(DecodeCall, pub(crate), new(pub(crate)))]
 async fn decode_call_async_<'a, 'f, C, T, TyTok>(
     ctx: &'f mut RpcCallCtx<'a, C>,
     cancel: TyTok,
@@ -181,7 +186,7 @@ where
 
 /// 写成功回复的 step 函数。
 #[allow(clippy::needless_lifetimes)]
-#[crate::x_deps::gen_mcf2::gen_may_cancel_future(ReplyOk, pub(crate), new(pub(crate)))]
+#[gen_may_cancel_future(ReplyOk, pub(crate), new(pub(crate)))]
 async fn reply_ok_async_<'a, 'f, C, T, TyTok>(
     ctx: &'f mut RpcCallCtx<'a, C>,
     value: T,
@@ -232,7 +237,7 @@ where
 
 /// 写错误回复的 step 函数。
 #[allow(clippy::needless_lifetimes)]
-#[crate::x_deps::gen_mcf2::gen_may_cancel_future(ReplyStatus, pub(crate), new(pub(crate)))]
+#[gen_may_cancel_future(ReplyStatus, pub(crate), new(pub(crate)))]
 async fn reply_status_async_<'a, 'f, C, TyTok>(
     ctx: &'f mut RpcCallCtx<'a, C>,
     status: Status,

@@ -24,27 +24,18 @@ mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 
 # body 的 ring 读写。RPC 层只提供字节源/汇，不在会话状态机上另开一条路径；错误体的
 # 小段字节也直接走段拷贝，不再经过 `abs_buff_stdio_adapt`。
-abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+# abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 
 # body 的「编码进 ring，读半边交给 send_req_body_async」需要 SPSC ring。buffex 是
 # `abs_buff` 的上层（ring / 链式缓冲），与本 workspace 共用同一份本地 `abs_buff`。
-buffex = { path = "../../buffex.rs/buffex" }
-
-# 同一 task 内 join「编码进 ring」与「从 ring 搬运」两条分支；不替使用者选运行时。
-futures = "0.3"
-
-# 取消令牌与具名可取消 future。**必须与 `mptp_smux` 用同一个源**（`cancel_rs`）：
-# `TrMayCancel` 是同名 trait，两个实例会被编译器视为不同类型。
-abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
-gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
-
-# **协议形状**：前缀、访问方法、标准头、状态码与 body 定长/分块形状都来自这里。
-abs_mptp = { path = "../abs_mptp" }
+buffex = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 
 mptp_smux = { path = "../mptp_smux" }
 # abs_smux = { path = "../../../abs_smux" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 
+# 同一 task 内 join「编码进 ring」与「从 ring 搬运」两条分支；不替使用者选运行时。
+futures = "0.3"
 thiserror = { version = "2.0.20" }
 
 [dev-dependencies]

@@ -91,15 +91,17 @@ pub use serving::{
 
 pub mod x_deps {
     pub use abs_art_facade;
-    pub use abs_buff;
-    pub use abs_cancel;
     pub use abs_denco;
-    pub use abs_mptp;
+
+    pub use buffex;
+    pub use buffex::x_deps::{
+        abs_async_iter, abs_buff, abs_cancel,
+        anylr, funty, gen_mcf2,
+    };
     pub use denco_macro;
     pub use futures;
-    pub use gen_mcf2;
     pub use mm_ptr;
     pub use mp_denco;
     pub use mptp_smux;
-    pub use mptp_smux::x_deps::{abs_mm, abs_smux, anylr, funty};
+    pub use mptp_smux::x_deps::{abs_mm, abs_mptp, abs_smux};
 }

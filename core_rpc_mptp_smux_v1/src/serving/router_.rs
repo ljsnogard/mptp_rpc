@@ -25,18 +25,21 @@
 //! and forwards one [`RpcJob`] to the service queue. Channel cleanup belongs to the worker for
 //! routed jobs, and to the router itself for rejected requests.
 
+use futures::{SinkExt, channel::mpsc};
+
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
     serving::TrReqHandler,
     spec::{Status, access_method::AccessMethod},
 };
-use futures::{SinkExt, channel::mpsc};
+use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::{
     messaging::Headers,
     serving::config::{ChannelRx, ChannelTx},
 };
 use thiserror::Error;
 
+use crate::x_deps::{abs_cancel, abs_mptp, gen_mcf2};
 use super::{
     config::TrServingConfig,
     ctx_::RpcCallCtx,
@@ -259,8 +262,7 @@ fn build_service_trie_<T>(
 }
 
 impl<C: TrServingConfig> TrReqHandler<C> for RpcRouter<C> {
-    type HandleAsync<'f>
-        = RouterHandleAsync<'f, 'f, C>
+    type HandleAsync<'f> = RouterHandleAsync<'f, 'f, C>
     where
         Self: 'f;
 
@@ -280,7 +282,7 @@ impl<C: TrServingConfig> TrReqHandler<C> for RpcRouter<C> {
 
 /// [`RpcRouter::handle_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes, clippy::too_many_arguments)]
-#[crate::x_deps::gen_mcf2::gen_may_cancel_future(RouterHandle, pub, new(pub(crate)))]
+#[gen_may_cancel_future(RouterHandle, pub, new(pub(crate)))]
 async fn router_handle_async_<'f, C, TyTok>(
     router: &'f RpcRouter<C>,
     method: AccessMethod,
