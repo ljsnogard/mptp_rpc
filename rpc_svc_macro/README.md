@@ -6,7 +6,7 @@ Use it in the protocol crate shared by the client and the server:
 
 ```rust
 use abs_cancel::TrMayCancel;
-use core_rpc_mptp_smux_v1::RpcResult;
+use rpc_core_v1::messaging::RpcResult;
 use rpc_svc_macro::rpc;
 
 #[derive(Clone, denco_macro::TrEncodable, denco_macro::TrDecodable)]
@@ -39,7 +39,7 @@ pub struct ApiV1;
   - 同时派生 `TrEncodable` 与 `TrDecodable`；
 - `impl GoodsCustomerService for ClientProxy<'_, C, I>`：
   - 每个方法把参数转成 owned 字段，构造 `Call` 变体；
-  - 调用 `core_rpc_mptp_smux_v1::client::call_unary_async`；
+  - 调用 `rpc_core_v1::client::call_unary_async`；
 - 隐藏模块里的 `dispatch_async`：
   - 解码 `Call`，`match` 方法变体；
   - 调用用户实现，把成功值写成 `200 Ok`，业务错误按 `RpcError::status()` 写成错误回复；
@@ -111,8 +111,8 @@ core 提供 `RpcJob<C>` / `ServiceRoute<C>` 以及 router 契约
 
 ## 依赖
 
-生成代码使用 `core_rpc_mptp_smux_v1` 的运行时与 `x_deps`。协议 crate 的 denco 派生会引用
+生成代码使用 `rpc_core_v1` 的运行时与 `x_deps`。协议 crate 的 denco 派生会引用
 `abs_denco`、`abs_cancel` 与 `gen_mcf2`；`#[rpc]` 生成的隐藏模块已经为 body enum 补齐了这些
-导入，但用户自己的业务类型派生仍需要它们（或通过 `use core_rpc_mptp_smux_v1::x_deps::...`
+导入，但用户自己的业务类型派生仍需要它们（或通过 `use rpc_core_v1::x_deps::...`
 引入）。`gen_mcf2` 的展开目前要求 crate 打开
 `#![feature(impl_trait_in_assoc_type)]`。

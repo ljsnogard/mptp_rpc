@@ -1,4 +1,4 @@
-//! `core_rpc_mptp_smux_v1`：`smux_v1` 之上的 MPTP RPC 核心库。
+//! `rpc_core_v1`：`smux_v1` 之上的 MPTP RPC 核心库。
 //!
 //! # 当前阶段：Phase 1（宏所需的最小运行时）
 //!
@@ -6,13 +6,13 @@
 //! **RPC 语义层**。当前已经落地 `#[rpc(service = "...")]` 宏所依赖的最小运行时：
 //!
 //! - 客户端 / 服务端配置（连接、垛口、ring 工厂、分配约定）；
-//! - [`RpcError`] / [`RpcResult`] 与业务状态码映射；
-//! - [`TrRpcInterface`] 与 `/{interface}/{service}` 路径拼装；
-//! - 客户端极简代理 [`ClientProxy`]、[`TrRpcClientExt`] 与通用 unary 调用；
-//! - 服务端一次调用的上下文 [`RpcCallCtx`]：解码请求、写回复、收尾；
-//! - [`RpcJob`] / [`ServiceRoute`] 与 router 契约 [`TrRpcServiceRoute`] / [`TrRpcRouter`]：
+//! - [`crate::messaging::RpcError`] / [`crate::messaging::RpcResult`] 与业务状态码映射；
+//! - [`crate::messaging::TrRpcInterface`] 与 `/{interface}/{service}` 路径拼装；
+//! - 客户端极简代理 [`crate::client::ClientProxy`]、[`crate::client::TrRpcClientExt`] 与通用 unary 调用；
+//! - 服务端一次调用的上下文 [`crate::serving::RpcCallCtx`]：解码请求、写回复、收尾；
+//! - [`crate::serving::RpcJob`] / [`crate::serving::ServiceRoute`] 与 router 契约 [`crate::serving::TrRpcServiceRoute`] / [`crate::serving::TrRpcRouter`]：
 //!   把「找 service」与「把 job 交给 service」拆成可替换的两层，再由
-//!   [`RpcRouterHandler`] 接入 MPTP 服务端；
+//!   [`crate::serving::RpcRouterHandler`] 接入 MPTP 服务端；
 //! - body 的 MessagePack 流式编解码：ring 边编码边发送，定长 / 分块帧都可解码。
 //!
 //! `#[rpc(service = "...")]` 的 worker 与 `#[rpc(path = "...", services = [...])]` 的
@@ -25,8 +25,8 @@
 //! - 路径只由 **interface + service** 组成，方法名**不出现在 path 上**；
 //! - 一个 service 的多个关联函数组织进一个 **body enum**；变体名直接用函数名，字段直接用
 //!   参数名，不再额外生成参数结构体；
-//! - service trait 的 `SERVICE_PATH` 由宏注入；客户端方法由宏对统一的 [`ClientProxy`] 生成；
-//! - 服务端 dispatch 由宏生成 `match`，一次调用的解码 / 回复 / 收尾由 [`RpcCallCtx`] 承担。
+//! - service trait 的 `SERVICE_PATH` 由宏注入；客户端方法由宏对统一的 [`crate::client::ClientProxy`] 生成；
+//! - 服务端 dispatch 由宏生成 `match`，一次调用的解码 / 回复 / 收尾由 [`crate::serving::RpcCallCtx`] 承担。
 //!
 //! # 分层位置
 //!
@@ -43,7 +43,7 @@
 //! ```
 //!
 //! 具体的前缀树 router 实现不在本 crate，而在 `rpc_router_trie`；本 crate 只保留
-//! 「怎么找」与「怎么送」的契约，以及把两者接入 MPTP 服务端的 [`RpcRouterHandler`]。
+//! 「怎么找」与「怎么送」的契约，以及把两者接入 MPTP 服务端的 [`crate::serving::RpcRouterHandler`]。
 //!
 //! # 为什么两端在同一个库里
 //!
@@ -51,7 +51,7 @@
 //! 本 crate 必须同时给出客户端与服务端的形状。Phase 1 之后，这条理由仍然成立：客户端有
 //! 通用 unary 调用，服务端有一次调用的解码 / 回复 / 收尾上下文。
 //!
-//! # `core_rpc_mptp_smux_v1`: the RPC core on top of `smux_v1`
+//! # `rpc_core_v1`: the RPC core on top of `smux_v1`
 //!
 //! Phase 1 provides the minimal runtime needed by `#[rpc(service = "...")]`: the unified
 //! error type, interface path composition, the minimal client proxy with unary calls, the

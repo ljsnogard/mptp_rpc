@@ -1,4 +1,4 @@
-# core_rpc_mptp_smux_v1
+# rpc_core_v1
 
 The core library of RPC over `MPTP` based on `smux_v1`.
 

@@ -11,8 +11,8 @@
 //! # 分配器从哪来
 //!
 //! 工厂持有一个**分配器实例**，它的类型来自使用者的分配约定
-//! （[`TrClienAllocConfig`](crate::client::TrClienAllocConfig) /
-//! [`TrServingAllocConfig`](crate::serving::TrServingAllocConfig) 的 `RingAlloc`）。实例在
+//! （[`TrRpcClientAllocConfig`] /
+//! [`TrServingAllocConfig`] 的 `RingAlloc`）。实例在
 //! `with_ctx` 里现场取——环境只带「哪条子流」的信息，内存来源是**配置**的事，不该混进环境。
 //!
 //! 因此「按本文档这两个工厂造内存」这条路上，`RingAlloc` 必须能无参构造（`Default`）且能
@@ -28,7 +28,7 @@
 //! # 产物为什么是具名的 future 类型
 //!
 //! 契约把 `get_prepared_async` 的返回类型写成关联类型（而不是 RPITIT），是为了让 future 成为
-//! 使用者手里**可命名**的一等值。本模块因此走 [`gen_may_cancel_future`]：它给每个 step 函数
+//! 使用者手里**可命名**的一等值。本模块因此走 `gen_may_cancel_future`：它给每个 step 函数
 //! 生成一个具名、可取消的产物类型。
 //!
 //! # `prep_`: where the per-channel ring memory comes from

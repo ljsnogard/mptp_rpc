@@ -26,7 +26,8 @@ pub type RpcResult<T> = core::result::Result<T, RpcError>;
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::{RpcError, x_deps::abs_mptp::spec::Status};
+/// use rpc_core_v1::messaging::RpcError;
+/// use rpc_core_v1::x_deps::abs_mptp::spec::Status;
 ///
 /// let err = RpcError::Service {
 ///     status: Status::NotFound,

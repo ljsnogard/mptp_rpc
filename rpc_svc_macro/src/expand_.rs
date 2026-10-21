@@ -62,8 +62,8 @@ fn body_enum_(model: &ServiceModel_) -> ::zyn::TokenStream {
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(
-            ::core_rpc_mptp_smux_v1::x_deps::denco_macro::TrEncodable,
-            ::core_rpc_mptp_smux_v1::x_deps::denco_macro::TrDecodable
+            ::rpc_core_v1::x_deps::denco_macro::TrEncodable,
+            ::rpc_core_v1::x_deps::denco_macro::TrDecodable
         )]
         pub enum Call {
             #variants
@@ -111,7 +111,7 @@ fn client_impl_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
     let methods = quote!(#(#methods)*);
     let shared_conn_bound = if model.requires_send_sync_ {
         quote! {
-            <__C as ::core_rpc_mptp_smux_v1::x_deps::abs_mptp::client::config::TrConfig>::SharedConn:
+            <__C as ::rpc_core_v1::x_deps::abs_mptp::client::config::TrConfig>::SharedConn:
                 Sync,
         }
     } else {
@@ -120,11 +120,11 @@ fn client_impl_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
 
     Result::Ok(quote! {
         impl<'__a, __C, __I> #trait_ident
-            for ::core_rpc_mptp_smux_v1::client::ClientProxy<'__a, __C, __I>
+            for ::rpc_core_v1::client::ClientProxy<'__a, __C, __I>
         where
-            __C: ::core_rpc_mptp_smux_v1::client::TrRpcClientConfig + Send + Sync + 'static,
+            __C: ::rpc_core_v1::client::TrRpcClientConfig + Send + Sync + 'static,
             #shared_conn_bound
-            __I: ::core_rpc_mptp_smux_v1::TrRpcInterface + Send + Sync + 'static,
+            __I: ::rpc_core_v1::messaging::TrRpcInterface + Send + Sync + 'static,
         {
             #methods
         }
@@ -167,7 +167,7 @@ fn client_method_(model: &ServiceModel_, method: &MethodModel_) -> syn::Result<:
         #(#attrs)*
         #sig {
             let request: #module_ident::Call = #variant;
-            ::core_rpc_mptp_smux_v1::client::call_unary_async::<
+            ::rpc_core_v1::client::call_unary_async::<
                 __C,
                 __I,
                 #module_ident::Call,
@@ -210,9 +210,9 @@ fn return_type_(output_ty: &Type, method: &MethodModel_) -> syn::Result<Type> {
         .collect::<Vec<_>>();
 
     syn::parse2(quote! {
-        impl ::core_rpc_mptp_smux_v1::x_deps::abs_cancel::TrMayCancel<
+        impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
             #lifetime,
-            MayCancelOutput = ::core_rpc_mptp_smux_v1::RpcResult<#output_ty>
+            MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<#output_ty>
         >
         #(#extra)*
     })
@@ -231,22 +231,22 @@ fn dispatch_module_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
         pub mod #module_ident {
             #[allow(unused_imports)]
             use super::*;
-            use ::core_rpc_mptp_smux_v1::x_deps::abs_cancel;
-            use ::core_rpc_mptp_smux_v1::x_deps::abs_cancel::{
+            use ::rpc_core_v1::x_deps::abs_cancel;
+            use ::rpc_core_v1::x_deps::abs_cancel::{
                 TrCancellationToken,
                 TrMayCancel,
             };
-            use ::core_rpc_mptp_smux_v1::x_deps::abs_denco;
-            use ::core_rpc_mptp_smux_v1::x_deps::futures;
-            use ::core_rpc_mptp_smux_v1::x_deps::futures::StreamExt as _;
-            use ::core_rpc_mptp_smux_v1::x_deps::gen_mcf2;
-            use ::core_rpc_mptp_smux_v1::serving::{
+            use ::rpc_core_v1::x_deps::abs_denco;
+            use ::rpc_core_v1::x_deps::futures;
+            use ::rpc_core_v1::x_deps::futures::StreamExt as _;
+            use ::rpc_core_v1::x_deps::gen_mcf2;
+            use ::rpc_core_v1::serving::{
                 RpcCallCtx,
                 RpcJob,
                 ServiceRoute,
                 TrServingConfig,
             };
-            use ::core_rpc_mptp_smux_v1::RpcResult;
+            use ::rpc_core_v1::messaging::RpcResult;
 
             #body_enum
             #step
@@ -264,7 +264,7 @@ fn dispatch_step_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
 
     Result::Ok(quote! {
         #[allow(clippy::needless_lifetimes)]
-        #[::core_rpc_mptp_smux_v1::x_deps::gen_mcf2::gen_may_cancel_future(
+        #[::rpc_core_v1::x_deps::gen_mcf2::gen_may_cancel_future(
             Dispatch,
             pub(crate),
             new(pub(crate))
@@ -410,7 +410,7 @@ fn worker_(model: &ServiceModel_) -> ::zyn::TokenStream {
             pub fn new(service: __S) -> Self {
                 Self::with_capacity(
                     service,
-                    ::core_rpc_mptp_smux_v1::serving::K_DEFAULT_SERVICE_QUEUE_CAP,
+                    ::rpc_core_v1::serving::K_DEFAULT_SERVICE_QUEUE_CAP,
                 )
             }
 
@@ -566,24 +566,24 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
     let run_tree = join_tree_(&runners);
 
     quote! {
-        impl ::core_rpc_mptp_smux_v1::TrRpcInterface for #struct_ident {
+        impl ::rpc_core_v1::messaging::TrRpcInterface for #struct_ident {
             const PATH: &'static str = #path;
         }
 
-        impl<__C> ::core_rpc_mptp_smux_v1::client::ServiceSelector<__C> for #struct_ident
+        impl<__C> ::rpc_core_v1::client::ServiceSelector<__C> for #struct_ident
         where
-            __C: ::core_rpc_mptp_smux_v1::client::TrRpcClientConfig,
+            __C: ::rpc_core_v1::client::TrRpcClientConfig,
         {
             type View<'__a>
-                = ::core_rpc_mptp_smux_v1::client::ClientProxy<'__a, __C, #struct_ident>
+                = ::rpc_core_v1::client::ClientProxy<'__a, __C, #struct_ident>
             where
                 Self: '__a,
                 __C: '__a;
 
             fn select<'__a>(
-                client: &'__a ::core_rpc_mptp_smux_v1::x_deps::mptp_smux::client::MptpClient<__C>,
+                client: &'__a ::rpc_core_v1::x_deps::mptp_smux::client::MptpClient<__C>,
             ) -> Self::View<'__a> {
-                ::core_rpc_mptp_smux_v1::client::ClientProxy::new(client)
+                ::rpc_core_v1::client::ClientProxy::new(client)
             }
         }
 
@@ -591,14 +591,14 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
             /// 为这个 interface 建立每个 service 的队列与 worker 组。
             ///
             /// `C` 是服务端配置；调用点通常由后续的
-            /// [`TrRpcRouter::add_interface`](::core_rpc_mptp_smux_v1::serving::TrRpcRouter::add_interface)
+            /// [`TrRpcRouter::add_interface`](::rpc_core_v1::serving::TrRpcRouter::add_interface)
             /// 推导。若编译器无法推导，可用
             /// `ApiV1::workers::<ServingCfg, _, _>(...)` 显式指定。
             pub fn workers<__C, #(#service_idents),*>(
                 #(#param_idents: #service_idents),*
             ) -> #workers_ident<__C, #(#service_idents),*>
             where
-                __C: ::core_rpc_mptp_smux_v1::serving::TrServingConfig,
+                __C: ::rpc_core_v1::serving::TrServingConfig,
                 #(#service_idents: #trait_paths),*
             {
                 #workers_ident::new(#(#param_idents),*)
@@ -612,7 +612,7 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
         #[doc(hidden)]
         pub struct #workers_ident<__C, #(#service_idents),*>
         where
-            __C: ::core_rpc_mptp_smux_v1::serving::TrServingConfig,
+            __C: ::rpc_core_v1::serving::TrServingConfig,
             #(#service_idents: #trait_paths),*
         {
             #(#field_idents: #module_paths::Worker<#service_idents, __C>),*
@@ -620,7 +620,7 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
 
         impl<__C, #(#service_idents),*> #workers_ident<__C, #(#service_idents),*>
         where
-            __C: ::core_rpc_mptp_smux_v1::serving::TrServingConfig,
+            __C: ::rpc_core_v1::serving::TrServingConfig,
             #(#service_idents: #trait_paths),*
         {
             /// 建立全部 service 的 worker；由 `ApiV1::workers` 调用。
@@ -634,10 +634,10 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
             }
 
             /// 收集全部 service 的注册项，供
-            /// [`TrRpcRouter::add_interface`](::core_rpc_mptp_smux_v1::serving::TrRpcRouter::add_interface)
+            /// [`TrRpcRouter::add_interface`](::rpc_core_v1::serving::TrRpcRouter::add_interface)
             /// 插入该 interface 的 service 注册表。
             pub fn routes(&self) -> ::std::vec::Vec<
-                ::core_rpc_mptp_smux_v1::serving::ServiceRoute<__C>,
+                ::rpc_core_v1::serving::ServiceRoute<__C>,
             > {
                 ::std::vec![#(self.#field_idents.route()),*]
             }
@@ -645,9 +645,9 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
             /// 并发驱动全部 service worker；返回的 future 可取消。
             pub fn run_async<'__f>(
                 &'__f mut self,
-            ) -> impl ::core_rpc_mptp_smux_v1::x_deps::abs_cancel::TrMayCancel<
+            ) -> impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
                 '__f,
-                MayCancelOutput = ::core_rpc_mptp_smux_v1::RpcResult<()>,
+                MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<()>,
             > + '__f
             where
                 __C: '__f,
@@ -659,7 +659,7 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
 
         /// `Workers::run_async` 的 step 函数。
         #[allow(clippy::needless_lifetimes)]
-        #[::core_rpc_mptp_smux_v1::x_deps::gen_mcf2::gen_may_cancel_future(
+        #[::rpc_core_v1::x_deps::gen_mcf2::gen_may_cancel_future(
             #run_prefix,
             pub(crate),
             new(pub(crate))
@@ -667,11 +667,11 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
         async fn #run_fn_ident<'__f, __C, #(#service_idents),*, __Tok>(
             workers: &'__f mut #workers_ident<__C, #(#service_idents),*>,
             cancel: __Tok,
-        ) -> ::core_rpc_mptp_smux_v1::RpcResult<()>
+        ) -> ::rpc_core_v1::messaging::RpcResult<()>
         where
-            __C: ::core_rpc_mptp_smux_v1::serving::TrServingConfig,
+            __C: ::rpc_core_v1::serving::TrServingConfig,
             #(#service_idents: #trait_paths),*,
-            __Tok: ::core_rpc_mptp_smux_v1::x_deps::abs_cancel::TrCancellationToken,
+            __Tok: ::rpc_core_v1::x_deps::abs_cancel::TrCancellationToken,
         {
             let #workers_ident {
                 #(#field_idents: #local_idents),*
@@ -693,14 +693,14 @@ fn join_tree_(runners: &[::zyn::TokenStream]) -> ::zyn::TokenStream {
         [single] => single.clone(),
         [] => quote! {
             async {
-                ::core::result::Result::<(), ::core_rpc_mptp_smux_v1::RpcError>::Ok(())
+                ::core::result::Result::<(), ::rpc_core_v1::messaging::RpcError>::Ok(())
             }
         },
         _ => {
             let middle = runners.len() / 2usize;
             let left = join_tree_(&runners[..middle]);
             let right = join_tree_(&runners[middle..]);
-            quote!(::core_rpc_mptp_smux_v1::x_deps::futures::future::try_join(#left, #right))
+            quote!(::rpc_core_v1::x_deps::futures::future::try_join(#left, #right))
         }
     }
 }
@@ -715,7 +715,7 @@ mod tests_ {
     /// Test that return-type rebuilding keeps extra bounds and uses fully qualified paths.
     ///
     /// - 手段：构造一个带 `+ Send` 的方法模型，重建返回类型。
-    /// - 判断：输出 token 同时包含 `impl ::core_rpc_mptp_smux_v1` 与 `+ Send`。
+    /// - 判断：输出 token 同时包含 `impl ::rpc_core_v1` 与 `+ Send`。
     ///
     /// - Means: build a method model with `+ Send` and rebuild its return type.
     /// - Verdict: the tokens contain both the fully qualified `impl` and `+ Send`.
@@ -732,10 +732,7 @@ mod tests_ {
         };
         let ty = return_type_(&method.output_ty_, &method).expect("返回类型应当重建成功");
         let text = quote!(#ty).to_string().replace(' ', "");
-        assert!(
-            text.contains("::core_rpc_mptp_smux_v1"),
-            "应使用全限定路径：{text}"
-        );
+        assert!(text.contains("::rpc_core_v1"), "应使用全限定路径：{text}");
         assert!(text.contains("Send"), "应保留额外 bound：{text}");
     }
 

@@ -6,7 +6,7 @@
 //! #![feature(impl_trait_in_assoc_type)]
 //!
 //! use abs_cancel::TrMayCancel;
-//! use core_rpc_mptp_smux_v1::RpcResult;
+//! use rpc_core_v1::messaging::RpcResult;
 //! use rpc_svc_macro::rpc;
 //!
 //! #[derive(denco_macro::TrEncodable, denco_macro::TrDecodable)]
@@ -108,7 +108,7 @@ use zyn::syn::{self, spanned::Spanned};
 /// #![feature(impl_trait_in_assoc_type)]
 ///
 /// use abs_cancel::TrMayCancel;
-/// use core_rpc_mptp_smux_v1::{RpcResult, TrRpcInterface};
+/// use rpc_core_v1::messaging::{RpcResult, TrRpcInterface};
 /// use rpc_svc_macro::rpc;
 ///
 /// #[derive(denco_macro::TrEncodable, denco_macro::TrDecodable)]

@@ -3,7 +3,7 @@ edition = "2024"
 name = "rpc_router_trie"
 version = "0.1.0"
 
-description = "`core_rpc_mptp_smux_v1` 的前缀树 router 实现。"
+description = "`rpc_core_v1` 的前缀树 router 实现。"
 repository = "https://github.com/ljsnogard/msgpk_rpc_core"
 keywords = ["rpc", "router"]
 license = "MIT/Apache-2.0"

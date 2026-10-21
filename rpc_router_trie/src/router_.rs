@@ -3,7 +3,7 @@
 //! [`RpcRouter`] 只实现 core 的 [`TrRpcRouter`]：它回答「一个 location 命中哪个
 //! service」，并持有每个 service 的 [`ServiceRoute`]。把 job 交给 service、未命中时的
 //! `404` / `405` 回复与 channel 收尾，都由
-//! [`RpcRouterHandler`](core_rpc_mptp_smux_v1::serving::RpcRouterHandler) 完成。
+//! [`RpcRouterHandler`](rpc_core_v1::serving::RpcRouterHandler) 完成。
 //!
 //! 两级路径都按**完整路径段**匹配，支持最长前缀；`api/v10` 不会误命中 `api/v1`。
 //! 同一个 interface 或同一个 interface 下的同一个 service 重复注册会返回
@@ -33,12 +33,12 @@ struct InterfaceEntry_<C: TrServingConfig> {
 /// 一个 server 可以注册多个 interface（`ApiV1`、`ApiV2`……），每个 interface 内部再按
 /// service 的 `SERVICE_PATH` 注册。匹配失败不会把 channel 交给 worker；是否写 `404` 由
 /// 接入方（通常是
-/// [`RpcRouterHandler`](core_rpc_mptp_smux_v1::serving::RpcRouterHandler)）决定。
+/// [`RpcRouterHandler`](rpc_core_v1::serving::RpcRouterHandler)）决定。
 ///
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::serving::TrServingConfig;
+/// use rpc_core_v1::serving::TrServingConfig;
 /// use rpc_router_trie::{RpcRouter, RpcRouterError};
 ///
 /// fn register_interface<C: TrServingConfig>(

@@ -312,7 +312,7 @@ fn client_find_<'a, 'f, C, I>(
 where
     'a: 'f,
     C: TrRpcClientConfig + Send + Sync + 'static,
-    <C as core_rpc_mptp_smux_v1::x_deps::abs_mptp::client::config::TrConfig>::SharedConn: Sync,
+    <C as rpc_core_v1::x_deps::abs_mptp::client::config::TrConfig>::SharedConn: Sync,
     I: TrRpcInterface + Send + Sync + 'static,
 {
     proxy.find(name)
@@ -328,7 +328,7 @@ fn client_create_<'a, 'f, C, I>(
 where
     'a: 'f,
     C: TrRpcClientConfig + Send + Sync + 'static,
-    <C as core_rpc_mptp_smux_v1::x_deps::abs_mptp::client::config::TrConfig>::SharedConn: Sync,
+    <C as rpc_core_v1::x_deps::abs_mptp::client::config::TrConfig>::SharedConn: Sync,
     I: TrRpcInterface + Send + Sync + 'static,
 {
     let _ = proxy.list();

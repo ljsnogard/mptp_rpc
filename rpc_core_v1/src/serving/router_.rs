@@ -58,7 +58,7 @@ use crate::{
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::serving::{TrRpcRouter, TrServingConfig};
+/// use rpc_core_v1::serving::{TrRpcRouter, TrServingConfig};
 ///
 /// fn register<C, R, I>(
 ///     router: &mut R,
@@ -116,7 +116,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::serving::{RpcRouterHandler, TrRpcRouter, TrServingConfig};
+/// use rpc_core_v1::serving::{RpcRouterHandler, TrRpcRouter, TrServingConfig};
 ///
 /// fn wrap<C, R>(router: R) -> RpcRouterHandler<R, C>
 /// where
@@ -183,7 +183,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::{RpcDispatchError, RpcRouteError};
+/// use rpc_core_v1::serving::{RpcDispatchError, RpcRouteError};
 ///
 /// let err = RpcDispatchError::from(RpcRouteError::Closed);
 /// assert!(err.to_string().contains("队列已关闭"));

@@ -19,12 +19,12 @@
 
 /// 一段稳定的 RPC interface 路径前缀。
 ///
-/// `PATH` **不含**首尾 `/`；与服务路径拼接时由 [`location`] 统一规范化。
+/// `PATH` **不含**首尾 `/`；与服务路径拼接时由 [`concat_location`] 统一规范化。
 ///
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::TrRpcInterface;
+/// use rpc_core_v1::messaging::TrRpcInterface;
 ///
 /// struct ApiV1;
 ///
@@ -47,10 +47,10 @@ pub trait TrRpcInterface {
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::location;
+/// use rpc_core_v1::messaging::concat_location;
 ///
-/// assert_eq!(location("api/v1", "customer/goods"), "/api/v1/customer/goods");
-/// assert_eq!(location("/api/v1/", "/customer/goods/"), "/api/v1/customer/goods");
+/// assert_eq!(concat_location("api/v1", "customer/goods"), "/api/v1/customer/goods");
+/// assert_eq!(concat_location("/api/v1/", "/customer/goods/"), "/api/v1/customer/goods");
 /// ```
 pub fn concat_location(interface: &str, service: &str) -> String {
     let interface = interface.trim_matches('/');

@@ -93,9 +93,9 @@ where
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::{
-///     TrRpcInterface,
+/// use rpc_core_v1::{
 ///     client::TrRpcClientExt,
+///     messaging::TrRpcInterface,
 ///     x_deps::mptp_smux::client::MptpClient,
 /// };
 ///
@@ -107,7 +107,7 @@ where
 ///
 /// fn select<C>(client: &MptpClient<C>)
 /// where
-///     C: core_rpc_mptp_smux_v1::client::TrRpcClientConfig,
+///     C: rpc_core_v1::client::TrRpcClientConfig,
 /// {
 ///     let _proxy = client.call::<ApiV1>();
 /// }

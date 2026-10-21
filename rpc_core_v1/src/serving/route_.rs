@@ -88,12 +88,12 @@ impl<C: TrServingConfig> RpcJob<C> {
 /// 把 job 交给一个 service 时的错误。
 ///
 /// 这是**交付阶段**的错误，不是业务错误：队列关闭、入队被取消，或自定义队列拒绝了
-/// job。业务错误仍然由 [`RpcError`](crate::RpcError) 表达。
+/// job。业务错误仍然由 [`RpcError`](crate::messaging::RpcError) 表达。
 ///
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::RpcRouteError;
+/// use rpc_core_v1::serving::RpcRouteError;
 ///
 /// let err = RpcRouteError::Closed;
 /// assert_eq!(err.to_string(), "service 队列已关闭");
@@ -130,7 +130,7 @@ pub enum RpcRouteError {
 /// # Examples
 ///
 /// ```
-/// use core_rpc_mptp_smux_v1::serving::{TrRpcServiceRoute, TrServingConfig};
+/// use rpc_core_v1::serving::{TrRpcServiceRoute, TrServingConfig};
 ///
 /// fn service_path<C, R>(route: &R) -> &'static str
 /// where

@@ -1,6 +1,6 @@
 # rpc_router_trie
 
-`core_rpc_mptp_smux_v1` 的前缀树 router 实现。
+`rpc_core_v1` 的前缀树 router 实现。
 
 ## 职责
 
@@ -11,13 +11,13 @@
 - 命中的 `ServiceRoute<C>` 交给 router 的使用者。
 
 拒绝回复、`RpcJob` 构造与入队由 core 的
-`core_rpc_mptp_smux_v1::serving::RpcRouterHandler` 统一完成，因此本 crate 只依赖 core，
+`rpc_core_v1::serving::RpcRouterHandler` 统一完成，因此本 crate 只依赖 core，
 不直接依赖 `mptp_smux` / `abs_mptp`。
 
 ## 装配
 
 ```rust
-use core_rpc_mptp_smux_v1::serving::RpcRouterHandler;
+use rpc_core_v1::serving::RpcRouterHandler;
 use rpc_router_trie::RpcRouter;
 
 let mut workers = ApiV1::workers::<ServingCfg, _>(service_impl);

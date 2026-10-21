@@ -36,7 +36,7 @@ pub trait TrRpcClientAllocConfig {
     ///
     /// # 为什么多三条约束
     ///
-    /// 默认路径下 ring 是由**本 crate 的工厂**造的（见 [`crate::ClientPrepFactory`]），而工厂实例由
+    /// 默认路径下 ring 是由**本 crate 的工厂**造的（见 [`crate::prep::ClientPrepFactory`]），而工厂实例由
     /// `with_ctx` 无参现场构造、随后连同准备器一起被搬进连接的循环。因此这个分配器必须
     /// **无参可造**（`Default`）且**能跨线程共享**（`Send + Sync + 'static`）。带状态、需要
     /// 外部句柄的分配器走不了这条默认路径——那种场合请连同工厂一起自己实现。
