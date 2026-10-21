@@ -56,15 +56,19 @@ pub struct ApiV1;
 - `impl ServiceSelector<C> for ApiV1`，返回 `ClientProxy<'_, C, ApiV1>`；
 - `ApiV1::workers(service...)`：按 `services` 顺序建立 worker，返回 worker 组；
 - worker 组：
-  - `routes()` 返回 `Vec<ServiceRoute<C>>`，交给 `RpcRouter::add_interface`；
+  - `routes()` 返回 `Vec<ServiceRoute<C>>`，交给 router 实现的 `add_interface`
+    （core 的契约是 `TrRpcRouter::add_interface`）；
   - `run_async()` 用 `try_join` 树并发驱动全部 worker，返回的 future 同样可取消。
 
 服务端装配示意（`ServingCfg` 是使用者的 `TrServingConfig` 实现）：
 
 ```rust
+use rpc_router_trie::RpcRouter;
+
 let mut workers = ApiV1::workers::<ServingCfg, _>(goods_impl);
 let mut router = RpcRouter::<ServingCfg>::new();
 router.add_interface(ApiV1::PATH, workers.routes())?;
+let handler = router.into_handler();
 // 由使用者选择线程 / 运行时：
 spawn(workers.run_async().may_cancel_with(server_token));
 ```
@@ -88,16 +92,18 @@ spawn(workers.run_async().may_cancel_with(server_token));
 - interface marker 必须是单元结构体；`services` 写 service trait 的路径。trait 与 interface
   不在同一模块时请写完整路径（例如 `super::goods::GoodsCustomerService`），因为 worker
   类型名由 service 宏生成在 trait 所在模块里；
-- `ApiV1::workers` 的配置类型 `C` 通常由后续 `RpcRouter` 的使用推导；推导失败时用
+- `ApiV1::workers` 的配置类型 `C` 通常由后续 router 的使用推导；推导失败时用
   `ApiV1::workers::<ServingCfg, _, _>(...)` 显式指定；
 - worker 的 `run_async()` 可直接 await，也可 `.may_cancel_with(token)`；等待 job 时同样
   监听取消信号。worker 不 spawn，线程 / 运行时由使用者选择。
 
 ## 服务端接入
 
-core 提供 `RpcJob<C>` / `ServiceRoute<C>` / `RpcRouter<C>`：路由器按 interface → service
-两级运行期 Trie 匹配，命中后把 job 发进对应 service 队列；未命中写 `404`，非 `Call`
-写 `405`。worker 收尾顺序是「写回复 → 半关闭 tx → 读完 rx」。
+core 提供 `RpcJob<C>` / `ServiceRoute<C>` 以及 router 契约
+`TrRpcServiceRoute<C>` / `TrRpcRouter<C>` / `RpcRouterHandler<R, C>`。缺省的前缀树实现
+在 `rpc_router_trie`：它按 interface → service 两级运行期 Trie 匹配，命中后把 job 发进
+对应 service 队列；`RpcRouterHandler` 负责未命中写 `404`、非 `Call` 写 `405`。worker
+收尾顺序是「写回复 → 半关闭 tx → 读完 rx」。
 
 一个 server 可以注册多个 interface；每个 interface 的 worker 组独立 `routes()` /
 `run_async()`。interface 与 service 路径都按完整路径段匹配，`api/v10` 不会误命中

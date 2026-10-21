@@ -13,8 +13,9 @@ against:
 - `TrRpcInterface` and `/{interface}/{service}` path composition;
 - the minimal `ClientProxy`, `TrRpcClientExt` and a generic unary call;
 - the per-call serving context `RpcCallCtx` (decode → reply → close);
-- `RpcJob<C>`, `ServiceRoute<C>` and the two-level `RpcRouter<C>`: an interface trie whose
-  entries each hold a service trie; routing forwards a job to a bounded per-service queue;
+- `RpcJob<C>`, `ServiceRoute<C>` and the router contracts `TrRpcServiceRoute` /
+  `TrRpcRouter` / `RpcRouterHandler`; the concrete two-level trie router lives in the
+  separate `rpc_router_trie` crate;
 - streaming MessagePack body IO: a bounded SPSC ring feeds `send_req_body_async` / chunked
   reply writers, with no whole-body staging buffer.
 

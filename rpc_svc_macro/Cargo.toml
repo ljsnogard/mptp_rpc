@@ -27,3 +27,5 @@ core_rpc_mptp_smux_v1 = { path = "../core_rpc_mptp_smux_v1", default-features = 
 denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+# 集成测试会实例化具体 router；实现已从 core 拆到本 crate。
+rpc_router_trie = { path = "../rpc_router_trie", default-features = false }

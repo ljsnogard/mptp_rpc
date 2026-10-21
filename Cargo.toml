@@ -4,6 +4,7 @@ members = [
     "abs_mptp",
     "core_rpc_mptp_smux_v1",
     "mptp_smux",
+    "rpc_router_trie",
     "rpc_svc_macro",
 
     "abs_mptp-tests",

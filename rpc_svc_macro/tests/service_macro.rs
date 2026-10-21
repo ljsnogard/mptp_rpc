@@ -25,11 +25,12 @@ use abs_denco::{
 use core_rpc_mptp_smux_v1::{
     RpcResult, TrRpcInterface,
     client::{ClientProxy, ServiceSelector, TrRpcClientConfig},
-    serving::{RpcCallCtx, RpcRouter, ServiceRoute, TrServingConfig},
+    serving::{RpcCallCtx, ServiceRoute, TrServingConfig},
     x_deps::mptp_smux::client::MptpClient,
 };
 use gen_mcf2::gen_may_cancel_future;
 use mp_denco::{MpDecoder, MpEncoder};
+use rpc_router_trie::RpcRouter;
 use rpc_svc_macro::rpc;
 
 /// 业务载体。

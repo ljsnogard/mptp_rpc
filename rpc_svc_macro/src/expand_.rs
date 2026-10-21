@@ -591,7 +591,7 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
             /// 为这个 interface 建立每个 service 的队列与 worker 组。
             ///
             /// `C` 是服务端配置；调用点通常由后续的
-            /// [`RpcRouter::add_interface`](::core_rpc_mptp_smux_v1::serving::RpcRouter::add_interface)
+            /// [`TrRpcRouter::add_interface`](::core_rpc_mptp_smux_v1::serving::TrRpcRouter::add_interface)
             /// 推导。若编译器无法推导，可用
             /// `ApiV1::workers::<ServingCfg, _, _>(...)` 显式指定。
             pub fn workers<__C, #(#service_idents),*>(
@@ -634,8 +634,8 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
             }
 
             /// 收集全部 service 的注册项，供
-            /// [`RpcRouter::add_interface`](::core_rpc_mptp_smux_v1::serving::RpcRouter::add_interface)
-            /// 插入该 interface 的 service Trie。
+            /// [`TrRpcRouter::add_interface`](::core_rpc_mptp_smux_v1::serving::TrRpcRouter::add_interface)
+            /// 插入该 interface 的 service 注册表。
             pub fn routes(&self) -> ::std::vec::Vec<
                 ::core_rpc_mptp_smux_v1::serving::ServiceRoute<__C>,
             > {

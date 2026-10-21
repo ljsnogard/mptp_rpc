@@ -31,7 +31,7 @@ pub trait TrRpcClientConfig: mptp_smux::client::config::TrConfig + Sized {
 /// **缺省**的客户端分配约定：共享连接对象与 ring 都走系统分配器。
 ///
 /// 它只为「不关心内存来源」的场合存在；要精确指定分配器时，写自己的
-/// [`TrRpcClienAllocConfig`] 实现，并把它放进 `ClientConfig` 的第三个类型参数。
+/// [`TrRpcClientAllocConfig`] 实现，并把它放进 `ClientConfig` 的第三个类型参数。
 pub struct DefaultRpcAllocConfig;
 
 impl TrRpcClientAllocConfig for DefaultRpcAllocConfig {

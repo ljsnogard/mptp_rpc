@@ -1,31 +1,23 @@
-//! 服务端 job、service 注册项与两级 Trie 路由器。
+//! 路径 router 契约与把它接入 MPTP 服务端的 handler 适配器。
 //!
 //! [`MptpServer`](mptp_smux::serving::MptpServer) 在解码请求前缀之后，把 `location`、头表
-//! 与子流的收发半边按值交给一个 [`TrReqHandler`]。RPC 层的那一个 handler 就是
-//! [`RpcRouter`]：
+//! 与子流的收发半边按值交给一个 [`TrReqHandler`]。RPC 层把这件事拆成两半：
 //!
-//! 1. 只接受 `AccessMethod::Call`；其它访问方法直接回 `405`；
-//! 2. 用 interface 前缀在 [`PathTrie`](super::trie_::PathTrie) 中做最长段匹配；
-//! 3. 在命中的 interface 内部，用剩余路径匹配 service 前缀；
-//! 4. 把一次请求打包成 [`RpcJob`]，通过该 service 的队列交给 worker。
+//! - [`TrRpcRouter`]：**匹配**。把 interface / service 注册项组织起来，并把 `location`
+//!   解析成一条 [`TrRpcServiceRoute`]；
+//! - [`RpcRouterHandler`]：**接入**。负责 `Call` 检查、404 / 405 拒绝、构造 [`RpcJob`]、
+//!   入队与错误映射。
 //!
-//! 宏不生成任何方法级 `match`：interface / service 两级分派全部由运行期注册表完成，
-//! 方法分派仍然是 worker 里 body enum 的 `match`。
+//! 这样使用者可以只实现自己的 router（例如正则、静态表、前缀树），而拒绝回复与收尾逻辑
+//! 不必重写。具体实现见 `rpc_router_trie`。
 //!
-//! # 收尾责任
+//! # `router_`: the router contract and its MPTP handler adapter
 //!
-//! 命中 service 时，两个 channel 半边随 [`RpcJob`] 一起交给 worker，收尾也由 worker
-//! 完成（写回复 → 半关闭 `tx` → 读完 `rx`）。路由未命中或方法不允许时，router 自己写
-//! 错误回复并按同样顺序关闭 channel。
-//!
-//! # `router_`: jobs, service routes and the two-level trie router
-//!
-//! The router is the single [`TrReqHandler`] registered under the empty prefix. It rejects
-//! non-`Call` methods, matches the interface and then the service by complete path segments,
-//! and forwards one [`RpcJob`] to the service queue. Channel cleanup belongs to the worker for
-//! routed jobs, and to the router itself for rejected requests.
+//! [`TrRpcRouter`] owns only matching. [`RpcRouterHandler`] owns the MPTP-facing behavior:
+//! method check, 404 / 405 rejection, job construction and delivery. A user can therefore
+//! replace the matching strategy without reimplementing rejection and channel cleanup.
 
-use futures::{SinkExt, channel::mpsc};
+use core::marker::PhantomData;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
@@ -39,239 +31,185 @@ use mptp_smux::{
 };
 use thiserror::Error;
 
-use crate::x_deps::{abs_cancel, abs_mptp, gen_mcf2};
-use super::{
-    config::TrServingConfig,
-    ctx_::RpcCallCtx,
-    trie_::{PathTrie, split_segments_},
+use crate::{
+    serving::{
+        config::TrServingConfig,
+        ctx_::RpcCallCtx,
+        route_::{RpcJob, RpcRouteError, TrRpcServiceRoute},
+    },
+    x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };
 
-/// 每个 service 队列的缺省容量。
+/// 路径路由器：按 interface / service 匹配一个 `location`。
 ///
-/// 有界队列提供背压：worker 处理不过来时，router 的 `send` 会等待，而不是无限堆积
-/// job。容量只是**本实现**的缺省值，使用者可以在 [`ServiceRoute`] / worker 构造时
-/// 覆盖它。
-pub const K_DEFAULT_SERVICE_QUEUE_CAP: usize = 32usize;
-
-/// 一次交给 service worker 的完整调用。
+/// 实现者只需要回答两件事：
 ///
-/// `RpcJob` 按值持有两个 channel 半边，因此它可以跨线程移进 worker；worker 在
-/// dispatch 结束后负责收尾。
-pub struct RpcJob<C: TrServingConfig> {
-    /// 完整 location，例如 `/api/v1/customer/goods`；仅用于错误信息与日志。
-    location_: String,
-
-    /// 请求前缀里的头表。
-    headers_: Headers,
-
-    /// 本子流的发送半边。
-    tx_: ChannelTx<C>,
-
-    /// 本子流的接收半边。
-    rx_: ChannelRx<C>,
-}
-
-impl<C: TrServingConfig> RpcJob<C> {
-    /// 由路由结果构造一个 job。
-    pub fn new(
-        location: String,
-        headers: Headers,
-        tx: ChannelTx<C>,
-        rx: ChannelRx<C>,
-    ) -> Self {
-        RpcJob {
-            location_: location,
-            headers_: headers,
-            tx_: tx,
-            rx_: rx,
-        }
-    }
-
-    /// 完整 location。
-    pub fn location(&self) -> &str {
-        &self.location_
-    }
-
-    /// 请求头表。
-    pub fn headers(&self) -> &Headers {
-        &self.headers_
-    }
-
-    /// 拆出 worker 需要的全部部分。
-    ///
-    /// 顺序是 `(location, headers, tx, rx)`；worker 用前两者构造 [`RpcCallCtx`]，再用后
-    /// 两者完成收发与收尾。
-    pub fn into_parts(self) -> (String, Headers, ChannelTx<C>, ChannelRx<C>) {
-        (self.location_, self.headers_, self.tx_, self.rx_)
-    }
-}
-
-/// 一个 service 的注册项：service 相对路径与它的有界队列发送端。
+/// 1. 如何把一组 service 注册项挂到某个 interface 下；
+/// 2. 如何把一个完整 `location` 解析成命中的 service。
 ///
-/// `#[rpc(service = "...")]` 生成的 worker 用 `Worker::route()` 交出本结构；interface
-/// 的 worker 组把它收集成 `Vec<ServiceRoute<C>>`，交给
-/// [`RpcRouter::add_interface`]。
-pub struct ServiceRoute<C: TrServingConfig> {
-    /// service 相对路径；来自 service trait 的 `SERVICE_PATH`。
-    path_: &'static str,
-
-    /// 该 service 的队列发送端。
-    tx_: mpsc::Sender<RpcJob<C>>,
-}
-
-impl<C: TrServingConfig> ServiceRoute<C> {
-    /// 由 service 路径与队列发送端构造注册项。
-    ///
-    /// 普通使用者不需要直接调用：service 宏生成的 `Worker::route` 已经封装了它。
-    pub fn new(path: &'static str, tx: mpsc::Sender<RpcJob<C>>) -> Self {
-        ServiceRoute {
-            path_: path,
-            tx_: tx,
-        }
-    }
-
-    /// service 相对路径。
-    pub const fn path(&self) -> &'static str {
-        self.path_
-    }
-
-    /// 克隆一份队列发送端。
-    pub fn sender(&self) -> mpsc::Sender<RpcJob<C>> {
-        self.tx_.clone()
-    }
-}
-
-impl<C: TrServingConfig> Clone for ServiceRoute<C> {
-    fn clone(&self) -> Self {
-        ServiceRoute {
-            path_: self.path_,
-            tx_: self.tx_.clone(),
-        }
-    }
-}
-
-/// interface 级路由项。
-struct InterfaceEntry_<C: TrServingConfig> {
-    /// 该 interface 下的 service Trie。
-    services_: PathTrie<ServiceRoute<C>>,
-}
-
-/// 服务端两级 Trie 路由器；它本身是一个 [`TrReqHandler`]。
+/// `method` 检查、未命中时的 `404` / `405` 回复、[`RpcJob`] 构造与入队由
+/// [`RpcRouterHandler`] 统一完成。
 ///
-/// 一个 server 可以注册多个 interface（`ApiV1`、`ApiV2`……），每个 interface 内部再按
-/// service 的 `SERVICE_PATH` 注册。路由匹配失败不会把 channel 交给 worker，而是由本结构
-/// 写 `404` / `405` 后收尾。
-pub struct RpcRouter<C: TrServingConfig> {
-    /// interface 级 Trie。
-    interfaces_: PathTrie<InterfaceEntry_<C>>,
-}
+/// # Errors
+///
+/// [`add_interface`](Self::add_interface) 的错误类型由实现决定；重复注册、路径冲突等
+/// 由实现自行报告。
+///
+/// # Examples
+///
+/// ```
+/// use core_rpc_mptp_smux_v1::serving::{TrRpcRouter, TrServingConfig};
+///
+/// fn register<C, R, I>(
+///     router: &mut R,
+///     interface: &str,
+///     routes: I,
+/// ) -> Result<(), R::RegisterErr>
+/// where
+///     C: TrServingConfig,
+///     R: TrRpcRouter<C>,
+///     I: IntoIterator<Item = R::Route>,
+/// {
+///     router.add_interface(interface, routes)
+/// }
+/// ```
+///
+/// # 对象安全
+///
+/// `add_interface` 是泛型方法，因此本 trait 不是对象安全的；router 在装配期已知具体类型，
+/// 不需要 `dyn`。若将来确实需要动态 router，应另加一个对象安全的注册接口。
+pub trait TrRpcRouter<C>: Sized
+where
+    C: TrServingConfig,
+{
+    /// 本 router 接受的 service 注册项。
+    type Route: TrRpcServiceRoute<C>;
 
-impl<C: TrServingConfig> RpcRouter<C> {
-    /// 造一个空 router。
-    pub fn new() -> Self {
-        RpcRouter {
-            interfaces_: PathTrie::new(),
-        }
-    }
+    /// 注册失败时的错误。
+    type RegisterErr: core::error::Error;
 
     /// 注册一个 interface 及其全部 service。
     ///
-    /// interface 路径与 service 路径都按完整路径段比较；同一个 interface 或同一个
-    /// interface 下的同一个 service 重复注册会返回错误，且不会改动已有注册表。
-    ///
-    /// # Errors
-    ///
-    /// - [`RpcRouterError::DuplicateInterface`]：interface 路径已经注册；
-    /// - [`RpcRouterError::DuplicateService`]：同一 interface 下的 service 路径重复。
-    pub fn add_interface<I>(&mut self, interface: &str, routes: I) -> Result<(), RpcRouterError>
+    /// 如何解释路径、重复注册是否报错、允许怎样的前缀重叠，由实现决定；缺省 trie 实现
+    /// （`rpc_router_trie`）按完整路径段匹配。
+    fn add_interface<I>(&mut self, interface: &str, routes: I) -> Result<(), Self::RegisterErr>
     where
-        I: IntoIterator<Item = ServiceRoute<C>>,
-    {
-        if self.interfaces_.contains(interface) {
-            return Err(RpcRouterError::DuplicateInterface(interface.to_string()));
-        }
+        I: IntoIterator<Item = Self::Route>;
 
-        let services = build_service_trie_(routes.into_iter().map(|route| (route.path(), route)))
-            .map_err(|service| RpcRouterError::DuplicateService {
-            interface: interface.to_string(),
-            service: service.to_string(),
-        })?;
-
-        self.interfaces_.insert(
-            interface,
-            InterfaceEntry_ {
-                services_: services,
-            },
-        );
-        Ok(())
-    }
-
-    /// 解析一个完整 location，返回命中 service 的注册项。
+    /// 解析一个完整 `location`，返回命中的 service 注册项。
     ///
-    /// 先匹配 interface 的最长前缀，再在剩余段上匹配 service 的最长前缀。剩余段之后
-    /// 还有内容时仍然命中——service 路径不是请求的终点，真正的方法由 body enum 决定。
-    pub fn resolve(&self, location: &str) -> Option<&ServiceRoute<C>> {
-        let segments = split_segments_(location);
-        let (interface, depth) = self.interfaces_.match_longest(&segments)?;
-        let (service, _) = interface.services_.match_longest(&segments[depth..])?;
-        Some(service)
+    /// 返回 `None` 时，[`RpcRouterHandler`] 会写 `404 NotFound`。
+    fn resolve(&self, location: &str) -> Option<&Self::Route>;
+}
+
+/// 把 [`TrRpcRouter`] 适配成 MPTP 的 [`TrReqHandler`]。
+///
+/// 它拥有 router，并负责：
+///
+/// 1. 只接受 [`AccessMethod::Call`]，其它访问方法回 `405`；
+/// 2. 用 [`TrRpcRouter::resolve`] 匹配 `location`，未命中回 `404`；
+/// 3. 命中后把请求打包成 [`RpcJob`]，交给对应的 [`TrRpcServiceRoute`]；
+/// 4. 拒绝路径自己写错误回复并按「写回复 → 半关闭 tx → 读完 rx」收尾。
+///
+/// 命中 service 后，channel 的收尾由 worker 负责；handler 只完成入队。
+///
+/// # Examples
+///
+/// ```
+/// use core_rpc_mptp_smux_v1::serving::{RpcRouterHandler, TrRpcRouter, TrServingConfig};
+///
+/// fn wrap<C, R>(router: R) -> RpcRouterHandler<R, C>
+/// where
+///     C: TrServingConfig,
+///     R: TrRpcRouter<C>,
+/// {
+///     RpcRouterHandler::new(router)
+/// }
+/// ```
+pub struct RpcRouterHandler<R, C>
+where
+    C: TrServingConfig,
+    R: TrRpcRouter<C>,
+{
+    /// 被适配的 router。
+    router_: R,
+
+    /// `C` 只出现在 trait 参数里，不占运行期空间。
+    _cfg_: PhantomData<fn() -> C>,
+}
+
+impl<R, C> RpcRouterHandler<R, C>
+where
+    C: TrServingConfig,
+    R: TrRpcRouter<C>,
+{
+    /// 用一个 router 构造 handler。
+    pub const fn new(router: R) -> Self {
+        RpcRouterHandler {
+            router_: router,
+            _cfg_: PhantomData,
+        }
+    }
+
+    /// 取被适配的 router。
+    pub const fn router(&self) -> &R {
+        &self.router_
+    }
+
+    /// 取被适配 router 的可变引用（用于装配期注册）。
+    pub fn router_mut(&mut self) -> &mut R {
+        &mut self.router_
+    }
+
+    /// 转发到 [`TrRpcRouter::add_interface`]。
+    pub fn add_interface<I>(&mut self, interface: &str, routes: I) -> Result<(), R::RegisterErr>
+    where
+        I: IntoIterator<Item = R::Route>,
+    {
+        self.router_.add_interface(interface, routes)
+    }
+
+    /// 转发到 [`TrRpcRouter::resolve`]。
+    pub fn resolve(&self, location: &str) -> Option<&R::Route> {
+        self.router_.resolve(location)
     }
 }
 
-impl<C: TrServingConfig> Default for RpcRouter<C> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// 路由器注册与分派过程中的错误。
+/// 路由与拒绝过程中的错误。
+///
+/// 注册错误由 router 自己的 [`TrRpcRouter::RegisterErr`] 表达；这里只覆盖**接入
+/// MPTP 服务端之后**会发生的失败。
+///
+/// # Examples
+///
+/// ```
+/// use core_rpc_mptp_smux_v1::{RpcDispatchError, RpcRouteError};
+///
+/// let err = RpcDispatchError::from(RpcRouteError::Closed);
+/// assert!(err.to_string().contains("队列已关闭"));
+/// ```
 #[derive(Debug, Error)]
-pub enum RpcRouterError {
-    /// interface 路径已经注册。
-    #[error("interface 路径 `{0}` 已注册")]
-    DuplicateInterface(String),
-
-    /// 同一 interface 下的 service 路径重复。
-    #[error("interface `{interface}` 下的 service 路径 `{service}` 已注册")]
-    DuplicateService {
-        /// interface 路径。
-        interface: String,
-
-        /// 重复的 service 路径。
-        service: String,
-    },
-
-    /// service 队列已关闭，通常意味着对应 worker 已停止。
-    #[error("service 队列已关闭")]
-    QueueClosed,
+pub enum RpcDispatchError {
+    /// 把 job 交给 service 失败。
+    #[error(transparent)]
+    Route(#[from] RpcRouteError),
 
     /// 写拒绝回复失败。
     #[error("写拒绝回复失败：{0}")]
     Reject(String),
 }
 
-/// 用 service 路径与值建一棵 service Trie；路径重复时返回重复的那条路径。
-///
-/// 抽成泛型函数是为了能用整数做单元测试：路由表的重复检测与路径规范化不依赖
-/// `ServiceRoute<C>` 里的 channel 类型。
-fn build_service_trie_<T>(
-    routes: impl IntoIterator<Item = (&'static str, T)>,
-) -> Result<PathTrie<T>, &'static str> {
-    let mut services = PathTrie::new();
-    for (path, value) in routes {
-        if services.insert(path, value).is_some() {
-            return Err(path);
-        }
-    }
-    Ok(services)
-}
-
-impl<C: TrServingConfig> TrReqHandler<C> for RpcRouter<C> {
-    type HandleAsync<'f> = RouterHandleAsync<'f, 'f, C>
+impl<R, C> TrReqHandler<C> for RpcRouterHandler<R, C>
+where
+    C: TrServingConfig,
+    R: TrRpcRouter<C>,
+{
+    type HandleAsync<'f>
+        = RouterHandleAsync<'f, 'f, R, C>
     where
         Self: 'f;
 
-    type Err = RpcRouterError;
+    type Err = RpcDispatchError;
 
     fn handle_async<'f>(
         &'f self,
@@ -285,19 +223,20 @@ impl<C: TrServingConfig> TrReqHandler<C> for RpcRouter<C> {
     }
 }
 
-/// [`RpcRouter::handle_async`] 的 step 函数。
+/// [`RpcRouterHandler`] 的 step 函数。
 #[allow(clippy::needless_lifetimes, clippy::too_many_arguments)]
 #[gen_may_cancel_future(RouterHandle, pub, new(pub(crate)))]
-async fn router_handle_async_<'f, C, TyTok>(
-    router: &'f RpcRouter<C>,
+async fn router_handle_async_<'f, R, C, TyTok>(
+    handler: &'f RpcRouterHandler<R, C>,
     method: AccessMethod,
     location: &'f str,
     headers: &'f mut Headers,
     tx: ChannelTx<C>,
     rx: ChannelRx<C>,
     cancel: TyTok,
-) -> Result<(), RpcRouterError>
+) -> Result<(), RpcDispatchError>
 where
+    R: TrRpcRouter<C>,
     C: TrServingConfig,
     TyTok: TrCancellationToken,
 {
@@ -314,7 +253,7 @@ where
         .await;
     }
 
-    let Some(route) = router.resolve(location) else {
+    let Some(route) = handler.router_.resolve(location) else {
         return reject_async_::<C, TyTok>(
             Status::NotFound,
             location,
@@ -329,10 +268,10 @@ where
 
     let job = RpcJob::new(location.to_owned(), headers.clone(), tx, rx);
     route
-        .sender()
-        .send(job)
-        .await
-        .map_err(|_| RpcRouterError::QueueClosed)
+        .enqueue_async(job)
+        .may_cancel_with(cancel.child_token())
+        .await?;
+    Result::Ok(())
 }
 
 /// 写一条错误回复并按序关闭 channel。
@@ -346,7 +285,7 @@ async fn reject_async_<C, TyTok>(
     tx: ChannelTx<C>,
     rx: ChannelRx<C>,
     cancel: TyTok,
-) -> Result<(), RpcRouterError>
+) -> Result<(), RpcDispatchError>
 where
     C: TrServingConfig,
     TyTok: TrCancellationToken,
@@ -357,34 +296,78 @@ where
         .may_cancel_with(cancel.child_token())
         .await;
     ctx.close_async().await;
-    reply.map_err(|err| RpcRouterError::Reject(err.to_string()))
+    reply.map_err(|err| RpcDispatchError::Reject(err.to_string()))
 }
 
 #[cfg(test)]
 mod tests_ {
     use super::*;
+    use crate::serving::ServiceRoute;
 
-    /// 测试 service Trie 构建会拒绝重复路径并保留规范化后的最长匹配。
-    /// Test that service-trie construction rejects duplicates and keeps normalised paths.
+    /// 一个只用于编译期检查的自定义 router。
+    struct DummyRouter_;
+
+    impl<C: TrServingConfig> TrRpcRouter<C> for DummyRouter_ {
+        type Route = ServiceRoute<C>;
+
+        type RegisterErr = core::convert::Infallible;
+
+        fn add_interface<I>(
+            &mut self,
+            _interface: &str,
+            _routes: I,
+        ) -> Result<(), Self::RegisterErr>
+        where
+            I: IntoIterator<Item = Self::Route>,
+        {
+            Result::Ok(())
+        }
+
+        fn resolve(&self, _location: &str) -> Option<&Self::Route> {
+            Option::None
+        }
+    }
+
+    /// 编译期验证任意 `TrRpcRouter` 都能被 `RpcRouterHandler` 适配成 `TrReqHandler`。
+    /// Compile-time check that any `TrRpcRouter` can be adapted into a `TrReqHandler`.
     ///
-    /// - 手段：分别用 `["/api/v1/", 1]`、`["api", 2], ["api/v1", 3]` 与重复 `"api"`
-    ///   构建 Trie。
-    /// - 判断：前两者成功且最长匹配正确；重复路径返回 `Err("api")`。
+    /// - 手段：用一个只返回 `None` 的 `DummyRouter_` 构造 `RpcRouterHandler`，再把它交给
+    ///   一个只要求 `H: TrReqHandler<C>` 的泛型断言函数。
+    /// - 判断：编译通过；运行期不建立连接，因此这里没有 `#[test]` 入口。
     ///
-    /// - Means: build tries from a slashed path, an overlapping pair, and a duplicate pair.
-    /// - Verdict: the first two succeed with the right longest match; the duplicate reports
-    ///   the offending path.
+    /// - Means: build an `RpcRouterHandler` around `DummyRouter_` and pass it to a generic
+    ///   assertion that only requires `H: TrReqHandler<C>`.
+    /// - Verdict: it compiles; no connection is opened, so this is a compile-only helper.
+    #[allow(dead_code)]
+    fn custom_router_fits_handler_<C>(router: DummyRouter_)
+    where
+        C: TrServingConfig,
+    {
+        fn assert_handler_<C, H>(_handler: &H)
+        where
+            C: TrServingConfig,
+            H: TrReqHandler<C>,
+        {
+        }
+
+        let handler = RpcRouterHandler::<DummyRouter_, C>::new(router);
+        assert_handler_::<C, _>(&handler);
+    }
+
+    /// 测试接入阶段的错误能区分入队失败与拒绝回复失败。
+    /// Test that dispatch errors distinguish delivery failures from rejection failures.
+    ///
+    /// - 手段：构造 `Route(Closed)` 与 `Reject` 两种错误并格式化。
+    /// - 判断：输出分别包含“队列已关闭”和“拒绝回复”。
+    ///
+    /// - Means: build `Route(Closed)` and `Reject` and format them.
+    /// - Verdict: the messages mention the closed queue and the rejection reply respectively.
     #[test]
-    fn builds_service_trie_() {
-        let trie = build_service_trie_([("/api/v1/", 1u32)]).expect("路径应当合法");
-        assert_eq!(trie.match_longest(&["api", "v1"]), Some((&1u32, 2usize)));
+    fn displays_dispatch_errors_() {
+        let route = RpcDispatchError::from(RpcRouteError::Closed);
+        assert!(route.to_string().contains("队列已关闭"));
 
-        let trie = build_service_trie_([("api", 2u32), ("api/v1", 3u32)])
-            .expect("重叠路径按最长匹配合法共存");
-        assert_eq!(trie.match_longest(&["api", "v1"]), Some((&3u32, 2usize)));
-        assert_eq!(trie.match_longest(&["api", "v2"]), Some((&2u32, 1usize)));
-
-        let duplicate = build_service_trie_([("api", 1u32), ("/api/", 2u32)]);
-        assert_eq!(duplicate.err(), Some("/api/"));
+        let reject = RpcDispatchError::Reject("boom".to_string());
+        assert!(reject.to_string().contains("拒绝回复"));
     }
 }

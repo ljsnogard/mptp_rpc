@@ -10,13 +10,14 @@
 //! - [`TrRpcInterface`] 与 `/{interface}/{service}` 路径拼装；
 //! - 客户端极简代理 [`ClientProxy`]、[`TrRpcClientExt`] 与通用 unary 调用；
 //! - 服务端一次调用的上下文 [`RpcCallCtx`]：解码请求、写回复、收尾；
-//! - 服务端两级 Trie 路由器 [`RpcRouter`] 与 [`RpcJob`] / [`ServiceRoute`]：按
-//!   interface → service 分派，每个 service 一个队列；
+//! - [`RpcJob`] / [`ServiceRoute`] 与 router 契约 [`TrRpcServiceRoute`] / [`TrRpcRouter`]：
+//!   把「找 service」与「把 job 交给 service」拆成可替换的两层，再由
+//!   [`RpcRouterHandler`] 接入 MPTP 服务端；
 //! - body 的 MessagePack 流式编解码：ring 边编码边发送，定长 / 分块帧都可解码。
 //!
 //! `#[rpc(service = "...")]` 的 worker 与 `#[rpc(path = "...", services = [...])]` 的
 //! worker 组都建立在上面这些运行时之上；宏本身不替使用者 spawn 线程或选择运行时。
-//! 线上格式已由 [`mptp_smux`] 拥有，body 的定长 / 分块帧由 [`abs_mptp`] 拥有，本 crate
+//! 线上格式已由 [`mptp_smux`] 拥有，body 的定长 / 分块帧由 `abs_mptp` 拥有，本 crate
 //! 都不再重复实现。
 //!
 //! # 已实现的契约
@@ -41,6 +42,9 @@
 //! └───────────────────────────────────────────────────────────────┘
 //! ```
 //!
+//! 具体的前缀树 router 实现不在本 crate，而在 `rpc_router_trie`；本 crate 只保留
+//! 「怎么找」与「怎么送」的契约，以及把两者接入 MPTP 服务端的 [`RpcRouterHandler`]。
+//!
 //! # 为什么两端在同一个库里
 //!
 //! MPTP 是**双向互相提供服务**的协议：一条连接的两端都可以发请求、也都可以提供服务。因此
@@ -51,9 +55,9 @@
 //!
 //! Phase 1 provides the minimal runtime needed by `#[rpc(service = "...")]`: the unified
 //! error type, interface path composition, the minimal client proxy with unary calls, the
-//! per-call serving context, and MessagePack body IO. The server router and the interface
-//! macro are the next phase. The wire format belongs to [`mptp_smux`], and body framing
-//! belongs to [`abs_mptp`].
+//! per-call serving context, MessagePack body IO, and the router contracts. The concrete
+//! trie router lives in `rpc_router_trie`. The wire format belongs to [`mptp_smux`], and
+//! body framing belongs to `abs_mptp`.
 
 #![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
@@ -85,8 +89,9 @@ pub use prep_::{
     ClientPrepFactory, K_CHANNEL_CAP, RingBuff, ServingPrepFactory, new_ring_buff, new_ring_buff_pair,
 };
 pub use serving::{
-    DefaultServingAllocConfig, K_DEFAULT_SERVICE_QUEUE_CAP, RpcCallCtx, RpcJob, RpcRouter,
-    RpcRouterError, ServiceRoute, TrServingAllocConfig, TrServingConfig,
+    DefaultServingAllocConfig, K_DEFAULT_SERVICE_QUEUE_CAP, RpcCallCtx, RpcDispatchError, RpcJob,
+    RpcRouteError, RpcRouterHandler, ServiceRoute, TrRpcRouter, TrRpcServiceRoute,
+    TrServingAllocConfig, TrServingConfig,
 };
 
 pub mod x_deps {

@@ -27,7 +27,7 @@ pub trait TrServingAllocConfig {
     /// 所有权），因此这里的分配器每条子流都会被用到一次。
     ///
     /// 三条附加约束的理由与客户端那份相同（见
-    /// [`TrRpcClienAllocConfig::RingAlloc`](crate::client::TrRpcClienAllocConfig::RingAlloc)）：
+    /// [`TrRpcClientAllocConfig::RingAlloc`](crate::client::TrRpcClientAllocConfig::RingAlloc)）：
     /// 默认工厂由 `with_ctx` 无参构造，并要能搬进连接的循环。
     type RingAlloc: AllocatorClone + Default + Send + Sync + 'static;
 }

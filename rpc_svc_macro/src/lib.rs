@@ -46,15 +46,20 @@
 //!   或 `client.call::<ApiV1>()`；
 //! - `ApiV1::workers(service_0, ...)`：按 `services` 顺序建立每个 service 的 worker，
 //!   返回一个具体类型的 worker 组；
-//! - worker 组的 `routes()` 交给 `RpcRouter::add_interface`，`run_async()` 并发驱动全部
-//!   worker（内部是 `try_join` 树，任一 worker 出错时整体提前结束）。
+//! - worker 组的 `routes()` 交给一个 router 实现的 `add_interface`（core 的契约是
+//!   `TrRpcRouter::add_interface`；缺省实现是 `rpc_router_trie::RpcRouter`），
+//!   `run_async()` 并发驱动全部 worker（内部是 `try_join` 树，任一 worker 出错时整体
+//!   提前结束）。
 //!
 //! 服务端装配的形状（`ServingCfg` 是使用者的 `TrServingConfig` 实现）：
 //!
 //! ```text
+//! use rpc_router_trie::RpcRouter;
+//!
 //! let mut workers = ApiV1::workers::<ServingCfg, _>(goods_impl);
 //! let mut router = RpcRouter::<ServingCfg>::new();
 //! router.add_interface(ApiV1::PATH, workers.routes())?;
+//! let handler = router.into_handler();
 //! // 由使用者选择线程 / 运行时：
 //! spawn(workers.run_async().may_cancel_with(server_token));
 //! ```
@@ -73,7 +78,7 @@
 //! - interface marker 必须是单元结构体；`services` 里写 service trait 的路径。trait 与
 //!   interface 不在同一模块时请写完整路径（例如 `super::goods::GoodsCustomerService`），
 //!   因为 worker 类型名由 service 宏生成在 trait 所在模块里；
-//! - `ApiV1::workers` 的配置类型 `C` 通常由后续 `RpcRouter` 的使用推导；推导失败时用
+//! - `ApiV1::workers` 的配置类型 `C` 通常由后续 router 的使用推导；推导失败时用
 //!   `ApiV1::workers::<ServingCfg, _, _>(...)` 显式指定；
 //! - 生成代码会调用 `gen_mcf2`，协议 crate 需要打开
 //!   `#![feature(impl_trait_in_assoc_type)]`。worker 的取消监听要求取消令牌实现

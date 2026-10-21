@@ -156,19 +156,30 @@ let router = Router::with_path("/").call::<ApiV1>();
   - 实现 `TrRpcInterface` 与 `ServiceSelector`；
   - 生成 `ApiV1::workers(...)` 与具体类型的 worker 组：`routes()` / `run_async()`。
 
-core 侧同时补上了服务端运行时：
+core 侧同时补上了服务端运行时与 router 契约：
 
 - `RpcJob<C>`：一次调用的 location、头表与收发半边；
 - `ServiceRoute<C>`：service 路径 + 有界队列发送端；
-- `RpcRouter<C>`：interface → service 两级运行期 `PathTrie`，本身实现 `TrReqHandler`；
-  未命中写 `404`，非 `Call` 写 `405`，命中后把 job 交给 service worker。
+- `TrRpcServiceRoute<C>`：把 job 交给 service 的抽象，允许换成自定义队列；
+- `TrRpcRouter<C>`：interface / service 匹配的抽象；
+- `RpcRouterHandler<R, C>`：把任意 router 适配成 `TrReqHandler`，统一处理未命中 `404`、
+  非 `Call` `405`、`RpcJob` 构造与入队。
+
+缺省的两级 `PathTrie` 实现拆到了独立 crate `rpc_router_trie`：
+
+- `RpcRouter<C>`：interface → service 两级运行期 `PathTrie`，实现 `TrRpcRouter<C>`；
+- `RpcRouterError`：注册重复；
+- 不再直接实现 `TrReqHandler`，统一经 `RpcRouterHandler` / `into_handler()` 接入。
 
 实际装配形状与本文最初的示意略有差异（以现有 API 为准）：
 
 ```rust
+use rpc_router_trie::RpcRouter;
+
 let mut workers = ApiV1::workers::<ServingCfg, _>(customer_impl);
 let mut router = RpcRouter::<ServingCfg>::new();
 router.add_interface(ApiV1::PATH, workers.routes())?;
+let handler = router.into_handler();
 
 // worker 组由使用者选择线程 / 运行时来驱动；core 不替使用者 spawn。
 spawn(workers.run_async().may_cancel_with(server_token));
