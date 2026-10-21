@@ -24,6 +24,7 @@ mod cli;
 mod client_;
 mod conn_;
 mod protocol_;
+mod router_;
 mod server_;
 mod trie_;
 

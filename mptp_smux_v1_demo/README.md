@@ -29,7 +29,7 @@ client ──dial──▶ server             TCP + smux_v1 握手
 | 会话状态机：前缀 → 体，体边界完全由前缀决定 | `MptpSession::recv_resp_prefix_async` / `recv_resp_body_async` |
 | 请求体的写入口（会话中途自己写） | `MptpSession::send_req_body_async` |
 | 服务端收尾次序（先半关闭写端、等对端关闭、再放读端） | demo handler 出口的 `close_channel_async`（`MptpServer` 不再代做） |
-| 路由：最长前缀匹配 | `mptp_smux::serving::Router` |
+| 路由契约：最长前缀匹配 | `mptp_smux::serving::TrPathRouter`；具体实现是本 demo 的 `src/router_.rs` |
 
 ## 怎么跑
 
@@ -65,6 +65,7 @@ $ python3 mptp_smux_v1_demo/scripts/e2e_socket.py --rounds 2
 | `src/tests_.rs` | 下游集成测试：头表、体边界、前缀解码与 demo 的装配函数 |
 | `src/cfg_.rs` | 两端配置 + **ring 准备工厂**（环境参与构造、每条子流新内存） |
 | `src/protocol_.rs` | 业务类型与它们的稳定类型标识（FNV-1a 哈希类型名） |
+| `src/router_.rs` | 顶层路径路由：`TrPathRouter` 的最长前缀实现（原 `mptp_smux::serving::Router`） |
 | `src/client_.rs` | 客户端：三次调用、写请求体、按类型收回复 |
 | `src/server_.rs` | 服务端：路由 + 两个 handler + 处理计数收尾 |
 | `src/conn_.rs` | TCP socket ↔ `smux_v1` 复用连接的装配（宿主线程 + 应用线程） |

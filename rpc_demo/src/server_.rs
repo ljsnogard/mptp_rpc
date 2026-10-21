@@ -2,15 +2,17 @@
 //!
 //! 这是蓝图骨架的手动实现：
 //!
-//! - `MptpServer` 把 `ChannelTx` / `ChannelRx` 按值交给 `RpcRouter`；
+//! - `MptpServer` 经本地 `Router`（实现 `TrPathRouter`）把 `ChannelTx` / `ChannelRx` 按值
+//!   交给 `RpcRouter`；
 //! - `RpcRouter` 先按 interface 前缀、再按 service 路径在运行期 `PathTrie` 中匹配；
 //! - 命中的 service 有自己的有界队列，worker 线程只持有该 service 的具体实现；
 //! - worker 内按 body enum 的方法变体分派，没有 `Pin<Box<dyn Future>>`。
 //!
 //! # `server_`: two-level trie, per-service queues, worker threads
 //!
-//! No macro-generated match participates in routing. The two dispatch levels are runtime
-//! tries; only method dispatch inside a service uses the hand-written body enum.
+//! `MptpServer` dispatches through the demo's local `Router` (a `TrPathRouter` implementation)
+//! to `RpcRouter`. No macro-generated match participates in routing. The two dispatch levels
+//! are runtime tries; only method dispatch inside a service uses the hand-written body enum.
 
 use std::{
     collections::BTreeMap,
@@ -35,7 +37,7 @@ use mm_ptr::Shared;
 use mptp_smux::{
     messaging::{Headers, ResponsePrefix, write_response_prefix_async},
     serving::{
-        MptpServer, Router, close_channel_async,
+        MptpServer, close_channel_async,
         config::{ChannelRx, ChannelTx},
     },
     x_deps::{abs_cancel, abs_smux, gen_mcf2, mm_ptr},
@@ -52,6 +54,7 @@ use crate::{
         ApiV1, ApiV2, K_EXPECTED_JOBS, RpcInterface, RpcResult, ServiceError, Session, SessionCall,
         SessionService, Workspace, WorkspaceCall, WorkspaceService,
     },
+    router_::Router,
     trie_::{PathTrie, split_segments_},
 };
 
@@ -1056,8 +1059,9 @@ pub async fn serve_(conn: Conn) -> Result<()> {
     workspace_v2_worker.spawn();
 
     let mut mptp_router = Router::new();
+    // 顶层只有 RpcRouter 一个 handler；空前缀匹配所有路径，两级分派在 RpcRouter 内部完成。
     mptp_router.add_target("", router);
-    let server = MptpServer::<SrvCfg, RpcRouter>::new(mptp_router);
+    let server = MptpServer::<SrvCfg, Router<RpcRouter>>::new(mptp_router);
 
     let listener = server
         .serve_listener_async(&mut binding, K_LISTEN_RESERVE)

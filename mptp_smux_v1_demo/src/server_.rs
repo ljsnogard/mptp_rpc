@@ -8,19 +8,22 @@
 //! 2. 声明的标识与本 handler 期待的类型不符 → 回 `406`，**不解码**；
 //! 3. 对上了才解码，解出来的就是本 handler 写下的那个类型。
 //!
-//! 标识由类型自己给出（[`TypeId64`] 的稳定哈希），这里没有任何手写常量。
+//! 标识由类型自己给出（[`TypeId64`](crate::protocol_::TypeId64) 的稳定哈希），这里没有任何
+//! 手写常量。
 //!
 //! # 服务端这一侧由 `mptp_smux` 提供什么
 //!
-//! 建流、**ring 内存的准备**、请求前缀解码、路由都由 [`MptpServer`] 负责；本文件只做
-//! 业务：读体、校验标识、解码、装配回复、写回复。前缀的读 / 写入口都来自
-//! `mptp_smux::messaging`，demo 不再自己实现线格式。
+//! 建流、**ring 内存的准备**与请求前缀解码由 [`MptpServer`] 负责；路由表由本 demo 的
+//! [`Router`] 提供，`MptpServer` 经
+//! [`TrPathRouter`](mptp_smux::serving::TrPathRouter) 契约调用它。本文件只做业务：读体、
+//! 校验标识、解码、装配回复、写回复。前缀的读 / 写入口都来自 `mptp_smux::messaging`，
+//! demo 不再自己实现线格式。
 //!
 //! # `server_`: routing plus type-directed dispatch
 //!
-//! Channel setup, ring preparation, request-prefix decoding and routing all belong to
-//! `mptp_smux`; this file only does business: read the body, check the declared identifier,
-//! decode, build and write the reply.
+//! Channel setup, ring preparation and request-prefix decoding belong to `mptp_smux`; the
+//! demo provides the router via the `TrPathRouter` contract. This file only does business:
+//! read the body, check the declared identifier, decode, build and write the reply.
 
 use std::{
     sync::{
@@ -44,7 +47,7 @@ use mm_ptr::Shared;
 use mptp_smux::{
     messaging::{Headers, ResponsePrefix, write_response_prefix_async},
     serving::{
-        MptpServer, Router, close_channel_async,
+        MptpServer, close_channel_async,
         config::{ChannelRx, ChannelTx},
     },
     x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2, mm_ptr},
@@ -59,6 +62,7 @@ use crate::{
         EchoReply, EchoRequest, K_ECHO_PATH, K_SUM_PATH, SumReply, SumRequest, response_empty_,
         response_with_, type_id_of_,
     },
+    router_::Router,
 };
 
 /// 入向邀请最多同时挂起多少条。
@@ -433,8 +437,8 @@ pub fn build_router_(metrics: Arc<Metrics>) -> Router<DemoHandler> {
 /// # ring 内存在哪里准备
 ///
 /// 就在 [`MptpServer::serve_listener_async`] 内部：每条入向子流裁决之前，它用本条子流的环境
-/// （两个 dock + 响应方角色）现场构造 [`ServingCfg::DefaultPrepFactory`]，再让它生产一份
-/// 新的准备器。本函数因此**看不到**任何 ring 相关的代码。
+/// （两个 dock + 响应方角色）现场构造 [`ServingCfg`] 的 `DefaultPrepFactory`，再让它生产
+/// 一份新的准备器。本函数因此**看不到**任何 ring 相关的代码。
 ///
 /// # 什么时候收尾
 ///
@@ -447,7 +451,7 @@ pub fn build_router_(metrics: Arc<Metrics>) -> Router<DemoHandler> {
 pub async fn serve_(conn: Conn, base_dock: u32, count: usize) -> Result<()> {
     let shared = Shared::new(conn, CoreAlloc);
     let metrics = Arc::new(Metrics::new());
-    let server = MptpServer::<ServingCfg, DemoHandler>::new(build_router_(metrics.clone()));
+    let server = MptpServer::<ServingCfg, Router<DemoHandler>>::new(build_router_(metrics.clone()));
 
     // 先把所有 dock 的 binding 都拿到手，再去等入向——否则对端可能在我们还没绑定的 dock 上
     // 发起建流。

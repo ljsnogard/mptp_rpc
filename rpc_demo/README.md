@@ -50,6 +50,7 @@ $ python3 rpc_demo/scripts/e2e_uds.py
 | UDS | `tokio::net::UnixListener` / `UnixStream` + `buffex_tokio_adapt` |
 | 多流 | `smux_v1` 的 `MuxConnection`，每条 RPC 一条子流 |
 | MPTP | `mptp_smux` 的 `MptpClient` / `MptpSession` / `MptpServer` |
+| 顶层路径路由 | 本地 `src/router_.rs`：实现 `TrPathRouter`，用空前缀把所有路径交给 `RpcRouter` |
 | RPC 客户端 | `ClientProxy` 只持有 `&MptpClient`，interface 由零大小 marker 提供 |
 | RPC 服务端 | 运行期 `PathTrie`：interface 前缀 → 该 interface 内的 service 前缀 |
 | 业务组织 | 每个 service 独立有界队列，worker 线程按 body enum 的方法变体分派 |

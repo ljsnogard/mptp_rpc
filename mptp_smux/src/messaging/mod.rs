@@ -21,7 +21,8 @@
 //!
 //! [`RequestPrefix`] 保留完整的 `location`，因此 RPC 层可以把
 //! `RpcClientInterface::path()` 与服务名、方法名拼成 `/api/v1/customer/goods` 这样的路径；
-//! 服务端的 [`Router`](crate::serving::Router) 再按最长前缀把它分派给 handler。
+//! 服务端的 [`TrPathRouter`](crate::serving::TrPathRouter) 实现再按自己的规则把它分派给
+//! handler。
 //! [`Headers`] 是开放的数字键映射，RPC 层可以在标准头之外携带自定义元数据。
 //!
 //! # `messaging`: the wire format owned by `mptp_smux`
@@ -36,6 +37,7 @@
 
 mod error_;
 mod headers_;
+mod num_or_str_;
 mod prefix_;
 mod wire_;
 

@@ -45,7 +45,7 @@ use thiserror::Error;
 use super::{
     config::{ChannelHandle, ChannelRx, ChannelTx, DockBinding, TrConfig},
     prep_ctx_::ServingPrepCtx,
-    router_::Router,
+    router_::TrPathRouter,
 };
 use crate::{
     messaging,
@@ -86,29 +86,31 @@ pub enum ServeError {
 }
 
 /// 基础服务器组件：持有一张路由表，把每条入向子流分派给它命中的那一个 handler。
-pub struct MptpServer<C, H>
+pub struct MptpServer<C, R>
 where
     C: TrConfig,
-    H: TrReqHandler<C>,
+    R: TrPathRouter,
+    R::Handler: TrReqHandler<C>,
 {
     /// 路径前缀 → handler。
-    router_: Router<H>,
+    router_: R,
 
     /// `C` 只出现在约束里（handler 的类型由 C 决定，但字段本身不含 C），因此需要一个标记。
     _use_c_: PhantomData<fn() -> C>,
 }
 
-impl<C, H> MptpServer<C, H>
+impl<C, R> MptpServer<C, R>
 where
     C: TrConfig,
-    H: TrReqHandler<C>,
+    R: TrPathRouter,
+    R::Handler: TrReqHandler<C>,
 {
     /// 使用指定路由表创建服务器。
     ///
     /// 这里**没有**策略参数：默认 ring 准备工厂是一个**类型**
     /// （[`TrConfig::DefaultPrepFactory`]），由本 crate 在每条入向子流裁决前用环境现场构造，
     /// 没有实例需要提前注入。
-    pub const fn new(router: Router<H>) -> Self {
+    pub const fn new(router: R) -> Self {
         MptpServer {
             router_: router,
             _use_c_: PhantomData,
@@ -116,7 +118,7 @@ where
     }
 
     /// 返回路由表引用，方便继续注册或检查。
-    pub const fn router(&self) -> &Router<H> {
+    pub const fn router(&self) -> &R {
         &self.router_
     }
 
@@ -128,12 +130,12 @@ where
         &'f self,
         tx: ChannelTx<C>,
         rx: ChannelRx<C>,
-    ) -> ServeChannelAsync<'f, 'f, C, H>
+    ) -> ServeChannelAsync<'f, 'f, C, R>
     where
         C: 'f,
-        H: 'f,
+        R: 'f,
     {
-        ServeChannelAsync::<'f, 'f, C, H>::new(self, tx, rx)
+        ServeChannelAsync::<'f, 'f, C, R>::new(self, tx, rx)
     }
 
     /// 在一个 `DockBinding` 上监听，并循环接受子流逐个处理。
@@ -149,14 +151,14 @@ where
         &'f self,
         binding: &'f mut DockBinding<C>,
         reserve: usize,
-    ) -> ServeListenerAsync<'f, 'f, C, H>
+    ) -> ServeListenerAsync<'f, 'f, C, R>
     where
         C: 'f,
-        H: 'f,
+        R: 'f,
         // 环境的构造要从句柄读两个 dock，见 step 函数上的同一条约束。
         ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
     {
-        ServeListenerAsync::<'f, 'f, C, H>::new(self, binding, reserve)
+        ServeListenerAsync::<'f, 'f, C, R>::new(self, binding, reserve)
     }
 }
 
@@ -165,16 +167,17 @@ where
 // 虽然可以被编译器省略，也必须照写——这正是 clippy 提示需要豁免的原因。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ServeChannel, pub, new(pub(crate)))]
-async fn serve_channel_async_<'f, C, H, TyTok>(
-    server: &'f MptpServer<C, H>,
+async fn serve_channel_async_<'f, C, R, K>(
+    server: &'f MptpServer<C, R>,
     tx: ChannelTx<C>,
     mut rx: ChannelRx<C>,
-    cancel: TyTok,
+    cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
-    H: TrReqHandler<C>,
-    TyTok: TrCancellationToken,
+    R: TrPathRouter,
+    R::Handler: TrReqHandler<C>,
+    K: TrCancellationToken,
 {
     // 1. 解码请求前缀。请求体 / 续流由 handler 自行从 `rx` 读取——前缀解码**只读前缀所需的
     //    字节**，体的第一个字节仍在环里。
@@ -188,7 +191,7 @@ where
     let location = prefix.location();
     let handler = server
         .router_
-        .try_match(location)
+        .match_path(location)
         .ok_or_else(|| ServeError::NotFound(location.to_string()))?;
 
     // 3. 头表要交**可变**引用，而前缀只借得出只读引用，因此在这里取一份独立的头表：
@@ -234,10 +237,10 @@ where
 /// 不影响本端要发的响应（响应早就写完并半关闭了）。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(DrainToEofInner, pub(crate), new(pub(crate)))]
-async fn drain_to_eof_inner_async_<'f, TyRx, TyTok>(rx: &'f mut TyRx, cancel: TyTok) -> usize
+async fn drain_to_eof_inner_async_<'f, R, K>(rx: &'f mut R, cancel: K) -> usize
 where
-    TyRx: TrBuffRead<u8>,
-    TyTok: TrCancellationToken,
+    R: TrBuffRead<u8>,
+    K: TrCancellationToken,
 {
     let mut dropped = 0usize;
     let demand = Demand::exactly(4096usize);
@@ -271,19 +274,20 @@ where
 
 /// 监听并循环接受子流的 step 函数。
 #[gen_may_cancel_future(ServeListener, pub, new(pub(crate)))]
-async fn serve_listener_async_<'f, C, H, TyTok>(
-    server: &'f MptpServer<C, H>,
+async fn serve_listener_async_<'f, C, R, K>(
+    server: &'f MptpServer<C, R>,
     binding: &'f mut DockBinding<C>,
     reserve: usize,
-    cancel: TyTok,
+    cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
-    H: TrReqHandler<C>,
+    R: TrPathRouter,
+    R::Handler: TrReqHandler<C>,
     // 环境的构造要从**句柄**读两个 dock，因此句柄必须能回答它们——这是 `abs_smux` 的
     // `TrChannelHalf` 契约，与「最终裁决」那条契约彼此独立。
     ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
-    TyTok: TrCancellationToken,
+    K: TrCancellationToken,
 {
     let mut listener = binding
         .listen_async(reserve)
