@@ -26,6 +26,7 @@ use abs_mptp::{
         access_method::AccessMethod,
     },
 };
+use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::{
     client::MptpClient,
     messaging::{Headers, RequestPrefix},
@@ -38,9 +39,10 @@ use crate::{
         encode_into_async_,
         read_body_async_,
     },
+    client as rpc_client,
     error_::{RpcError, RpcResult},
     interface_::{TrRpcInterface, location},
-    x_deps::{abs_cancel, abs_mptp},
+    x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };
 
 /// 客户端极简代理。
@@ -53,7 +55,11 @@ use crate::{
 /// let proxy = client.call::<ApiV1>();
 /// let goods = proxy.find("name").await?;
 /// ```
-pub struct ClientProxy<'a, C: crate::client::TrRpcClientConfig, I: TrRpcInterface> {
+pub struct ClientProxy<'a, C, I>
+where
+    C: rpc_client::TrRpcClientConfig,
+    I: TrRpcInterface,
+{
     /// 底层 MPTP 客户端。
     client_: &'a MptpClient<C>,
 
@@ -61,7 +67,11 @@ pub struct ClientProxy<'a, C: crate::client::TrRpcClientConfig, I: TrRpcInterfac
     _iface_: PhantomData<I>,
 }
 
-impl<'a, C: crate::client::TrRpcClientConfig, I: TrRpcInterface> ClientProxy<'a, C, I> {
+impl<'a, C, I> ClientProxy<'a, C, I>
+where
+    C: rpc_client::TrRpcClientConfig,
+    I: TrRpcInterface,
+{
     /// 由底层客户端构造代理。
     ///
     /// 通常不需要直接调用：使用 [`TrRpcClientExt::call`] 或
@@ -103,12 +113,18 @@ impl<'a, C: crate::client::TrRpcClientConfig, I: TrRpcInterface> ClientProxy<'a,
 ///     let _proxy = client.call::<ApiV1>();
 /// }
 /// ```
-pub trait TrRpcClientExt<C: crate::client::TrRpcClientConfig> {
+pub trait TrRpcClientExt<C>
+where
+    C: rpc_client::TrRpcClientConfig,
+{
     /// 以 `I` 为 interface 选择一份客户端视图。
     fn call<I: TrRpcInterface>(&self) -> ClientProxy<'_, C, I>;
 }
 
-impl<C: crate::client::TrRpcClientConfig> TrRpcClientExt<C> for MptpClient<C> {
+impl<C> TrRpcClientExt<C> for MptpClient<C>
+where
+    C: rpc_client::TrRpcClientConfig,
+{
     fn call<I: TrRpcInterface>(&self) -> ClientProxy<'_, C, I> {
         ClientProxy::new(self)
     }
@@ -118,12 +134,12 @@ impl<C: crate::client::TrRpcClientConfig> TrRpcClientExt<C> for MptpClient<C> {
 ///
 /// 接口宏会为每个 `#[rpc(path = "...")]` 类型生成它的实现；`select` 的返回值就是
 /// `ClientProxy<'a, C, I>`。它让调用点不必显式写 `call::<I>()`。
-pub trait ServiceSelector<C: crate::client::TrRpcClientConfig> {
+pub trait ServiceSelector<C>
+where
+    C: rpc_client::TrRpcClientConfig,
+{
     /// 本 interface 的客户端视图。
-    type View<'a>
-    where
-        Self: 'a,
-        C: 'a;
+    type View<'a> where Self: 'a, C: 'a;
 
     /// 从底层客户端选出本 interface 的视图。
     fn select<'a>(client: &'a MptpClient<C>) -> Self::View<'a>;
@@ -134,7 +150,7 @@ pub trait ServiceSelector<C: crate::client::TrRpcClientConfig> {
 /// `interface` 由类型参数 `I::PATH` 提供，`service` 是 trait 的 `SERVICE_PATH`；
 /// 两者拼成 `/{interface}/{service}`。方法名只出现在 body enum 里，不参与路由。
 #[allow(clippy::needless_lifetimes)]
-#[crate::x_deps::gen_mcf2::gen_may_cancel_future(UnaryCall, pub(crate), new(pub(crate)))]
+#[gen_may_cancel_future(UnaryCall, pub(crate), new(pub(crate)))]
 async fn unary_call_async_<'a, 'f, C, I, Req, Rep, TyTok>(
     proxy: &'f ClientProxy<'a, C, I>,
     service: &'static str,
@@ -143,7 +159,7 @@ async fn unary_call_async_<'a, 'f, C, I, Req, Rep, TyTok>(
 ) -> RpcResult<Rep>
 where
     'a: 'f,
-    C: crate::client::TrRpcClientConfig,
+    C: rpc_client::TrRpcClientConfig,
     I: TrRpcInterface,
     Req: TrEncodable + 'f,
     Rep: TrDecodableOwned + 'f,

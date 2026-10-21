@@ -40,7 +40,7 @@
 use core::marker::PhantomData;
 
 use crate::{
-    client::{DefaultRpcAllocConfig, TrRpcClienAllocConfig, TrRpcClientConfig},
+    client::{DefaultRpcAllocConfig, TrRpcClientAllocConfig, TrRpcClientConfig},
     prep_::{ClientPrepFactory, ServingPrepFactory},
     serving::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfig},
     x_deps::{
@@ -185,7 +185,7 @@ impl<TyConn, TyDock, TyAllocCfg> abs_mptp::client::config::TrConfig
 where
     TyConn: TrConnection<Config: TrMuxConfig<Data = u8, Dock = TyDock>>,
     TyDock: TrDefaultDock,
-    TyAllocCfg: TrRpcClienAllocConfig,
+    TyAllocCfg: TrRpcClientAllocConfig,
 {
     type MuxConn = TyConn;
 
@@ -201,7 +201,7 @@ impl<TyConn, TyDock, TyAllocCfg> mptp_cli_cfg::TrConfig for ClientConfig<TyConn,
 where
     TyConn: TrUserConn<TyDock> + 'static,
     TyDock: TrDefaultDock + 'static,
-    TyAllocCfg: TrRpcClienAllocConfig + 'static,
+    TyAllocCfg: TrRpcClientAllocConfig + 'static,
 {
     /// ring 内存的来源：按分配约定造新内存的工厂。
     type DefaultPrepFactory = ClientPrepFactory<Self, TyAllocCfg>;
@@ -219,7 +219,7 @@ impl<TyConn, TyDock, TyAllocCfg> TrRpcClientConfig for ClientConfig<TyConn, TyDo
 where
     TyConn: TrUserConn<TyDock> + 'static,
     TyDock: TrDefaultDock + 'static,
-    TyAllocCfg: TrRpcClienAllocConfig + 'static,
+    TyAllocCfg: TrRpcClientAllocConfig + 'static,
 {
     type AllocCfg = TyAllocCfg;
 }

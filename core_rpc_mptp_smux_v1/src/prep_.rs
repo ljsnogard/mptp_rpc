@@ -52,7 +52,7 @@ use mptp_smux::{
 };
 
 use crate::{
-    client::TrRpcClienAllocConfig,
+    client::TrRpcClientAllocConfig,
     serving::TrServingAllocConfig,
     x_deps::{abs_mm, abs_smux, mptp_smux},
 };
@@ -67,27 +67,27 @@ pub const K_CHANNEL_CAP: usize = 4usize * 1024usize;
 ///
 /// 分配器是参数，缺省是系统分配器：把「这块内存从哪来」写在类型里，调用者换分配器时不必改
 /// 任何函数签名。
-pub type RingBuff<CyAlloc = CoreAlloc> = Owned<[MaybeUninit<u8>], CyAlloc>;
+pub type RingBuff<A = CoreAlloc> = Owned<[MaybeUninit<u8>], A>;
 
 /// 造一块 `cap` 字节的 ring 内存（尚未初始化）。
 ///
 /// 每条入向子流都必须**新造两块**：上游 `accept_async` 会拿走准备器的所有权，把同一块内存交给
 /// 两条子流必然出错。这个函数就是「造一块新的」这条纪律的落点。
-pub fn new_ring_buff_<CyAlloc>(cap: usize, alloc: CyAlloc) -> RingBuff<CyAlloc>
+pub fn new_ring_buff<A>(cap: usize, alloc: A) -> RingBuff<A>
 where
-    CyAlloc: AllocatorClone,
+    A: AllocatorClone,
 {
     Owned::new_uninit_slice(cap, alloc)
 }
 
 /// 造一份准备器：两块各 `cap` 字节的新 ring，分配器取自同一个实例（分配器本身可克隆）。
-pub fn new_ring_buffs_<CyAlloc>(cap: usize, alloc: CyAlloc) -> RingBuffs<RingBuff<CyAlloc>>
+pub fn new_ring_buff_pair<A>(cap: usize, alloc: A) -> RingBuffs<RingBuff<A>>
 where
-    CyAlloc: AllocatorClone,
+    A: AllocatorClone,
 {
     RingBuffs::new(
-        new_ring_buff_(cap, alloc.clone()),
-        new_ring_buff_(cap, alloc),
+        new_ring_buff(cap, alloc.clone()),
+        new_ring_buff(cap, alloc),
     )
 }
 
@@ -102,28 +102,28 @@ where
 ///
 /// 泛型参数是**使用者配置**与**分配约定**：工厂的环境类型由前者推导，ring 的分配器由后者
 /// 给出。
-pub struct ClientPrepFactory<CyCfg, CyAllocCfg>
+pub struct ClientPrepFactory<TyCfg, TyAllocCfg>
 where
-    CyAllocCfg: TrRpcClienAllocConfig,
+    TyAllocCfg: TrRpcClientAllocConfig,
 {
     /// 本次建流的容量；目前由环境确认后就取常量，将来可按角色 / dock 分档。
     cap_: usize,
 
     /// 本端 ring 存储的分配器实例。
-    alloc_: CyAllocCfg::RingAlloc,
+    alloc_: TyAllocCfg::RingAlloc,
 
     /// 配置类型只出现在关联类型的推导里，字段本身不含它。
-    _use_cfg_: core::marker::PhantomData<fn() -> CyCfg>,
+    _use_cfg_: core::marker::PhantomData<fn() -> TyCfg>,
 }
 
-impl<TyCfg, CyAllocCfg> TrPrepFactory for ClientPrepFactory<TyCfg, CyAllocCfg>
+impl<TyCfg, TyAllocCfg> TrPrepFactory for ClientPrepFactory<TyCfg, TyAllocCfg>
 where
     TyCfg: client_cfg::TrConfig,
-    CyAllocCfg: TrRpcClienAllocConfig,
+    TyAllocCfg: TrRpcClientAllocConfig,
 {
     type Ctx<'a> = ClientPrepCtx<'a, client_cfg::MuxCfg<TyCfg>>;
 
-    type RingBuff = RingBuff<CyAllocCfg::RingAlloc>;
+    type RingBuff = RingBuff<TyAllocCfg::RingAlloc>;
 
     type Prep = RingBuffs<Self::RingBuff>;
 
@@ -135,7 +135,7 @@ where
         let _ = (ctx.local_dock(), ctx.remote_dock(), ctx.role());
         ClientPrepFactory {
             cap_: K_CHANNEL_CAP,
-            alloc_: CyAllocCfg::RingAlloc::default(),
+            alloc_: TyAllocCfg::RingAlloc::default(),
             _use_cfg_: core::marker::PhantomData,
         }
     }
@@ -153,7 +153,7 @@ where
     fn get_prepared_async<'f>(&'f mut self) -> Self::GetPreparedAsync<'f> {
         // 每次都是**新的**两块：上游 `accept_async` 会拿走所有权。
         let cap = self.cap_;
-        core::future::ready(Result::Ok(new_ring_buffs_(cap, self.alloc_.clone())))
+        core::future::ready(Result::Ok(new_ring_buff_pair(cap, self.alloc_.clone())))
     }
 }
 
@@ -208,7 +208,7 @@ where
 
     fn get_prepared_async<'f>(&'f mut self) -> Self::GetPreparedAsync<'f> {
         let cap = self.cap_;
-        core::future::ready(Result::Ok(new_ring_buffs_(cap, self.alloc_.clone())))
+        core::future::ready(Result::Ok(new_ring_buff_pair(cap, self.alloc_.clone())))
     }
 }
 

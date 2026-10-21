@@ -69,7 +69,7 @@ mod interface_;
 mod prep_;
 
 pub use client::{
-    ClientProxy, DefaultRpcAllocConfig, Dock, ServiceSelector, TrRpcClienAllocConfig,
+    ClientProxy, DefaultRpcAllocConfig, Dock, ServiceSelector, TrRpcClientAllocConfig,
     TrRpcClientConfig, TrRpcClientExt,
 };
 pub use config_::{ClientConfig, ServingConfig, TrDefaultDock, TrUserConn};
@@ -82,7 +82,7 @@ pub use mptp_smux::{
     x_deps::{abs_mm::CoreAlloc, mm_ptr::Owned},
 };
 pub use prep_::{
-    ClientPrepFactory, K_CHANNEL_CAP, RingBuff, ServingPrepFactory, new_ring_buff_, new_ring_buffs_,
+    ClientPrepFactory, K_CHANNEL_CAP, RingBuff, ServingPrepFactory, new_ring_buff, new_ring_buff_pair,
 };
 pub use serving::{
     DefaultServingAllocConfig, K_DEFAULT_SERVICE_QUEUE_CAP, RpcCallCtx, RpcJob, RpcRouter,

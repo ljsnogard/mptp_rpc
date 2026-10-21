@@ -73,7 +73,12 @@ pub struct RpcJob<C: TrServingConfig> {
 
 impl<C: TrServingConfig> RpcJob<C> {
     /// 由路由结果构造一个 job。
-    pub fn new(location: String, headers: Headers, tx: ChannelTx<C>, rx: ChannelRx<C>) -> Self {
+    pub fn new(
+        location: String,
+        headers: Headers,
+        tx: ChannelTx<C>,
+        rx: ChannelRx<C>,
+    ) -> Self {
         RpcJob {
             location_: location,
             headers_: headers,

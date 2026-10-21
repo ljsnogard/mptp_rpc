@@ -23,7 +23,7 @@ use core::alloc::AllocatorClone;
 /// 它只回答**类型**：分配器的实例由使用者在构造处当场给出（共享连接对象）或由准备工厂在
 /// 最终裁决前取出（ring 存储）。这条分工与 `abs_smux` 一致——内存的来源属于调用方，不属于
 /// 连接。
-pub trait TrRpcClienAllocConfig {
+pub trait TrRpcClientAllocConfig {
     /// 用于共享连接对象（`mm_ptr::Shared`）的分配器。
     ///
     /// 实例由使用者在构造处当场给出，因此只需要「可克隆的分配器」这一条。

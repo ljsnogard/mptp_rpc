@@ -14,6 +14,6 @@ mod proxy_;
 
 pub mod config;
 
-pub use alloc_config_::TrRpcClienAllocConfig;
+pub use alloc_config_::TrRpcClientAllocConfig;
 pub use config::{DefaultRpcAllocConfig, Dock, TrRpcClientConfig};
 pub use proxy_::{ClientProxy, ServiceSelector, TrRpcClientExt, call_unary_async};

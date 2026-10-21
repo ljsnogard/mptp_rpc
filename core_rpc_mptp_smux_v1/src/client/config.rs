@@ -18,14 +18,14 @@
 //! now, so it is no longer a knob here.
 
 use crate::x_deps::{abs_mm, abs_mptp, abs_smux, mptp_smux};
-use super::alloc_config_::TrRpcClienAllocConfig;
+use super::alloc_config_::TrRpcClientAllocConfig;
 
 /// 一个 MPTP RPC 客户端所需的配置。
 ///
 /// 它只补 `mptp_smux` 没有回答的那一块：本端的内存分配约定。
 pub trait TrRpcClientConfig: mptp_smux::client::config::TrConfig + Sized {
     /// 本端的内存分配约定（共享连接对象与子流 ring 各自的分配器）。
-    type AllocCfg: TrRpcClienAllocConfig;
+    type AllocCfg: TrRpcClientAllocConfig;
 }
 
 /// **缺省**的客户端分配约定：共享连接对象与 ring 都走系统分配器。
@@ -34,7 +34,7 @@ pub trait TrRpcClientConfig: mptp_smux::client::config::TrConfig + Sized {
 /// [`TrRpcClienAllocConfig`] 实现，并把它放进 `ClientConfig` 的第三个类型参数。
 pub struct DefaultRpcAllocConfig;
 
-impl TrRpcClienAllocConfig for DefaultRpcAllocConfig {
+impl TrRpcClientAllocConfig for DefaultRpcAllocConfig {
     type SharedConnAlloc = abs_mm::CoreAlloc;
 
     type RingAlloc = abs_mm::CoreAlloc;

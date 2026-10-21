@@ -1,8 +1,8 @@
 use abs_buff::x_deps::abs_cancel;
 use abs_cancel::TrMayCancel;
 
-use super::config as srv_config;
 use crate::spec::access_method::AccessMethod;
+use super::config as srv_config;
 
 /// 路径级 handler：在一条子流上响应某个具体路径的任意方法请求。
 ///
