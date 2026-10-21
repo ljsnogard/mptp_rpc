@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 # 只使用 Phase 0 保留的配置与分配骨架；RPC 层在本 demo 里手动实现。
-core_rpc_mptp_smux_v1 = { path = "../core_rpc_mptp_smux_v1", default-features = false }
+rpc_core_v1 = { path = "../rpc_core_v1", default-features = false }
 mptp_smux = { path = "../mptp_smux" }
 abs_mptp = { path = "../abs_mptp" }
 

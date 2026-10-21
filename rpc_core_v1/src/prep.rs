@@ -178,14 +178,14 @@ where
     _use_cfg_: core::marker::PhantomData<fn() -> TyCfg>,
 }
 
-impl<CyCfg, CyAllocCfg> TrPrepFactory for ServingPrepFactory<CyCfg, CyAllocCfg>
+impl<TyCfg, TyAllocCfg> TrPrepFactory for ServingPrepFactory<TyCfg, TyAllocCfg>
 where
-    CyCfg: serving_cfg::TrConfig,
-    CyAllocCfg: TrServingAllocConfig,
+    TyCfg: serving_cfg::TrConfig,
+    TyAllocCfg: TrServingAllocConfig,
 {
-    type Ctx<'a> = ServingPrepCtx<'a, serving_cfg::MuxCfg<CyCfg>>;
+    type Ctx<'a> = ServingPrepCtx<'a, serving_cfg::MuxCfg<TyCfg>>;
 
-    type RingBuff = RingBuff<CyAllocCfg::RingAlloc>;
+    type RingBuff = RingBuff<TyAllocCfg::RingAlloc>;
 
     type Prep = RingBuffs<Self::RingBuff>;
 
@@ -195,7 +195,7 @@ where
         let _ = (ctx.local_dock(), ctx.remote_dock(), ctx.role());
         ServingPrepFactory {
             cap_: K_CHANNEL_CAP,
-            alloc_: CyAllocCfg::RingAlloc::default(),
+            alloc_: TyAllocCfg::RingAlloc::default(),
             _use_cfg_: core::marker::PhantomData,
         }
     }
@@ -215,12 +215,12 @@ where
 // 让「工厂交出的准备器确实实现了上游契约」这条约束在编译期被检查一次：`RingBuffs` 若不满足
 // `TrPrepareRing`，`TrPrepFactory` 的关联类型约束就会在这里炸掉。
 const _: fn() = || {
-    fn assert_prepare_ring<CyB, Ty, CyP>()
+    fn assert_prepare_ring<B, T, P>()
     where
-        CyP: abs_smux::chan::TrPrepareRing<CyB, Ty>,
-        CyB: 'static + Send + Sync + abs_mm::res_man::TrUnique<Item = [MaybeUninit<Ty>]>,
-        CyB::Alloc: AllocatorClone,
-        Ty: 'static + Sized,
+        B: 'static + Send + Sync + abs_mm::res_man::TrUnique<Item = [MaybeUninit<T>]>,
+        B::Alloc: AllocatorClone,
+        T: 'static + Sized,
+        P: abs_smux::chan::TrPrepareRing<B, T>,
     {}
     assert_prepare_ring::<RingBuff, u8, RingBuffs<RingBuff>>();
 };

@@ -15,7 +15,7 @@
 //! service prefix inside it. Job delivery, rejection replies and channel cleanup stay in the
 //! core handler adapter.
 
-use core_rpc_mptp_smux_v1::serving::{
+use rpc_core_v1::serving::{
     RpcRouterHandler, ServiceRoute, TrRpcRouter, TrServingConfig,
 };
 use thiserror::Error;

@@ -12,6 +12,6 @@ readme = "README.md"
 [dependencies]
 # router 契约、RpcJob、ServiceRoute 与默认队列容量都在 core 里；本 crate 只实现
 # 「怎么找 service」。不直接依赖 mptp_smux / abs_mptp，避免实现层再拉入协议细节。
-core_rpc_mptp_smux_v1 = { path = "../core_rpc_mptp_smux_v1", default-features = false }
+rpc_core_v1 = { path = "../rpc_core_v1", default-features = false }
 
 thiserror = "2.0.20"

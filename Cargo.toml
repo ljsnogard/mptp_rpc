@@ -2,8 +2,10 @@
 resolver = "3"
 members = [
     "abs_mptp",
-    "core_rpc_mptp_smux_v1",
+    "abs_mptp_smux",
+    "abs_rpc_serv",
     "mptp_smux",
+    "rpc_core_v1",
     "rpc_router_trie",
     "rpc_svc_macro",
 
@@ -15,3 +17,4 @@ members = [
 [workspace.package]
 edition = "2024"
 authors = ["lino <lino_snsalias@outlook.com>"]
+repository = "https://github.com/ljsnogard/mptp_rpc"

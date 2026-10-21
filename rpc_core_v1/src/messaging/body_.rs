@@ -29,10 +29,8 @@ use abs_mptp::messaging::{chunked::ChunkedReader, limited::LimitedReader};
 use buffex::ring::Ring;
 use mp_denco::{MpDecoder, MpEncoder};
 
-use crate::{
-    error_::{RpcError, RpcResult},
-    x_deps::{abs_buff, abs_cancel, abs_mptp},
-};
+use crate::x_deps::{abs_buff, abs_cancel, abs_mptp};
+use super::error_::{RpcError, RpcResult};
 
 /// 编码 / 发送之间的 ring 窗口（字节）。
 ///

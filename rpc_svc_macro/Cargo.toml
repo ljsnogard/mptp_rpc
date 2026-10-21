@@ -23,9 +23,9 @@ syn = { version = "2", features = ["full", "visit", "visit-mut"] }
 # 集成测试要真实编译生成代码，因此需要 core 运行时与它用到的 denco / 取消令牌。
 abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
-core_rpc_mptp_smux_v1 = { path = "../core_rpc_mptp_smux_v1", default-features = false }
 denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+rpc_core_v1 = { path = "../rpc_core_v1", default-features = false }
 # 集成测试会实例化具体 router；实现已从 core 拆到本 crate。
 rpc_router_trie = { path = "../rpc_router_trie", default-features = false }

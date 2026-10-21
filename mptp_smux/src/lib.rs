@@ -49,7 +49,7 @@ pub mod serving;
 mod ring_prepare_;
 
 pub use messaging::{
-    HeaderEntry, HeaderVal, Headers, RequestPrefix, ResponsePrefix, U16OrStr,
+    HeaderEntry, HeaderKey, HeaderVal, Headers, RequestPrefix, ResponsePrefix, U16OrStr,
 };
 pub use ring_prepare_::{PeerRole, RingBuffs, TrPrepFactory, TrPrepareCtx};
 

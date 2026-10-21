@@ -4,7 +4,7 @@ name = "mptp_smux"
 version = "0.1.0"
 
 description = "MPTP implementation based on `abs_smux`"
-repository = "https://github.com/ljsnogard/msgpk_rpc_core"
+repository.workspace = true
 keywords = ["rpc"]
 categories = ["no-std"]
 license = "MIT/Apache-2.0"

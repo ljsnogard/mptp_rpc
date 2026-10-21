@@ -2,238 +2,152 @@
 //!
 //! 头表是前缀里**唯一的开放部分**：方法与状态是固定取值，`location` 是一段文本，而头表允许
 //! 两端在标准键之外携带自定义键。本模块把这张表实现成一个便宜的句柄
-//! （`Arc<BTreeMap<U16OrStr<S>, HeaderVal>>`），因此前缀解码一次之后，handler 拿到的
+//! （`Arc<BTreeMap<HeaderKey<S>, HeaderVal<S>>>`），因此前缀解码一次之后，handler 拿到的
 //! 克隆与框架手里的头表共享同一份存储。
 //!
-//! # 键类型
+//! # 键与值
 //!
-//! 键是本 crate 复刻的 [`U16OrStr`]：数字形态是协议标准键（`u16`），字符串形态由使用者在
-//! `S` 上选择（`String` / `Arc<str>` / `Box<str>`……），缺省 `S = String`。这与
-//! `abs_mptp::spec::TrHeaders::Key` 的要求一致，但为本 crate 的类型保留了 denco 编解码能力。
+//! 键与值都是本 crate 复刻的 [`U16OrStr`] 的透明封装：[`HeaderKey`] 与 [`HeaderVal`]。
+//! 数字形态是协议标准键值（`u16`），字符串形态由使用者在 `S` 上选择（`String` /
+//! `Arc<str>` / `Box<str>`……），缺省 `S = String`。这与
+//! `abs_mptp::spec::TrHeaders` 对键和值的要求一致，同时保留了 denco 编解码能力。
 //!
 //! # 线上形态
 //!
-//! 它被编码成 MessagePack 的「数字或字符串键 → 值」映射。数字键仍写成整数（与旧格式逐字节
-//! 兼容），字符串键写成字符串；值暂时仍由 [`HeaderVal`] 表达。
+//! 它被编码成 MessagePack 的「数字或字符串键 → 数字或字符串值」映射。键与值都直接写成
+//! 整数或字符串，不写变体标签（与旧格式逐字节兼容）。
 //!
-//! # 兼容性
+//! # 入口约定
 //!
-//! - [`HeaderVal`] 暂时保留为值类型；后续会替换为 [`U16OrStr`] 并移除。
 //! - 标准键的便捷入口 [`Headers::try_get_val`] / [`Headers::set_num`] /
-//!   [`Headers::set_text`] / [`Headers::remove`] 仍收 [`StdHeaderKey`]。
-//! - `TrHeaders::try_get_header` 与 `TrHeadersMut` 的键参数现在是 [`U16OrStr`]；
-//!   标准键可用 `U16OrStr::U16(u16::from(key))`，或改用 `try_get_val`。
-//! - [`Headers::iter`] 返回新键；只需要数字键时用 [`Headers::iter_std`]。
-//! - [`HeaderEntry::key`] 返回新键的借用；需要标准键时用
-//!   [`HeaderEntry::key_std`]（仅 `HeaderEntry<String>`）。
+//!   [`Headers::set_text`] / [`Headers::remove`] 收 [`StdHeaderKey`]。
+//! - `TrHeaders::try_get_header` 与 `TrHeadersMut` 的键参数是 [`HeaderKey`]；
+//!   标准键可用 `HeaderKey::from(key)`，或改用 `try_get_val`。
+//! - [`Headers::iter`] 返回 [`HeaderKey`] 键；只需要数字键时用 [`Headers::iter_std`]。
+//! - [`HeaderEntry::key`] 返回 [`HeaderKey`]；需要标准键时用
+//!   [`HeaderEntry::key_std`]。
 //!
 //! # `headers_`: the MPTP header map
 //!
 //! The header map is the only open-ended part of a prefix. It is a cheap handle over
-//! `Arc<BTreeMap<U16OrStr<S>, HeaderVal>>`, encoded as a MessagePack map whose keys may
-//! be integers or strings. The string representation `S` defaults to `String`; `HeaderVal`
-//! stays as the value type until the follow-up migration replaces it with `U16OrStr`.
+//! `Arc<BTreeMap<HeaderKey<S>, HeaderVal<S>>>`, encoded as a MessagePack map whose keys and
+//! values are written as plain integers or strings. The string representation `S` defaults
+//! to `String`; both [`HeaderKey`] and [`HeaderVal`] are transparent wrappers around
+//! `U16OrStr<S>`.
 
-use core::{borrow::Borrow, fmt, future, marker::PhantomData};
+use core::{borrow::Borrow, fmt, marker::PhantomData};
 use std::{collections::BTreeMap, sync::Arc};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{
-    de::{
-        Error as DencoError, MapAccess, MapAccessExt, TrDecodable, TrDecoder, Unexpected, Visitor,
-    },
+    de::{MapAccess, MapAccessExt, TrDecodable, TrDecoder, Visitor},
     ser::{TrEncodable, TrEncodeMap, TrEncoder},
 };
 use abs_mptp::spec::{
     NumOrStr as AbsNumOrStr, StdHeaderKey, StdHeaderVal, TrHeaders, TrHeadersMut,
     TrNumOrStr as AbsTrNumOrStr,
 };
+use denco_macro::{TrDecodable, TrEncodable};
 use gen_mcf2::gen_may_cancel_future;
 
 use super::num_or_str_::U16OrStr;
 
 /// 一个头值：协议标准头只有「一个数字」或「一段文本」两种形态。
 ///
-/// 数字形态用 `u16`：标准键与大多数标准值都在这个范围里；`Data_Type_Id` 这类 64 位标识按
+/// 它是 [`U16OrStr<S>`](U16OrStr) 的透明封装：数字形态用 `u16`，字符串形态由 `S`
+/// 选择，因此与键共享同一套「数字或字符串」表示。`Data_Type_Id` 这类 64 位标识按
 /// 文本携带（[`HeaderVal::as_u64`] 同时认十进制与十六进制）。
-///
-/// **兼容期类型**：头表的键已经改为 [`U16OrStr<S>`](U16OrStr)，值暂时保留本枚举；
-/// 后续会把它替换为 `U16OrStr<S>` 并移除 `HeaderVal`。
 ///
 /// # 线上表示
 ///
-/// 两种形态直接写成 MessagePack 的整数或字符串，**不写** `"Num"` / `"Text"` 之类的变体
-/// 标签。MessagePack 的整数标记与字符串标记本来就不同，接收方按标记分派即可；额外的标签
-/// 只会增加字节，不提供任何信息。
+/// 直接写成 MessagePack 的整数或字符串，**不写**变体标签；派生被标记为
+/// `#[denco(transparent)]`，编解码完全转发给 [`U16OrStr`] 的手写实现。
 ///
 /// # Examples
 ///
 /// ```
 /// use mptp_smux::messaging::HeaderVal;
 ///
-/// let num = HeaderVal::Num(7u16);
-/// let text = HeaderVal::Text("0xabc".to_string());
+/// let num = HeaderVal::<String>::from_num(7u16);
+/// let text = HeaderVal::<String>::from_text("0xabc");
 ///
 /// assert_eq!(num.as_num(), Some(7u16));
 /// assert_eq!(text.as_u64(), Some(0xabcu64));
 /// ```
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HeaderVal {
-    /// 数字形态。
-    Num(u16),
-
-    /// 文本形态。
-    Text(String),
-}
-
-impl TrEncodable for HeaderVal {
-    type EncodeAsync<'a, S>
-        = EncodeHeaderValAsync<'a, 'a, S>
-    where
-        Self: 'a,
-        S: TrEncoder + 'a,
-        S::Ok: 'a,
-        S::Error: 'a;
-
-    fn encode_async<'a, S>(&'a self, encoder: S) -> Self::EncodeAsync<'a, S>
-    where
-        Self: 'a,
-        S: TrEncoder + 'a,
-        S::Ok: 'a,
-        S::Error: 'a,
-    {
-        EncodeHeaderValAsync::new(self, encoder)
-    }
-}
-
-/// [`HeaderVal`] 编码的 step 函数：数字写整数，文本写字符串，不写变体标签。
-#[gen_may_cancel_future(EncodeHeaderVal, pub, new(pub(crate)))]
-async fn encode_header_val_async_<'a, S, C>(
-    value: &'a HeaderVal,
-    encoder: S,
-    cancel: C,
-) -> Result<S::Ok, S::Error>
+///
+/// A header value: either a `u16` number or a string. It is a transparent wrapper
+/// around `U16OrStr<S>`, so values share the numeric-or-string representation with keys.
+#[derive(Clone, Debug, Eq, PartialEq, TrDecodable, TrEncodable)]
+#[denco(transparent)]
+pub struct HeaderVal<S = String>(U16OrStr<S>)
 where
-    S: TrEncoder + 'a,
-    S::Ok: 'a,
-    S::Error: 'a,
-    C: TrCancellationToken,
-{
-    match value {
-        HeaderVal::Num(num) => encoder.encode_u16(*num).may_cancel_with(cancel).await,
-        HeaderVal::Text(text) => {
-            encoder
-                .encode_str(text.as_str())
-                .may_cancel_with(cancel)
-                .await
-        }
-    }
-}
+    S: Borrow<str>;
 
-/// [`HeaderVal`] 的访问者：按 MessagePack 线类型区分整数与字符串。
-struct HeaderValVisitor;
-
-impl<'de> Visitor<'de> for HeaderValVisitor {
-    type Value = HeaderVal;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a non-negative integer or a string")
-    }
-
-    fn visit_u64<'a, E>(
-        self,
-        value: u64,
-    ) -> impl TrMayCancel<'a, MayCancelOutput = Result<Self::Value, E>>
-    where
-        Self: 'a,
-        Self::Value: 'a,
-        E: DencoError + 'a,
-    {
-        let result = u16::try_from(value)
-            .map(HeaderVal::Num)
-            .map_err(|_| <E as DencoError>::invalid_value(Unexpected::Unsigned(value), &self));
-        future::ready(result)
-    }
-
-    fn visit_i64<'a, E>(
-        self,
-        value: i64,
-    ) -> impl TrMayCancel<'a, MayCancelOutput = Result<Self::Value, E>>
-    where
-        Self: 'a,
-        Self::Value: 'a,
-        E: DencoError + 'a,
-    {
-        let result = u16::try_from(value)
-            .map(HeaderVal::Num)
-            .map_err(|_| <E as DencoError>::invalid_value(Unexpected::Signed(value), &self));
-        future::ready(result)
-    }
-
-    fn visit_str<'a, E>(
-        self,
-        value: &'a str,
-    ) -> impl TrMayCancel<'a, MayCancelOutput = Result<Self::Value, E>>
-    where
-        Self: 'a,
-        Self::Value: 'a,
-        E: DencoError + 'a,
-    {
-        future::ready(Result::Ok(HeaderVal::Text(value.to_string())))
-    }
-
-    fn visit_string<'a, E>(
-        self,
-        value: String,
-    ) -> impl TrMayCancel<'a, MayCancelOutput = Result<Self::Value, E>>
-    where
-        Self: 'a,
-        Self::Value: 'a,
-        E: DencoError + 'a,
-    {
-        future::ready(Result::Ok(HeaderVal::Text(value)))
-    }
-}
-
-/// [`HeaderVal`] 解码的 step 函数：交给 `decode_any`，由 `HeaderValVisitor` 分派。
-#[gen_may_cancel_future(DecodeHeaderVal, pub, new(pub(crate)))]
-async fn decode_header_val_async_<'de, 'a, D, C>(
-    decoder: D,
-    cancel: C,
-) -> Result<HeaderVal, D::Error>
+/// 一个头键：与 [`HeaderVal`] 同构的「数字或字符串」表示。
+///
+/// 数字形态就是协议标准键，字符串形态用于使用者自定义键；两者在线上都不带变体标签。
+/// 头表的键类型就是本类型；它与 [`HeaderVal`] 一起让 [`HeaderEntry`] 的键值字段都有
+/// 强类型。
+///
+/// # Examples
+///
+/// ```
+/// use mptp_smux::messaging::{HeaderKey, U16OrStr};
+///
+/// let key = HeaderKey::<String>::from_num(0xA1);
+/// assert_eq!(key.into_inner(), U16OrStr::U16(0xA1));
+/// ```
+///
+/// A header key with the same numeric-or-string shape as [`HeaderVal`]. Numeric keys
+/// are protocol standard keys; string keys are user-defined.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, TrDecodable, TrEncodable)]
+#[denco(transparent)]
+pub struct HeaderKey<S = String>(U16OrStr<S>)
 where
-    'de: 'a,
-    D: TrDecoder<'de> + 'a,
-    D::Error: 'a,
-    C: TrCancellationToken,
+    S: Borrow<str>;
+
+impl<S> HeaderVal<S>
+where
+    S: Borrow<str>,
 {
-    decoder
-        .decode_any(HeaderValVisitor)
-        .may_cancel_with(cancel)
-        .await
-}
-
-impl<'de> TrDecodable<'de> for HeaderVal {
-    type DecodeAsync<'a, D>
-        = DecodeHeaderValAsync<'de, 'a, 'a, D>
-    where
-        'de: 'a,
-        D: TrDecoder<'de> + 'a,
-        D::Error: 'a,
-        Self: 'a;
-
-    fn decode_async<'a, D>(decoder: D) -> Self::DecodeAsync<'a, D>
-    where
-        'de: 'a,
-        D: TrDecoder<'de> + 'a,
-        D::Error: 'a,
-        Self: 'a,
-    {
-        DecodeHeaderValAsync::new(decoder)
+    /// 由数字形态构造一个头值。
+    ///
+    /// Build a numeric header value.
+    pub const fn from_header_val(v: StdHeaderVal) -> Self {
+        HeaderVal(U16OrStr::U16(v.into_inner()))
     }
-}
 
-impl HeaderVal {
+    /// 由裸 `u16` 构造一个数字头值（不校验它是否是标准值）。
+    ///
+    /// Build a numeric header value from a bare `u16` without checking its standard meaning.
+    pub const fn from_num(num: u16) -> Self {
+        HeaderVal(U16OrStr::U16(num))
+    }
+
+    /// 由文本构造一个头值；字符串形态由 `S: From<String>` 决定。
+    ///
+    /// Build a textual header value; the string representation comes from `S`.
+    pub fn from_text(text: impl Into<String>) -> Self
+    where
+        S: From<String>,
+    {
+        HeaderVal(U16OrStr::Str(S::from(text.into())))
+    }
+
+    /// 取出内部的 [`U16OrStr<S>`](U16OrStr)。
+    ///
+    /// Unwrap the inner `U16OrStr<S>`.
+    pub fn into_inner(self) -> U16OrStr<S> {
+        self.0
+    }
+
+    /// 借用内部表示。
+    ///
+    /// Borrow the inner representation.
+    pub const fn as_u16_or_str(&self) -> &U16OrStr<S> {
+        &self.0
+    }
+
     /// 尽力按数字解读；文本形态会被解析成 `u16`。
     ///
     /// # Examples
@@ -241,13 +155,15 @@ impl HeaderVal {
     /// ```
     /// use mptp_smux::messaging::HeaderVal;
     ///
-    /// assert_eq!(HeaderVal::Text("42".to_string()).as_num(), Some(42u16));
-    /// assert_eq!(HeaderVal::Text("not a number".to_string()).as_num(), None);
+    /// assert_eq!(HeaderVal::<String>::from_text("42").as_num(), Some(42u16));
+    /// assert_eq!(HeaderVal::<String>::from_text("not a number").as_num(), None);
     /// ```
+    ///
+    /// Interpret the value as a number, parsing textual values as `u16`.
     pub fn as_num(&self) -> Option<u16> {
-        match self {
-            HeaderVal::Num(num) => Option::Some(*num),
-            HeaderVal::Text(text) => text.trim().parse::<u16>().ok(),
+        match &self.0 {
+            U16OrStr::U16(num) => Option::Some(*num),
+            U16OrStr::Str(text) => text.borrow().trim().parse::<u16>().ok(),
         }
     }
 
@@ -260,14 +176,16 @@ impl HeaderVal {
     /// ```
     /// use mptp_smux::messaging::HeaderVal;
     ///
-    /// assert_eq!(HeaderVal::Text("0x10".to_string()).as_u64(), Some(16u64));
-    /// assert_eq!(HeaderVal::Text("16".to_string()).as_u64(), Some(16u64));
+    /// assert_eq!(HeaderVal::<String>::from_text("0x10").as_u64(), Some(16u64));
+    /// assert_eq!(HeaderVal::<String>::from_text("16").as_u64(), Some(16u64));
     /// ```
+    ///
+    /// Interpret the value as `u64`, accepting decimal and `0x`-prefixed hexadecimal.
     pub fn as_u64(&self) -> Option<u64> {
-        match self {
-            HeaderVal::Num(num) => Option::Some(u64::from(*num)),
-            HeaderVal::Text(text) => {
-                let text = text.trim();
+        match &self.0 {
+            U16OrStr::U16(num) => Option::Some(u64::from(*num)),
+            U16OrStr::Str(text) => {
+                let text = text.borrow().trim();
                 let hex = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"));
                 match hex {
                     Option::Some(hex) => u64::from_str_radix(hex, 16u32).ok(),
@@ -284,76 +202,208 @@ impl HeaderVal {
     /// ```
     /// use mptp_smux::messaging::HeaderVal;
     ///
-    /// assert_eq!(HeaderVal::Text("abc".to_string()).as_text(), Some("abc"));
-    /// assert_eq!(HeaderVal::Num(1u16).as_text(), None);
+    /// assert_eq!(HeaderVal::<String>::from_text("abc").as_text(), Some("abc"));
+    /// assert_eq!(HeaderVal::<String>::from_num(1u16).as_text(), None);
     /// ```
+    ///
+    /// Borrow the textual form; numeric values return `None`.
     pub fn as_text(&self) -> Option<&str> {
-        match self {
-            HeaderVal::Num(_) => Option::None,
-            HeaderVal::Text(text) => Option::Some(text.as_str()),
+        match &self.0 {
+            U16OrStr::U16(_) => Option::None,
+            U16OrStr::Str(text) => Option::Some(text.borrow()),
         }
     }
 }
 
-impl From<u16> for HeaderVal {
-    fn from(num: u16) -> Self {
-        HeaderVal::Num(num)
+impl<S> HeaderKey<S>
+where
+    S: Borrow<str>,
+{
+    /// 由数字形态构造一个头键。
+    ///
+    /// Build a numeric header key.
+    pub fn from_header_key(k: StdHeaderKey) -> Self {
+        HeaderKey(U16OrStr::U16(k.into_inner()))
+    }
+
+    /// 由裸 `u16` 构造一个数字头键（不校验它是否是标准键）。
+    ///
+    /// Build a numeric header key from a bare `u16` without checking its standard meaning.
+    pub const fn from_num(num: u16) -> Self {
+        HeaderKey(U16OrStr::U16(num))
+    }
+
+    /// 由文本构造一个头键；字符串形态由 `S: From<String>` 决定。
+    ///
+    /// Build a textual header key; the string representation comes from `S`.
+    pub fn from_text(text: impl Into<String>) -> Self
+    where
+        S: From<String>,
+    {
+        HeaderKey(U16OrStr::Str(S::from(text.into())))
+    }
+
+    /// 取出内部的 [`U16OrStr<S>`](U16OrStr)。
+    ///
+    /// Unwrap the inner `U16OrStr<S>`.
+    pub fn into_inner(self) -> U16OrStr<S> {
+        self.0
+    }
+
+    /// 借用内部表示。
+    ///
+    /// Borrow the inner representation.
+    pub const fn as_u16_or_str(&self) -> &U16OrStr<S> {
+        &self.0
     }
 }
 
-impl From<String> for HeaderVal {
-    fn from(text: String) -> Self {
-        HeaderVal::Text(text)
+impl<S> From<StdHeaderVal> for HeaderVal<S>
+where
+    S: Borrow<str>,
+{
+    fn from(value: StdHeaderVal) -> Self {
+        HeaderVal::from_header_val(value)
     }
 }
 
-impl From<&str> for HeaderVal {
-    fn from(text: &str) -> Self {
-        HeaderVal::Text(text.to_string())
+impl<S> From<String> for HeaderVal<S>
+where
+    S: Borrow<str> + From<String>,
+{
+    fn from(value: String) -> Self {
+        HeaderVal::from_text(value)
     }
 }
 
-impl AbsTrNumOrStr for HeaderVal {
+impl<S> From<&str> for HeaderVal<S>
+where
+    S: Borrow<str> + From<String>,
+{
+    fn from(value: &str) -> Self {
+        HeaderVal::from_text(value)
+    }
+}
+
+impl<S> From<String> for HeaderKey<S>
+where
+    S: Borrow<str> + From<String>,
+{
+    fn from(value: String) -> Self {
+        HeaderKey::from_text(value)
+    }
+}
+
+impl<S> From<&str> for HeaderKey<S>
+where
+    S: Borrow<str> + From<String>,
+{
+    fn from(value: &str) -> Self {
+        HeaderKey::from_text(value)
+    }
+}
+
+impl<S> From<StdHeaderKey> for HeaderKey<S>
+where
+    S: Borrow<str>,
+{
+    fn from(value: StdHeaderKey) -> Self {
+        HeaderKey::from_num(u16::from(value))
+    }
+}
+
+impl<S> From<U16OrStr<S>> for HeaderVal<S>
+where
+    S: Borrow<str>,
+{
+    fn from(value: U16OrStr<S>) -> Self {
+        HeaderVal(value)
+    }
+}
+
+impl<S> From<HeaderVal<S>> for U16OrStr<S>
+where
+    S: Borrow<str>,
+{
+    fn from(value: HeaderVal<S>) -> Self {
+        value.0
+    }
+}
+
+impl<S> From<U16OrStr<S>> for HeaderKey<S>
+where
+    S: Borrow<str>,
+{
+    fn from(value: U16OrStr<S>) -> Self {
+        HeaderKey(value)
+    }
+}
+
+impl<S> From<HeaderKey<S>> for U16OrStr<S>
+where
+    S: Borrow<str>,
+{
+    fn from(value: HeaderKey<S>) -> Self {
+        value.0
+    }
+}
+
+impl<S> AbsTrNumOrStr for HeaderKey<S>
+where
+    S: Borrow<str>,
+{
     type NumType = u16;
 
-    type StrType = String;
+    type StrType = S;
 
     fn into(self) -> AbsNumOrStr<Self::NumType, Self::StrType> {
-        match self {
-            HeaderVal::Num(num) => AbsNumOrStr::Num(num),
-            HeaderVal::Text(text) => AbsNumOrStr::Str(text),
+        match self.0 {
+            U16OrStr::U16(num) => AbsNumOrStr::Num(num),
+            U16OrStr::Str(text) => AbsNumOrStr::Str(text),
         }
     }
 
     fn try_match_num(self) -> Result<Self::NumType, Self::StrType> {
-        match self {
-            HeaderVal::Num(num) => Result::Ok(num),
-            HeaderVal::Text(text) => Result::Err(text),
+        match self.0 {
+            U16OrStr::U16(num) => Result::Ok(num),
+            U16OrStr::Str(text) => Result::Err(text),
         }
     }
 
     fn try_match_str(self) -> Result<Self::StrType, Self::NumType> {
-        match self {
-            HeaderVal::Text(text) => Result::Ok(text),
-            HeaderVal::Num(num) => Result::Err(num),
+        match self.0 {
+            U16OrStr::Str(text) => Result::Ok(text),
+            U16OrStr::U16(num) => Result::Err(num),
         }
     }
 }
 
-impl From<HeaderVal> for U16OrStr<String> {
-    fn from(value: HeaderVal) -> Self {
-        match value {
-            HeaderVal::Num(num) => U16OrStr::U16(num),
-            HeaderVal::Text(text) => U16OrStr::Str(text),
+impl<S> AbsTrNumOrStr for HeaderVal<S>
+where
+    S: Borrow<str>,
+{
+    type NumType = u16;
+
+    type StrType = S;
+
+    fn into(self) -> AbsNumOrStr<Self::NumType, Self::StrType> {
+        match self.0 {
+            U16OrStr::U16(num) => AbsNumOrStr::Num(num),
+            U16OrStr::Str(text) => AbsNumOrStr::Str(text),
         }
     }
-}
 
-impl From<U16OrStr<String>> for HeaderVal {
-    fn from(value: U16OrStr<String>) -> Self {
-        match value {
-            U16OrStr::U16(num) => HeaderVal::Num(num),
-            U16OrStr::Str(text) => HeaderVal::Text(text),
+    fn try_match_num(self) -> Result<Self::NumType, Self::StrType> {
+        match self.0 {
+            U16OrStr::U16(num) => Result::Ok(num),
+            U16OrStr::Str(text) => Result::Err(text),
+        }
+    }
+
+    fn try_match_str(self) -> Result<Self::StrType, Self::NumType> {
+        match self.0 {
+            U16OrStr::Str(text) => Result::Ok(text),
+            U16OrStr::U16(num) => Result::Err(num),
         }
     }
 }
@@ -361,8 +411,8 @@ impl From<U16OrStr<String>> for HeaderVal {
 /// 头表里的一条：**同时**能借成键与值。
 ///
 /// `abs_mptp` 的 [`TrHeaders`] 要求条目对键与值都可 `Borrow`，因此不能用元组。
-/// 键的类型是 [`U16OrStr<S>`](U16OrStr)；[`HeaderEntry::new`] 保留按
-/// [`StdHeaderKey`] 构造的兼容入口（字符串形态固定为 `String`）。
+/// 键与值分别是 [`HeaderKey<S>`] 与 [`HeaderVal<S>`]；[`HeaderEntry::new`] 保留按
+/// [`StdHeaderKey`] 构造的入口。
 ///
 /// # Examples
 ///
@@ -370,14 +420,14 @@ impl From<U16OrStr<String>> for HeaderVal {
 /// use core::borrow::Borrow;
 ///
 /// use abs_mptp::spec::StdHeaderKey;
-/// use mptp_smux::messaging::{HeaderEntry, HeaderVal, U16OrStr};
+/// use mptp_smux::messaging::{HeaderEntry, HeaderKey, HeaderVal};
 ///
-/// let entry = HeaderEntry::new(StdHeaderKey::Body_Type, HeaderVal::Num(1u16));
-/// let key: &U16OrStr<String> = entry.borrow();
+/// let entry = HeaderEntry::new(StdHeaderKey::Body_Type, HeaderVal::from_num(1u16));
+/// let key: &HeaderKey<String> = entry.borrow();
 /// let val: &HeaderVal = entry.borrow();
 ///
-/// assert_eq!(*key, U16OrStr::U16(u16::from(StdHeaderKey::Body_Type)));
-/// assert_eq!(*val, HeaderVal::Num(1u16));
+/// assert_eq!(*key, HeaderKey::from(StdHeaderKey::Body_Type));
+/// assert_eq!(*val, HeaderVal::from_num(1u16));
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeaderEntry<S = String>
@@ -385,10 +435,10 @@ where
     S: Borrow<str>,
 {
     /// 头键。
-    key_: U16OrStr<S>,
+    key_: HeaderKey<S>,
 
     /// 头值。
-    val_: HeaderVal,
+    val_: HeaderVal<S>,
 }
 
 impl<S> HeaderEntry<S>
@@ -396,7 +446,7 @@ where
     S: Borrow<str>,
 {
     /// 由新键类型与值构造一条头。
-    pub const fn from_key(key: U16OrStr<S>, val: HeaderVal) -> Self {
+    pub const fn from_kv(key: HeaderKey<S>, val: HeaderVal<S>) -> Self {
         HeaderEntry {
             key_: key,
             val_: val,
@@ -404,53 +454,56 @@ where
     }
 
     /// 本条头的键。
-    pub const fn key(&self) -> &U16OrStr<S> {
+    pub const fn key(&self) -> &HeaderKey<S> {
         &self.key_
     }
 
     /// 本条头的值。
-    pub const fn value(&self) -> &HeaderVal {
+    pub const fn value(&self) -> &HeaderVal<S> {
         &self.val_
     }
 }
 
-impl HeaderEntry<String> {
-    /// 由标准键与值构造一条头（字符串形态固定为 `String`）。
-    pub fn new(key: StdHeaderKey, val: HeaderVal) -> Self {
+impl<S> HeaderEntry<S>
+where
+    S: Borrow<str>,
+{
+    /// 由标准键与值构造一条头；字符串形态仍由 `S` 决定。
+    pub fn new(key: StdHeaderKey, val: HeaderVal<S>) -> Self {
         HeaderEntry {
-            key_: U16OrStr::U16(u16::from(key)),
+            key_: HeaderKey::from(key),
             val_: val,
         }
     }
 
     /// 若键是数字形态，还原成 [`StdHeaderKey`]；字符串键返回 `None`。
     pub fn key_std(&self) -> Option<StdHeaderKey> {
-        match self.key_ {
-            U16OrStr::U16(code) => Option::Some(StdHeaderKey::new(code)),
+        match self.key_.as_u16_or_str() {
+            U16OrStr::U16(code) => Option::Some(StdHeaderKey::new(*code)),
             U16OrStr::Str(_) => Option::None,
         }
     }
 }
 
-impl<S> Borrow<U16OrStr<S>> for HeaderEntry<S>
+impl<S> Borrow<HeaderKey<S>> for HeaderEntry<S>
 where
     S: Borrow<str>,
 {
-    fn borrow(&self) -> &U16OrStr<S> {
+    fn borrow(&self) -> &HeaderKey<S> {
         &self.key_
     }
 }
 
-impl<S> Borrow<HeaderVal> for HeaderEntry<S>
+impl<S> Borrow<HeaderVal<S>> for HeaderEntry<S>
 where
     S: Borrow<str>,
 {
-    fn borrow(&self) -> &HeaderVal {
+    fn borrow(&self) -> &HeaderVal<S> {
         &self.val_
     }
 }
 
-/// MPTP 头表：`U16OrStr<S>` → [`HeaderVal`]。
+/// MPTP 头表：`HeaderKey<S>` → [`HeaderVal<S>`]。
 ///
 /// # 为什么内部是 `Arc<BTreeMap>`
 ///
@@ -469,20 +522,20 @@ where
 /// # Examples
 ///
 /// ```
-/// use mptp_smux::messaging::{HeaderVal, Headers, U16OrStr};
+/// use mptp_smux::messaging::{HeaderKey, HeaderVal, Headers};
 ///
 /// let mut headers = Headers::new();
 /// headers.set_text(abs_mptp::spec::StdHeaderKey::Body_Size, "12");
 /// headers.set_num(abs_mptp::spec::StdHeaderKey::Body_Type, 1u16);
 ///
-/// let custom = U16OrStr::Str("x-custom".to_string());
-/// headers.set(custom.clone(), HeaderVal::Num(7u16));
+/// let custom = HeaderKey::<String>::from_text("x-custom");
+/// headers.set(custom.clone(), HeaderVal::from_num(7u16));
 ///
 /// assert_eq!(headers.body_size(), Some(12usize));
-/// assert_eq!(headers.try_get(custom), Some(&HeaderVal::Num(7u16)));
+/// assert_eq!(headers.try_get(custom), Some(&HeaderVal::from_num(7u16)));
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Headers<S = String>(Arc<BTreeMap<U16OrStr<S>, HeaderVal>>)
+pub struct Headers<S = String>(Arc<BTreeMap<HeaderKey<S>, HeaderVal<S>>>)
 where
     S: Borrow<str> + Ord;
 
@@ -509,29 +562,31 @@ where
     }
 
     /// 按标准键查一个值。
-    pub fn try_get_val(&self, key: StdHeaderKey) -> Option<&HeaderVal> {
-        self.try_get(U16OrStr::U16(u16::from(key)))
+    pub fn try_get_val(&self, key: StdHeaderKey) -> Option<&HeaderVal<S>> {
+        self.try_get(HeaderKey::from(key))
     }
 
     /// 按任意头键查一个值。
-    pub fn try_get<K>(&self, key: K) -> Option<&HeaderVal>
+    pub fn try_get<K>(&self, key: K) -> Option<&HeaderVal<S>>
     where
-        K: Borrow<U16OrStr<S>>,
+        K: Borrow<HeaderKey<S>>,
     {
         self.0.get(key.borrow())
     }
 
     /// 遍历全部条目。
-    pub fn iter(&self) -> impl Iterator<Item = (&U16OrStr<S>, &HeaderVal)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (&HeaderKey<S>, &HeaderVal<S>)> + '_ {
         self.0.iter()
     }
 
     /// 只遍历数字键，并还原成本端的 [`StdHeaderKey`]。
-    pub fn iter_std(&self) -> impl Iterator<Item = (StdHeaderKey, &HeaderVal)> + '_ {
-        self.0.iter().filter_map(|(key, val)| match key {
-            U16OrStr::U16(code) => Option::Some((StdHeaderKey::new(*code), val)),
-            U16OrStr::Str(_) => Option::None,
-        })
+    pub fn iter_std(&self) -> impl Iterator<Item = (StdHeaderKey, &HeaderVal<S>)> + '_ {
+        self.0
+            .iter()
+            .filter_map(|(key, val)| match key.as_u16_or_str() {
+                U16OrStr::U16(code) => Option::Some((StdHeaderKey::new(*code), val)),
+                U16OrStr::Str(_) => Option::None,
+            })
     }
 
     /// `Body_Size` 头声明的长度。
@@ -551,9 +606,9 @@ where
         let Option::Some(val) = self.try_get_val(StdHeaderKey::Body_Transfer) else {
             return false;
         };
-        match AbsTrNumOrStr::into(val.clone()) {
-            AbsNumOrStr::Num(num) => StdHeaderVal::from(num) == StdHeaderVal::Body_Transfer_Chunked,
-            AbsNumOrStr::Str(text) => text.trim().eq_ignore_ascii_case("chunked"),
+        match val.as_u16_or_str() {
+            U16OrStr::U16(num) => StdHeaderVal::from(*num) == StdHeaderVal::Body_Transfer_Chunked,
+            U16OrStr::Str(text) => text.borrow().trim().eq_ignore_ascii_case("chunked"),
         }
     }
 
@@ -569,31 +624,34 @@ where
 {
     /// 按标准键写一个数字值（覆盖已有值）。
     pub fn set_num(&mut self, key: StdHeaderKey, num: u16) {
-        self.set(U16OrStr::U16(u16::from(key)), HeaderVal::Num(num));
+        self.set(HeaderKey::from(key), HeaderVal::from_num(num));
     }
 
     /// 按标准键写一个文本值（覆盖已有值）。
-    pub fn set_text(&mut self, key: StdHeaderKey, text: impl Into<String>) {
-        self.set(U16OrStr::U16(u16::from(key)), HeaderVal::Text(text.into()));
+    pub fn set_text(&mut self, key: StdHeaderKey, text: impl Into<String>)
+    where
+        S: From<String>,
+    {
+        self.set(HeaderKey::from(key), HeaderVal::from_text(text));
     }
 
     /// 按任意头键写一个值（覆盖已有值）。
-    pub fn set<K>(&mut self, key: K, val: HeaderVal)
+    pub fn set<K>(&mut self, key: K, val: HeaderVal<S>)
     where
-        K: Into<U16OrStr<S>>,
+        K: Into<HeaderKey<S>>,
     {
         Arc::make_mut(&mut self.0).insert(key.into(), val);
     }
 
     /// 删除一个标准键，返回被删掉的值。
-    pub fn remove(&mut self, key: StdHeaderKey) -> Option<HeaderVal> {
-        self.remove_key(U16OrStr::U16(u16::from(key)))
+    pub fn remove(&mut self, key: StdHeaderKey) -> Option<HeaderVal<S>> {
+        self.remove_key(HeaderKey::from(key))
     }
 
     /// 删除一个任意头键，返回被删掉的值。
-    pub fn remove_key<K>(&mut self, key: K) -> Option<HeaderVal>
+    pub fn remove_key<K>(&mut self, key: K) -> Option<HeaderVal<S>>
     where
-        K: Borrow<U16OrStr<S>>,
+        K: Borrow<HeaderKey<S>>,
     {
         Arc::make_mut(&mut self.0).remove(key.borrow())
     }
@@ -616,9 +674,9 @@ impl<S> TrHeaders for Headers<S>
 where
     S: Borrow<str> + Ord + Clone,
 {
-    type Key = U16OrStr<S>;
+    type Key = HeaderKey<S>;
 
-    type Val = HeaderVal;
+    type Val = HeaderVal<S>;
 
     type Entry = HeaderEntry<S>;
 
@@ -638,10 +696,7 @@ where
     fn into_entries(self) -> Self::EntriesIter {
         self.0
             .iter()
-            .map(|(key, val_)| HeaderEntry {
-                key_: key.clone(),
-                val_: val_.clone(),
-            })
+            .map(|(key, val_)| HeaderEntry::from_kv(key.clone(), val_.clone()))
             .collect::<Vec<HeaderEntry<S>>>()
             .into_iter()
     }
@@ -665,7 +720,7 @@ where
         }
         let val_ = factory(key);
         Arc::make_mut(&mut self.0).insert(key_.clone(), val_.clone());
-        Result::Ok(HeaderEntry { key_, val_ })
+        Result::Ok(HeaderEntry::from_kv(key_, val_))
     }
 
     fn add_or_set_header<K, V>(mut self, key: K, val: V) -> Option<(Self::Key, Self::Val)>
@@ -707,7 +762,7 @@ where
     }
 }
 
-/// [`Headers`] 编码的 step 函数：键按 [`U16OrStr`] 的线类型写，值交给 [`HeaderVal`]。
+/// [`Headers`] 编码的 step 函数：键交给 [`HeaderKey<S>`]，值交给 [`HeaderVal<S>`]。
 #[gen_may_cancel_future(EncodeHeaders, pub, new(pub(crate)))]
 async fn encode_headers_async_<'a, S, E, C>(
     headers: &'a Headers<S>,
@@ -736,7 +791,7 @@ where
     map.end().may_cancel_with(cancel).await
 }
 
-/// [`Headers`] 的访问者：遍历 MessagePack 映射，键交给 [`U16OrStr`]，值交给 [`HeaderVal`]。
+/// [`Headers`] 的访问者：遍历 MessagePack 映射，键交给 [`HeaderKey<S>`]，值交给 [`HeaderVal<S>`]。
 struct HeadersVisitor<S> {
     /// `S` 只出现在键类型里。
     _marker_: PhantomData<S>,
@@ -782,7 +837,7 @@ where
 {
     let mut values = BTreeMap::new();
     while let Option::Some((key, val)) = map
-        .next_entry::<U16OrStr<S>, HeaderVal>()
+        .next_entry::<HeaderKey<S>, HeaderVal<S>>()
         .may_cancel_with(cancel.child_token())
         .await?
     {
@@ -847,8 +902,8 @@ mod tests_ {
     use super::*;
 
     /// 造一个标准数字键。
-    fn std_key_(key: StdHeaderKey) -> U16OrStr<String> {
-        U16OrStr::U16(u16::from(key))
+    fn std_key_(key: StdHeaderKey) -> HeaderKey<String> {
+        HeaderKey::from_num(u16::from(key))
     }
 
     /// 测试标准头访问器把数字、文本与体声明各归各位。
@@ -873,15 +928,15 @@ mod tests_ {
         assert_eq!(headers.body_size(), Option::Some(12usize));
         assert_eq!(
             headers.try_get_val(StdHeaderKey::Body_Type),
-            Option::Some(&HeaderVal::Num(1u16))
+            Option::Some(&HeaderVal::from_num(1u16))
         );
         assert_eq!(headers.data_type_id(), Option::Some(0xabcu64));
 
         // 旧入口 `set(StdHeaderKey, HeaderVal)` 仍通过 `Into<U16OrStr>` 工作。
-        headers.set(StdHeaderKey::Accept, HeaderVal::Text("a".to_string()));
+        headers.set(StdHeaderKey::Accept, HeaderVal::from_text("a"));
         assert_eq!(
             headers.try_get_val(StdHeaderKey::Accept),
-            Option::Some(&HeaderVal::Text("a".to_string()))
+            Option::Some(&HeaderVal::from_text("a"))
         );
     }
 
@@ -934,54 +989,64 @@ mod tests_ {
 
         assert_eq!(
             headers.try_get_val(key),
-            Option::Some(&HeaderVal::Num(0x1234u16))
+            Option::Some(&HeaderVal::from_num(0x1234u16))
         );
-        assert_eq!(headers.remove(key), Option::Some(HeaderVal::Num(0x1234u16)));
+        assert_eq!(
+            headers.remove(key),
+            Option::Some(HeaderVal::from_num(0x1234u16))
+        );
         assert!(headers.is_empty());
     }
 
     /// 测试字符串键可写入、读取、遍历与删除。
     /// Test that a string key can be written, read, iterated and removed.
     ///
-    /// - 手段：用 `U16OrStr::Str` 写一条自定义头，分别调用 `try_get` / `iter` / `remove_key`。
+    /// - 手段：用 `HeaderKey::from_text` 写一条自定义头，分别调用 `try_get` / `iter` /
+    ///   `remove_key`。
     /// - 判断：读到的值一致，遍历只看到这一条，删除后表为空。
     ///
-    /// - Means: write a custom header under `U16OrStr::Str`, then call `try_get` / `iter` /
-    ///   `remove_key`.
+    /// - Means: write a custom header through `HeaderKey::from_text`, then call `try_get` /
+    ///   `iter` / `remove_key`.
     /// - Verdict: the value matches, iteration sees exactly that entry, and the map is empty
     ///   after removal.
     #[test]
     fn string_key_roundtrips_() {
-        let key: U16OrStr<String> = U16OrStr::Str("x-custom".to_string());
+        let key = HeaderKey::<String>::from_text("x-custom");
         let mut headers = Headers::new();
-        headers.set(key.clone(), HeaderVal::Num(7u16));
+        headers.set(key.clone(), HeaderVal::from_num(7u16));
 
-        assert_eq!(headers.try_get(&key), Option::Some(&HeaderVal::Num(7u16)));
+        assert_eq!(
+            headers.try_get(&key),
+            Option::Some(&HeaderVal::from_num(7u16))
+        );
         assert_eq!(headers.len(), 1usize);
         assert_eq!(headers.iter().count(), 1usize);
         assert_eq!(headers.iter_std().count(), 0usize);
-        assert_eq!(headers.remove_key(&key), Option::Some(HeaderVal::Num(7u16)));
+        assert_eq!(
+            headers.remove_key(&key),
+            Option::Some(HeaderVal::from_num(7u16))
+        );
         assert!(headers.is_empty());
     }
 
     /// 测试字符串实现可以由使用者选择（这里用 `Arc<str>`）。
     /// Test that the string representation is user-selectable (using `Arc<str>` here).
     ///
-    /// - 手段：构造 `Headers<Arc<str>>`，用 `U16OrStr::Str` 写入一个键并读回。
+    /// - 手段：构造 `Headers<Arc<str>>`，用 `HeaderKey::from_text` 写入一个键并读回。
     /// - 判断：值与键都正确，证明 `S` 不是硬编码的 `String`。
     ///
-    /// - Means: build `Headers<Arc<str>>`, write a key through `U16OrStr::Str`, and read it
-    ///   back.
+    /// - Means: build `Headers<Arc<str>>`, write a key through `HeaderKey::from_text`, and
+    ///   read it back.
     /// - Verdict: both key and value round-trip, so `S` is not hard-coded to `String`.
     #[test]
     fn custom_string_impl_works_() {
-        let key: U16OrStr<Arc<str>> = U16OrStr::Str(Arc::<str>::from("x-custom"));
+        let key = HeaderKey::<Arc<str>>::from_text("x-custom");
         let mut headers: Headers<Arc<str>> = Headers::empty();
-        headers.set(key.clone(), HeaderVal::Text("v".to_string()));
+        headers.set(key.clone(), HeaderVal::from_text("v"));
 
         assert_eq!(
             headers.try_get(key),
-            Option::Some(&HeaderVal::Text("v".to_string()))
+            Option::Some(&HeaderVal::from_text("v"))
         );
     }
 
@@ -1004,23 +1069,20 @@ mod tests_ {
 
         assert_eq!(
             headers.try_get_header(std_key_(StdHeaderKey::Body_Type)),
-            Option::Some(&HeaderVal::Num(1u16))
+            Option::Some(&HeaderVal::from_num(1u16))
         );
 
         let all: Vec<HeaderEntry> = headers.into_entries().collect();
         assert_eq!(all.len(), 2usize);
-        let borrowed_key: &U16OrStr<String> = all[0].borrow();
+        let borrowed_key: &HeaderKey<String> = all[0].borrow();
         let borrowed_val: &HeaderVal = all[0].borrow();
         assert!(matches!(
-            *borrowed_key,
+            borrowed_key.as_u16_or_str(),
             U16OrStr::U16(code)
-                if code == u16::from(StdHeaderKey::Body_Type)
-                    || code == u16::from(StdHeaderKey::Data_Type_Id)
+                if *code == u16::from(StdHeaderKey::Body_Type)
+                    || *code == u16::from(StdHeaderKey::Data_Type_Id)
         ));
-        assert!(matches!(
-            *borrowed_val,
-            HeaderVal::Num(1u16) | HeaderVal::Text(_)
-        ));
+        assert!(borrowed_val.as_num().is_some() || borrowed_val.as_text().is_some());
     }
 
     /// 测试 `TrHeadersMut` 在空表与非空表上的回报符合契约。
@@ -1042,13 +1104,13 @@ mod tests_ {
 
         let added = headers
             .clone()
-            .try_add_header(accept.clone(), |_| HeaderVal::Text("a".to_string()));
+            .try_add_header(accept.clone(), |_| HeaderVal::from_text("a"));
         assert!(added.is_ok(), "空表上添加应当成功");
         assert_eq!(headers.clone().remove_header(accept.clone()), Option::None);
         assert_eq!(
             headers
                 .clone()
-                .add_or_set_header(accept.clone(), HeaderVal::Text("b".to_string())),
+                .add_or_set_header(accept.clone(), HeaderVal::from_text("b")),
             Option::None
         );
 
@@ -1056,7 +1118,7 @@ mod tests_ {
         non_empty.set_text(StdHeaderKey::Accept, "a");
         let duplicate = non_empty
             .clone()
-            .try_add_header(accept.clone(), |_| HeaderVal::Text("b".to_string()));
+            .try_add_header(accept.clone(), |_| HeaderVal::from_text("b"));
         assert!(
             matches!(duplicate, Result::Err(key) if key == accept),
             "已有键上重复添加必须交回冲突键"

@@ -218,6 +218,10 @@ impl StdHeaderKey {
     pub const fn new(code: u16) -> Self {
         StdHeaderKey(code)
     }
+
+    pub fn into_inner(self) -> u16 {
+        self.0
+    }
 }
 
 impl From<u16> for StdHeaderKey {

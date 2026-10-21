@@ -323,7 +323,7 @@ mod tests_ {
     use abs_mptp::spec::{StdHeaderKey, StdHeaderVal};
 
     use super::*;
-    use crate::messaging::{HeaderVal, U16OrStr};
+    use crate::messaging::{HeaderKey, HeaderVal};
 
     /// 立即完成的测试执行器：所有操作都是纯内存的，会一直 `Ready`。
     fn block_on_<TyFut>(future: TyFut) -> TyFut::Output
@@ -510,7 +510,7 @@ mod tests_ {
                 .headers()
                 .expect("应该有头表")
                 .try_get_val(StdHeaderKey::Body_Size),
-            Option::Some(&HeaderVal::Num(1u16))
+            Option::Some(&HeaderVal::from_num(1u16))
         );
         assert!(input.is_empty());
     }
@@ -560,28 +560,29 @@ mod tests_ {
                 .headers()
                 .expect("应该有头表")
                 .try_get_val(StdHeaderKey::new(0x01)),
-            Option::Some(&HeaderVal::Num(7u16))
+            Option::Some(&HeaderVal::from_num(7u16))
         );
     }
 
     /// 测试字符串头键能随回复前缀完整往返。
     /// Test that a string header key round-trips through a response prefix.
     ///
-    /// - 手段：构造一张同时带标准数字头与 `U16OrStr::Str("x-custom")` 的表，编码后解码。
+    /// - 手段：构造一张同时带标准数字头与 `HeaderKey::from_text("x-custom")` 的表，编码后
+    ///   解码。
     /// - 判断：整张头表相等，且字符串键能按原键取回；说明新键类型在线上确实写成
     ///   MessagePack 字符串，而不是被折叠成数字或被丢弃。
     ///
     /// - Means: build a map with a standard numeric header and
-    ///   `U16OrStr::Str("x-custom")`, encode it, then decode it back.
+    ///   `HeaderKey::from_text("x-custom")`, encode it, then decode it back.
     /// - Verdict: the whole map compares equal and the string key resolves again, showing that
     ///   the new key is written as a MessagePack string rather than folded into a number or
     ///   dropped.
     #[test]
     fn string_header_key_roundtrips_() {
-        let key: U16OrStr<String> = U16OrStr::Str("x-custom".to_string());
+        let key = HeaderKey::<String>::from_text("x-custom");
         let mut headers = Headers::new();
         headers.set_text(StdHeaderKey::Body_Size, "12");
-        headers.set(key.clone(), HeaderVal::Text("v".to_string()));
+        headers.set(key.clone(), HeaderVal::from_text("v"));
 
         let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers));
         let mut storage = [0u8; 128usize];
@@ -603,7 +604,7 @@ mod tests_ {
         assert_eq!(decoded, prefix);
         assert_eq!(
             decoded.headers().expect("应该有头表").try_get(key),
-            Option::Some(&HeaderVal::Text("v".to_string()))
+            Option::Some(&HeaderVal::from_text("v"))
         );
     }
 

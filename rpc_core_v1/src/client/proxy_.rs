@@ -33,15 +33,14 @@ use mptp_smux::{
 };
 
 use crate::{
-    body_::{
+    client as rpc_client,
+    messaging::{RpcError, RpcResult, TrRpcInterface, concat_location},
+    messaging::body_::{
         BodyRing_, K_BODY_RING_CAP_,
         decode_from_async_,
         encode_into_async_,
         read_body_async_,
     },
-    client as rpc_client,
-    error_::{RpcError, RpcResult},
-    interface_::{TrRpcInterface, location},
     x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };
 
@@ -166,7 +165,7 @@ where
     TyTok: TrCancellationToken,
 {
     let client = proxy.client();
-    let location = location(I::PATH, service);
+    let location = concat_location(I::PATH, service);
 
     // 业务体不预编码：请求头只声明「分块」，编码器与 `send_req_body_async` 通过
     // 一对 SPSC ring 并发推进——编码写满时等待，发送搬走多少就再编多少。

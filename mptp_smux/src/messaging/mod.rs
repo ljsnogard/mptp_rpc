@@ -44,7 +44,7 @@ mod prefix_;
 mod wire_;
 
 pub use error_::MessagingError;
-pub use headers_::{HeaderEntry, HeaderVal, Headers};
+pub use headers_::{HeaderEntry, HeaderKey, HeaderVal, Headers};
 pub use num_or_str_::U16OrStr;
 pub use prefix_::{RequestPrefix, ResponsePrefix};
 pub use wire_::{

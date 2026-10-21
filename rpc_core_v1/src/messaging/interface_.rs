@@ -1,4 +1,5 @@
-//! RPC interface 描述与路径拼装。
+//! RPC interface 描述聚合在一个路径下的一组 RPC 服务，该组 RPC 服务拥有
+//! 共同的由 interface 规定的子路由器规则。
 //!
 //! 一个 RPC 路径只由 **interface + service** 组成，方法名不出现在路径上：
 //!
@@ -51,7 +52,7 @@ pub trait TrRpcInterface {
 /// assert_eq!(location("api/v1", "customer/goods"), "/api/v1/customer/goods");
 /// assert_eq!(location("/api/v1/", "/customer/goods/"), "/api/v1/customer/goods");
 /// ```
-pub fn location(interface: &str, service: &str) -> String {
+pub fn concat_location(interface: &str, service: &str) -> String {
     let interface = interface.trim_matches('/');
     let service = service.trim_matches('/');
     match (interface.is_empty(), service.is_empty()) {
@@ -76,8 +77,8 @@ mod tests_ {
     /// - Verdict: the first two produce `/api/v1/workspace`; the empty one `/workspace`.
     #[test]
     fn location_normalises_slashes_() {
-        assert_eq!(location("api/v1", "workspace"), "/api/v1/workspace");
-        assert_eq!(location("/api/v1/", "/workspace/"), "/api/v1/workspace");
-        assert_eq!(location("", "workspace"), "/workspace");
+        assert_eq!(concat_location("api/v1", "workspace"), "/api/v1/workspace");
+        assert_eq!(concat_location("/api/v1/", "/workspace/"), "/api/v1/workspace");
+        assert_eq!(concat_location("", "workspace"), "/workspace");
     }
 }

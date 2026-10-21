@@ -64,35 +64,13 @@
 #![feature(unboxed_closures)]
 
 pub mod client;
+pub mod messaging;
 pub mod serving;
 
-mod body_;
 mod config_;
-mod error_;
-mod interface_;
-mod prep_;
+pub mod prep;
 
-pub use client::{
-    ClientProxy, DefaultRpcAllocConfig, Dock, ServiceSelector, TrRpcClientAllocConfig,
-    TrRpcClientConfig, TrRpcClientExt,
-};
 pub use config_::{ClientConfig, ServingConfig, TrDefaultDock, TrUserConn};
-pub use error_::{RpcError, RpcResult};
-pub use interface_::{TrRpcInterface, location};
-// 使用者自己搭服务循环时，需要在每条入向子流上当场交出一份准备器；`RingBuffs` 与
-// 「怎么造一块 ring 内存」由此上移到 crate 根部，省得使用者去 `mptp_smux` 里找。
-pub use mptp_smux::{
-    RingBuffs,
-    x_deps::{abs_mm::CoreAlloc, mm_ptr::Owned},
-};
-pub use prep_::{
-    ClientPrepFactory, K_CHANNEL_CAP, RingBuff, ServingPrepFactory, new_ring_buff, new_ring_buff_pair,
-};
-pub use serving::{
-    DefaultServingAllocConfig, K_DEFAULT_SERVICE_QUEUE_CAP, RpcCallCtx, RpcDispatchError, RpcJob,
-    RpcRouteError, RpcRouterHandler, ServiceRoute, TrRpcRouter, TrRpcServiceRoute,
-    TrServingAllocConfig, TrServingConfig,
-};
 
 pub mod x_deps {
     pub use abs_art_facade;

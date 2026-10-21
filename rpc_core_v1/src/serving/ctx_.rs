@@ -35,13 +35,13 @@ use mptp_smux::{
 };
 
 use crate::{
-    body_::{
+    messaging::body_::{
         BodyRing_, K_BODY_RING_CAP_,
         decode_body_from_async_,
         encode_into_async_,
         write_body_async_,
     },
-    error_::{RpcError, RpcResult},
+    messaging::{RpcError, RpcResult},
     serving::TrServingConfig,
     x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };

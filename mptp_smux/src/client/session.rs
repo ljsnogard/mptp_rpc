@@ -579,13 +579,13 @@ where
 /// 正确的入口」，不猜线上格式。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SessionRecvRespPrefix, pub, new(pub(crate)))]
-async fn session_recv_resp_prefix_async_<'f, C, TyTok>(
+async fn session_recv_resp_prefix_async_<'f, C, K>(
     session: &'f mut MptpSession<C>,
-    cancel: TyTok,
+    cancel: K,
 ) -> Result<RespPrefix<C>, ClientError>
 where
     C: TrConfig,
-    TyTok: TrCancellationToken,
+    K: TrCancellationToken,
 {
     // 请求方向到此为止：带体请求必须先把体发完（状态在发体成功后转 `WaitingResp`），
     // 否则体还留在流里，接着读响应只会读到错位的字节。

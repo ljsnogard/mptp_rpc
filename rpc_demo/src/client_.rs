@@ -10,12 +10,12 @@ use core::marker::PhantomData;
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
+use abs_mm::CoreAlloc;
 use abs_mptp::{
     client::{TrMptpClient, TrMptpSession},
     spec::{Status, StdHeaderKey, StdHeaderVal, access_method::AccessMethod},
 };
 use anyhow::{Result as AnyResult, ensure};
-use core_rpc_mptp_smux_v1::{ClientConfig, CoreAlloc};
 use gen_mcf2::gen_may_cancel_future;
 use mm_ptr::Shared;
 use mptp_smux::{
@@ -23,6 +23,7 @@ use mptp_smux::{
     messaging::{Headers, RequestPrefix},
     x_deps::gen_mcf2,
 };
+use rpc_core_v1::ClientConfig;
 
 use crate::{
     body_::{decode_from_async_, encode_to_vec_async_, read_body_async_},

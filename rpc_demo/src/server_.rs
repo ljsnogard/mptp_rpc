@@ -23,15 +23,18 @@ use std::{
     time::Duration,
 };
 
+use thiserror::Error;
+use tokio::sync::mpsc;
+
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
+use abs_mm::CoreAlloc;
 use abs_mptp::{
     serving::TrReqHandler,
     spec::{Status, StdHeaderKey, StdHeaderVal, access_method::AccessMethod},
 };
 use abs_smux::{conn::TrConnection, dock::Dock};
 use anyhow::{Result, anyhow};
-use core_rpc_mptp_smux_v1::{CoreAlloc, ServingConfig};
 use gen_mcf2::gen_may_cancel_future;
 use mm_ptr::Shared;
 use mptp_smux::{
@@ -42,8 +45,7 @@ use mptp_smux::{
     },
     x_deps::{abs_cancel, abs_smux, gen_mcf2, mm_ptr},
 };
-use thiserror::Error;
-use tokio::sync::mpsc;
+use rpc_core_v1::ServingConfig;
 
 use crate::{
     body_::{

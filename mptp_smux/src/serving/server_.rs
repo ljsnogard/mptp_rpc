@@ -29,6 +29,8 @@
 
 use core::{marker::PhantomData, mem::MaybeUninit};
 
+use thiserror::Error;
+
 use abs_buff::{
     Demand, TrBuffRead,
     buffer::{TrBuffSegmRef, TrBuffSegmView},
@@ -40,17 +42,16 @@ use abs_smux::{
     conn::{TrChannelListener, TrDockBinding},
 };
 use gen_mcf2::gen_may_cancel_future;
-use thiserror::Error;
 
-use super::{
-    config::{ChannelHandle, ChannelRx, ChannelTx, DockBinding, TrConfig},
-    prep_ctx_::ServingPrepCtx,
-    router_::TrPathRouter,
-};
 use crate::{
     messaging,
     ring_prepare_::TrPrepFactory,
     x_deps::{abs_buff, abs_cancel, abs_mptp, abs_smux, gen_mcf2},
+};
+use super::{
+    config::{ChannelHandle, ChannelRx, ChannelTx, DockBinding, TrConfig},
+    prep_ctx_::ServingPrepCtx,
+    router_::TrPathRouter,
 };
 
 /// 服务端处理过程中可能出现的错误。

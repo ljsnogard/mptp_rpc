@@ -24,6 +24,7 @@ mod alloc_config_;
 mod ctx_;
 mod route_;
 mod router_;
+mod service_;
 
 pub mod config;
 
@@ -31,6 +32,8 @@ pub use alloc_config_::TrServingAllocConfig;
 pub use config::{DefaultServingAllocConfig, TrServingConfig};
 pub use ctx_::RpcCallCtx;
 pub use route_::{
-    K_DEFAULT_SERVICE_QUEUE_CAP, RpcJob, RpcRouteError, ServiceRoute, TrRpcServiceRoute,
+    K_DEFAULT_SERVICE_QUEUE_CAP,
+    RpcJob, RpcRouteError, ServiceRoute, TrRpcServiceRoute,
 };
 pub use router_::{RpcDispatchError, RpcRouterHandler, TrRpcRouter};
+pub use service_::TrRpcServiceRouter;

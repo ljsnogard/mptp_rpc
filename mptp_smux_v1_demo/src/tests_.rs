@@ -31,7 +31,7 @@ use abs_mptp::{
     },
 };
 use mptp_smux::messaging::{
-    HeaderEntry, HeaderVal, Headers, MessagingError, RequestPrefix, U16OrStr as HeaderU16OrStr,
+    HeaderEntry, HeaderKey, HeaderVal, Headers, MessagingError, RequestPrefix, U16OrStr,
     read_request_prefix_async, read_response_prefix_async,
 };
 
@@ -146,29 +146,27 @@ fn headers_answer_tr_headers_() {
     headers.set_text(StdHeaderKey::Data_Type_Id, "0xabc");
 
     let by_key = headers
-        .try_get_header(HeaderU16OrStr::U16(u16::from(StdHeaderKey::Body_Type)))
+        .try_get_header(HeaderKey::from(StdHeaderKey::Body_Type))
         .expect("写进去的头应当取得回来");
-    assert_eq!(by_key, &HeaderVal::Num(1u16));
+    assert_eq!(by_key, &HeaderVal::from_num(1u16));
 
     let text = headers
-        .try_get_header(HeaderU16OrStr::U16(u16::from(
-            StdHeaderKey::Data_Type_Id,
-        )))
+        .try_get_header(HeaderKey::from(StdHeaderKey::Data_Type_Id))
         .expect("文本头也应当取得回来");
-    assert_eq!(text, &HeaderVal::Text("0xabc".to_string()));
+    assert_eq!(text, &HeaderVal::from_text("0xabc"));
 
     let all: Vec<HeaderEntry> = headers.into_entries().collect();
     assert_eq!(all.len(), 2usize);
-    let borrowed: &HeaderU16OrStr<String> = all[0].borrow();
+    let borrowed: &HeaderKey<String> = all[0].borrow();
     assert!(matches!(
-        *borrowed,
-        HeaderU16OrStr::U16(code)
-            if code == u16::from(StdHeaderKey::Body_Type)
-                || code == u16::from(StdHeaderKey::Data_Type_Id)
+        borrowed.as_u16_or_str(),
+        U16OrStr::U16(code)
+            if *code == u16::from(StdHeaderKey::Body_Type)
+                || *code == u16::from(StdHeaderKey::Data_Type_Id)
     ));
     // 条目对**值**同样可 `Borrow`——`abs_mptp` 要求两者都能借出。
     let value: &HeaderVal = all[0].borrow();
-    assert!(matches!(value, HeaderVal::Num(1u16) | HeaderVal::Text(_)));
+    assert!(value.as_num().is_some() || value.as_text().is_some());
 }
 
 /// 测试头表的**固有**写入口（唯一持有者那条路）真的改得动。
@@ -191,7 +189,7 @@ fn headers_inherent_writes_land_() {
 
     assert_eq!(
         headers.try_get_val(StdHeaderKey::Body_Type),
-        Option::Some(&HeaderVal::Num(7u16))
+        Option::Some(&HeaderVal::from_num(7u16))
     );
     assert_eq!(headers.body_size(), Option::Some(12usize));
 }
@@ -218,11 +216,11 @@ fn headers_inherent_writes_land_() {
 #[test]
 fn headers_report_tr_headers_mut_on_empty_() {
     let headers = Headers::new();
-    let accept = HeaderU16OrStr::U16(u16::from(StdHeaderKey::Accept));
+    let accept = HeaderKey::from(StdHeaderKey::Accept);
 
     let added = headers
         .clone()
-        .try_add_header(accept.clone(), |_| HeaderVal::Text("a".to_string()));
+        .try_add_header(accept.clone(), |_| HeaderVal::from_text("a"));
     assert!(added.is_ok(), "空表上添加应当成功");
 
     assert_eq!(
@@ -232,7 +230,7 @@ fn headers_report_tr_headers_mut_on_empty_() {
     assert_eq!(
         headers
             .clone()
-            .add_or_set_header(accept, HeaderVal::Text("b".to_string())),
+            .add_or_set_header(accept, HeaderVal::from_text("b")),
         Option::None
     );
 }
@@ -329,7 +327,7 @@ fn request_builder_sets_standard_headers_() {
     assert_eq!(headers.body_size(), Option::Some(body.len()));
     assert_eq!(
         headers.try_get_val(StdHeaderKey::Body_Type),
-        Option::Some(&HeaderVal::Num(
+        Option::Some(&HeaderVal::from_num(
             StdHeaderVal::Mime_Body_Type_MsgPack.into_inner()
         ))
     );

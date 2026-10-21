@@ -1,9 +1,11 @@
 //! 客户端侧的准备环境。
 
-use abs_mptp::x_deps::abs_smux;
 use abs_smux::conf::TrMuxConfig;
 
-use crate::ring_prepare_::{PeerRole, TrPrepareCtx};
+use crate::{
+    ring_prepare_::{PeerRole, TrPrepareCtx},
+    x_deps::abs_smux,
+};
 
 /// 客户端侧的准备环境。
 ///

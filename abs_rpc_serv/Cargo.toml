@@ -1,0 +1,13 @@
+[package]
+edition = "2024"
+name = "abs_rpc_serv"
+version = "0.1.0"
+
+description = "`core_rpc_mptp_smux_v1` 的前缀树 router 实现。"
+repository.workspace = true
+keywords = ["rpc", "router"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+mptp_smux = { path = "../mptp_smux" }

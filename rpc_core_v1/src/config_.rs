@@ -41,7 +41,7 @@ use core::marker::PhantomData;
 
 use crate::{
     client::{DefaultRpcAllocConfig, TrRpcClientAllocConfig, TrRpcClientConfig},
-    prep_::{ClientPrepFactory, ServingPrepFactory},
+    prep::{ClientPrepFactory, ServingPrepFactory},
     serving::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfig},
     x_deps::{
         abs_mptp,

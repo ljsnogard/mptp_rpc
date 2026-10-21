@@ -4,6 +4,7 @@ name = "abs_mptp"
 version = "0.1.0"
 
 description = "Abstraction and basic definition of MPTP (Multiplexed P2P Transportation Protocol) "
+repository.workspace = true
 categories = ["no-std"]
 license = "MIT/Apache-2.0"
 readme = "README.md"

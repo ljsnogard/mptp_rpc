@@ -31,10 +31,10 @@ mod trie_;
 use std::process::ExitCode;
 
 use anyhow::Result;
-use core_rpc_mptp_smux_v1::CoreAlloc;
 use mm_ptr::Shared;
 
 use crate::cli::{Options, Role};
+use abs_mm::CoreAlloc;
 
 fn main() -> ExitCode {
     let opts = match cli::parse_args_(std::env::args()) {

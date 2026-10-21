@@ -16,3 +16,19 @@ pub trait TrPathRouter {
         path: &'f str,
     ) -> Option<&'f Self::Handler>;
 }
+
+pub trait TrPathRouterMut
+where
+    Self: TrPathRouter,
+{
+    type Err: core::error::Error;
+
+    fn add_rule<'f, F>(
+        &'f mut self,
+        rule: &'f str,
+        make_handler: F,
+    ) -> Result<(), Self::Err>
+    where
+        Self: Sized,
+        F: FnOnce(&'f str) -> Self::Handler;
+}

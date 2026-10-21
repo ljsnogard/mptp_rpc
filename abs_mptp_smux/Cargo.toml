@@ -1,0 +1,11 @@
+[package]
+edition = "2024"
+name = "abs_mptp_smux"
+version = "0.1.0"
+
+description = "ABStraction of MPTP over SMUX"
+repository.workspace = true
+license = "MIT/Apache-2.0"
+
+[dependencies]
+abs_mptp = { path = "../abs_mptp" }

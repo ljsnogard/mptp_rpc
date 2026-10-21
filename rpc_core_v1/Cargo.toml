@@ -1,6 +1,6 @@
 [package]
 edition = "2024"
-name = "core_rpc_mptp_smux_v1"
+name = "rpc_core_v1"
 version = "0.1.0"
 
 description = "Core library for RPC over Message Packing and Transportation Protocol."

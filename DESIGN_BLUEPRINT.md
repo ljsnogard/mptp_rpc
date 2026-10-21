@@ -32,7 +32,7 @@ pub struct GoodsInfo {
 }
 
 /// 顾客订单服务
-#[rpc(service = "customer/goods")]
+#[rpc(path = "customer/goods")]
 pub trait GoodsCustomerService {
     fn list(&self) -> impl TrMayCancel<'_, MayCancelOutput = Result<Vec<GoodsInfo>>>;
 
@@ -40,7 +40,7 @@ pub trait GoodsCustomerService {
 }
 
 /// 管理员货架管理服务
-#[rpc(service = "admin/goods")]
+#[rpc(path = "admin/goods")]
 pub trait GoodsAdminService {
     fn register(&self, info: GoodsInfo) -> impl TrMayCancel<'_, MayCancelOutput = Result<GoodsId>>;
 
@@ -48,7 +48,7 @@ pub trait GoodsAdminService {
 }
 
 #[rpc(
-    path = "api/v1",
+    interface = "api/v1",
     services = [
         GoodsCustomerService,
         GoodsAdminService,

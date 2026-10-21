@@ -5,6 +5,7 @@ version = "0.1.0"
 publish = false
 
 description = "abs_mptp 的协议层集成测试：显式选后端，让后端选择留在测试侧"
+repository.workspace = true
 categories = ["no-std"]
 license = "MIT/Apache-2.0"
 
