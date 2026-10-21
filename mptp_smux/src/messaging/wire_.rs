@@ -323,7 +323,7 @@ mod tests_ {
     use abs_mptp::spec::{StdHeaderKey, StdHeaderVal};
 
     use super::*;
-    use crate::messaging::HeaderVal;
+    use crate::messaging::{HeaderVal, U16OrStr};
 
     /// 立即完成的测试执行器：所有操作都是纯内存的，会一直 `Ready`。
     fn block_on_<TyFut>(future: TyFut) -> TyFut::Output
@@ -561,6 +561,49 @@ mod tests_ {
                 .expect("应该有头表")
                 .try_get_val(StdHeaderKey::new(0x01)),
             Option::Some(&HeaderVal::Num(7u16))
+        );
+    }
+
+    /// 测试字符串头键能随回复前缀完整往返。
+    /// Test that a string header key round-trips through a response prefix.
+    ///
+    /// - 手段：构造一张同时带标准数字头与 `U16OrStr::Str("x-custom")` 的表，编码后解码。
+    /// - 判断：整张头表相等，且字符串键能按原键取回；说明新键类型在线上确实写成
+    ///   MessagePack 字符串，而不是被折叠成数字或被丢弃。
+    ///
+    /// - Means: build a map with a standard numeric header and
+    ///   `U16OrStr::Str("x-custom")`, encode it, then decode it back.
+    /// - Verdict: the whole map compares equal and the string key resolves again, showing that
+    ///   the new key is written as a MessagePack string rather than folded into a number or
+    ///   dropped.
+    #[test]
+    fn string_header_key_roundtrips_() {
+        let key: U16OrStr<String> = U16OrStr::Str("x-custom".to_string());
+        let mut headers = Headers::new();
+        headers.set_text(StdHeaderKey::Body_Size, "12");
+        headers.set(key.clone(), HeaderVal::Text("v".to_string()));
+
+        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers));
+        let mut storage = [0u8; 128usize];
+        let cap = storage.len();
+        let mut sink: &mut [u8] = storage.as_mut_slice();
+        block_on_(
+            write_response_prefix_async(&prefix, &mut sink)
+                .may_cancel_with(NonCancellableToken::new()),
+        )
+        .expect("回复前缀编码应当成功");
+        let written = cap - sink.len();
+
+        let mut input: &[u8] = &storage[..written];
+        let decoded = block_on_(
+            read_response_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+        )
+        .expect("回复前缀解码应当成功");
+
+        assert_eq!(decoded, prefix);
+        assert_eq!(
+            decoded.headers().expect("应该有头表").try_get(key),
+            Option::Some(&HeaderVal::Text("v".to_string()))
         );
     }
 

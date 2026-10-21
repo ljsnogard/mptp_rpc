@@ -48,7 +48,9 @@ pub mod serving;
 
 mod ring_prepare_;
 
-pub use messaging::{HeaderEntry, HeaderVal, Headers, RequestPrefix, ResponsePrefix};
+pub use messaging::{
+    HeaderEntry, HeaderVal, Headers, RequestPrefix, ResponsePrefix, U16OrStr,
+};
 pub use ring_prepare_::{PeerRole, RingBuffs, TrPrepFactory, TrPrepareCtx};
 
 /// 协议约定的**默认服务垛口**：`0x80`。

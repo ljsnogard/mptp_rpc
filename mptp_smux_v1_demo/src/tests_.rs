@@ -31,8 +31,8 @@ use abs_mptp::{
     },
 };
 use mptp_smux::messaging::{
-    HeaderEntry, HeaderVal, Headers, MessagingError, RequestPrefix, read_request_prefix_async,
-    read_response_prefix_async,
+    HeaderEntry, HeaderVal, Headers, MessagingError, RequestPrefix, U16OrStr as HeaderU16OrStr,
+    read_request_prefix_async, read_response_prefix_async,
 };
 
 use crate::protocol_::{
@@ -146,21 +146,25 @@ fn headers_answer_tr_headers_() {
     headers.set_text(StdHeaderKey::Data_Type_Id, "0xabc");
 
     let by_key = headers
-        .try_get_header(StdHeaderKey::Body_Type)
+        .try_get_header(HeaderU16OrStr::U16(u16::from(StdHeaderKey::Body_Type)))
         .expect("写进去的头应当取得回来");
     assert_eq!(by_key, &HeaderVal::Num(1u16));
 
     let text = headers
-        .try_get_header(StdHeaderKey::Data_Type_Id)
+        .try_get_header(HeaderU16OrStr::U16(u16::from(
+            StdHeaderKey::Data_Type_Id,
+        )))
         .expect("文本头也应当取得回来");
     assert_eq!(text, &HeaderVal::Text("0xabc".to_string()));
 
     let all: Vec<HeaderEntry> = headers.into_entries().collect();
     assert_eq!(all.len(), 2usize);
-    let borrowed: &StdHeaderKey = all[0].borrow();
+    let borrowed: &HeaderU16OrStr<String> = all[0].borrow();
     assert!(matches!(
         *borrowed,
-        StdHeaderKey::Body_Type | StdHeaderKey::Data_Type_Id
+        HeaderU16OrStr::U16(code)
+            if code == u16::from(StdHeaderKey::Body_Type)
+                || code == u16::from(StdHeaderKey::Data_Type_Id)
     ));
     // 条目对**值**同样可 `Borrow`——`abs_mptp` 要求两者都能借出。
     let value: &HeaderVal = all[0].borrow();
@@ -214,20 +218,21 @@ fn headers_inherent_writes_land_() {
 #[test]
 fn headers_report_tr_headers_mut_on_empty_() {
     let headers = Headers::new();
+    let accept = HeaderU16OrStr::U16(u16::from(StdHeaderKey::Accept));
 
     let added = headers
         .clone()
-        .try_add_header(StdHeaderKey::Accept, |_| HeaderVal::Text("a".to_string()));
+        .try_add_header(accept.clone(), |_| HeaderVal::Text("a".to_string()));
     assert!(added.is_ok(), "空表上添加应当成功");
 
     assert_eq!(
-        headers.clone().remove_header(StdHeaderKey::Accept),
+        headers.clone().remove_header(accept.clone()),
         Option::None
     );
     assert_eq!(
         headers
             .clone()
-            .add_or_set_header(StdHeaderKey::Accept, HeaderVal::Text("b".to_string())),
+            .add_or_set_header(accept, HeaderVal::Text("b".to_string())),
         Option::None
     );
 }

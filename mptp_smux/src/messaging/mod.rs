@@ -9,7 +9,9 @@
 //! - 回复前缀：`status + headers`。
 //!
 //! 每一部分都是一个**独立的 MessagePack 值**，按上面列出的顺序连续写出；把它们装进元组或
-//! 结构体会多写一个容器头，改变线上字节。头表是「数字键 → 值」的映射，没有头时写 `nil`。
+//! 结构体会多写一个容器头，改变线上字节。头表是「数字或字符串键 → 值」的映射，没有头时写
+//! `nil`；键类型是 [`U16OrStr<S>`](U16OrStr)，字符串形态 `S` 由使用者选择（缺省
+//! `String`）。
 //!
 //! # 边界
 //!
@@ -23,7 +25,7 @@
 //! `RpcClientInterface::path()` 与服务名、方法名拼成 `/api/v1/customer/goods` 这样的路径；
 //! 服务端的 [`TrPathRouter`](crate::serving::TrPathRouter) 实现再按自己的规则把它分派给
 //! handler。
-//! [`Headers`] 是开放的数字键映射，RPC 层可以在标准头之外携带自定义元数据。
+//! [`Headers`] 是开放的「数字或字符串键」映射，RPC 层可以在标准头之外携带自定义元数据。
 //!
 //! # `messaging`: the wire format owned by `mptp_smux`
 //!
@@ -43,6 +45,7 @@ mod wire_;
 
 pub use error_::MessagingError;
 pub use headers_::{HeaderEntry, HeaderVal, Headers};
+pub use num_or_str_::U16OrStr;
 pub use prefix_::{RequestPrefix, ResponsePrefix};
 pub use wire_::{
     ReadRequestPrefixAsync, ReadResponsePrefixAsync, WriteRequestPrefixAsync,

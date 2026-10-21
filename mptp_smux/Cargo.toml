@@ -16,9 +16,9 @@ abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 abs_mptp = { path = "../abs_mptp" }
 
 # **MPTP 前缀的线上格式由本 crate 自己拥有**：`mp_denco` 直接面向 `abs_buff` 的段接口，
-# 编解码器按值推进，不把整个前缀预攒进 `Vec`。`abs_denco` 是格式抽象，`denco_macro`
-# 提供头表的派生；`alloc-collections` 打开 `BTreeMap` 实现，头表因此可以直接转发给内部的
-# `Arc<BTreeMap<u16, HeaderVal>>`。
+# 编解码器按值推进，不把整个前缀预攒进 `Vec`。`abs_denco` 是格式抽象；头表已改为手写
+# `TrEncodable` / `TrDecodable`（键是 `U16OrStr<S>`），`denco_macro` 仍经 `x_deps`
+# 转出给下游派生业务类型，`alloc-collections` 保留给其它集合实现。
 abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git", features = ["alloc-collections"] }
 denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
