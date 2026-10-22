@@ -18,3 +18,12 @@ members = [
 edition = "2024"
 authors = ["lino <lino_snsalias@outlook.com>"]
 repository = "https://github.com/ljsnogard/mptp_rpc"
+
+[workspace.dependencies]
+# 类型级列表库；`TCons` / `TNil` / `TList` 由它提供。
+tlist = "0.7"
+
+# 当前构建环境无法写 crates.io 缓存，因此仓库内保留了一份 tlist 0.7.0 的原始源码。
+# 若运行环境可以正常从 crates.io 拉取，删除本段即可回到标准 registry 依赖。
+# [patch.crates-io]
+# tlist = { path = "vendor/tlist" }

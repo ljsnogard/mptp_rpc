@@ -195,7 +195,8 @@ let router = Router::new().call(|ctx|
 - `abs_rpc_serv::service::TrRpcService<I, C>`：service 实现如何被调度；
 - `rpc_core_v1::serving::RpcCallCtx` 实现 `TrRpcCallCtx`；
 - `rpc_core_v1::serving::RpcRouter<I, S>`：interface 级**内联** router；
-  `add_service::<Impl>(closure)` 把具体实现装进元组，命中后直接解码 / dispatch / 回复 / 收尾；
+  `add_service::<Impl>(closure)` 把具体实现装进 `tlist` 类型级列表，命中后直接解码 /
+  dispatch / 回复 / 收尾；
 - `mptp_smux::serving::Router`：顶层 MPTP router，按最长 interface 前缀把请求交给一个
   `RpcRouter`；它自身实现 `TrReqHandler`，可直接交给 `MptpServer`；
 - 旧的队列链 `RpcJob` / `ServiceRoute` / `TrRpcServiceRoute` / `TrRpcRouter` /
@@ -232,7 +233,8 @@ let server = MptpServer::<ServingCfg, _>::new(router);
 1. `RpcRouter::new` 接收顶层 `Router::call` 提供的 `RouterCtx`；`add_service` 的闭包接收
    一个零大小的 `RpcServiceCtx`，业务数据由闭包自己捕获；
 2. 顶层 `Router` 支持多个 interface：每次 `.call` 按 `TrPathHandler::PATH` 追加一条前缀
-   路由，内部用元组静态分派，不需要 enum 或 `dyn`；
+   路由，内部用 `tlist` 静态分派，不需要 enum 或 `dyn`（service 与 interface 列表都
+   没有固定数量上限）；
 3. 默认是内联分派，没有队列 / 背压；需要时用旧的队列链或自己包一层 `TrReqHandler`；
 4. `service_of` 暂不支持泛型 impl / where 子句；同一个 impl 类型在同一个 interface 下
    只能对应一个 service trait（不同 interface 可以各有一条实现）。

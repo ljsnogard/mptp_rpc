@@ -39,6 +39,8 @@ mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2
 
 # 同一 task 内 join「编码进 ring」与「从 ring 搬运」两条分支；不替使用者选运行时。
 futures = "0.3"
+# 类型级 service 列表：`TList!` / `TCons` / `TNil`，避免手写 cons list。
+tlist = { workspace = true }
 thiserror = { version = "2.0.20" }
 
 [dev-dependencies]

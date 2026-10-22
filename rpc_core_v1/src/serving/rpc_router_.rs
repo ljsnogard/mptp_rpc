@@ -12,18 +12,30 @@
 //! - 需要队列 / 背压的使用者可以在外层包自己的 `TrReqHandler`，或继续使用
 //!   `rpc_router_trie` 的队列版本。
 //!
-//! 顶层 interface 前缀由 [`Router`](mptp_smux::serving::Router) 按
-//! [`TrPathHandler::PATH`](mptp_smux::serving::TrPathHandler::PATH) 分派；`RpcRouter`
-//! 自身在匹配 service 前会剥掉 `I::PATH`。
+//! # 任意数量的 service
 //!
-//! 当前实现用类型级元组保存 service，元组长度展开到 8；需要一个 interface 下超过 8 个
-//! service 时，可以扩展本文件的宏，或改用自定义 `TrReqHandler`。
+//! service 类型列表使用 [`tlist`] 的 [`TCons`] / [`TNil`]：`add_service` 只把新类型
+//! cons 到列表头，因此没有「元组最多 N 个」的上限。
+//!
+//! `tlist` 本身是纯类型级 ZST 列表，不保存运行期值；因此这里再定义一个由它索引的
+//! **运行期枚举** [`ServiceValues`]：
+//!
+//! - `TNil` 对应 `ServiceValues::Nil`；
+//! - `TCons<H, T>` 对应 `ServiceValues<H, T::Values>`，即 `Cons(实际 service, 尾部)`。
+//!
+//! 这样 service 实体按具体类型内联存放在递归枚举里，不需要 `dyn Any`、不需要 downcast，
+//! 也不会丢失 `Send` / `Sync` 的自动约束。
+//!
+//! 分派 future 用 [`EitherMayCancel`] 把「命中头节点」与「继续查尾节点」合成同一个可取消
+//! future，没有 `Pin<Box<dyn Future>>`。
 //!
 //! # `rpc_router_`: the interface-level inline RPC router
 //!
 //! One [`RpcRouter`] serves one interface. It owns the concrete service implementations,
 //! dispatches inline (no queues, no spawning), strips the interface prefix, and writes
-//! `404` / `405` replies itself. Users register services with [`RpcRouter::add_service`].
+//! `404` / `405` replies itself. Service types live in a `tlist` type-level list; the actual
+//! values live in a recursive [`ServiceValues`] enum indexed by that list, so no `dyn Any`
+//! and no downcast are involved.
 
 use core::marker::PhantomData;
 
@@ -37,10 +49,11 @@ use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::{
     messaging::Headers,
     serving::{
-        RouterCtx,
+        EitherMayCancel, ReadyMayCancel, RouterCtx,
         config::{ChannelRx, ChannelTx},
     },
 };
+use tlist::{TCons, TList, TNil};
 
 use crate::{
     messaging::{RpcError, RpcResult, TrRpcInterface},
@@ -69,10 +82,143 @@ impl Default for RpcServiceCtx {
     }
 }
 
+/// 由 `tlist` 类型列表索引的运行期 service 容器。
+///
+/// `TNil` 对应 [`ServiceValues::Nil`]；`TCons<H, T>` 对应
+/// `ServiceValues<H, T::Values>`，其中 `Cons` 直接持有 `H` 的实体。
+#[doc(hidden)]
+pub enum ServiceValues<H, T> {
+    /// 空列表。
+    Nil,
+
+    /// 头节点实体 + 剩余列表。
+    Cons(H, T),
+}
+
+/// 把 `tlist` 类型列表映射到运行期值容器类型。
+#[doc(hidden)]
+pub trait TrRpcServiceValues: TList {
+    /// 运行期值容器。
+    type Values;
+}
+
+impl TrRpcServiceValues for TNil {
+    type Values = ServiceValues<(), ()>;
+}
+
+impl<H, T> TrRpcServiceValues for TCons<H, T>
+where
+    T: TrRpcServiceValues,
+{
+    type Values = ServiceValues<H, T::Values>;
+}
+
+/// 一个 service 类型列表：按路径匹配，并按索引分派。
+///
+/// 本 trait 由 `tlist` 的 [`TNil`] / [`TCons`] 实现；使用者不需要手写实现，也不需要在
+/// 业务代码里命名它。
+#[doc(hidden)]
+pub trait TrRpcServiceList<I, C>: TrRpcServiceValues
+where
+    I: TrRpcInterface,
+    C: TrServingConfig,
+{
+    /// 返回命中的 `(索引, 命中路径长度)`；索引从列表头开始。
+    fn match_service(rest: &str) -> Option<(usize, usize)>;
+
+    /// 按索引分派；`index` 必须来自 [`Self::match_service`]。
+    fn dispatch_at<'a, 'f>(
+        services: &'f Self::Values,
+        index: usize,
+        ctx: &'f mut RpcCallCtx<'a, C>,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        'a: 'f,
+        C: 'f;
+}
+
+impl<I, C> TrRpcServiceList<I, C> for TNil
+where
+    I: TrRpcInterface,
+    C: TrServingConfig,
+{
+    fn match_service(_rest: &str) -> Option<(usize, usize)> {
+        Option::None
+    }
+
+    fn dispatch_at<'a, 'f>(
+        _services: &'f Self::Values,
+        _index: usize,
+        _ctx: &'f mut RpcCallCtx<'a, C>,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        'a: 'f,
+        C: 'f,
+    {
+        ReadyMayCancel::new(Result::Ok(()))
+    }
+}
+
+impl<I, C, H, T> TrRpcServiceList<I, C> for TCons<H, T>
+where
+    I: TrRpcInterface,
+    C: TrServingConfig,
+    H: TrRpcService<I, C, Err = RpcError>,
+    T: TrRpcServiceList<I, C>,
+{
+    fn match_service(rest: &str) -> Option<(usize, usize)> {
+        let head_len = path_prefix_len_(<H as TrRpcService<I, C>>::SERVICE_PATH, rest);
+        let tail = T::match_service(rest);
+
+        match (head_len, tail) {
+            (Option::Some(head_len), Option::Some((tail_index, tail_len))) => {
+                if head_len >= tail_len {
+                    Option::Some((0usize, head_len))
+                } else {
+                    Option::Some((tail_index + 1usize, tail_len))
+                }
+            }
+            (Option::Some(head_len), Option::None) => Option::Some((0usize, head_len)),
+            (Option::None, Option::Some((tail_index, tail_len))) => {
+                Option::Some((tail_index + 1usize, tail_len))
+            }
+            (Option::None, Option::None) => Option::None,
+        }
+    }
+
+    fn dispatch_at<'a, 'f>(
+        services: &'f Self::Values,
+        index: usize,
+        ctx: &'f mut RpcCallCtx<'a, C>,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        'a: 'f,
+        C: 'f,
+    {
+        // `TCons` 的运行期容器只可能是 `Cons`；`Nil` 分支是类型层面的底座。
+        let ServiceValues::Cons(head, tail) = services else {
+            unreachable!("RpcRouter 内部不变量：TCons 对应的运行期值不是 Cons")
+        };
+
+        if index == 0usize {
+            EitherMayCancel::Left(<H as TrRpcService<I, C>>::dispatch_async(head, ctx))
+        } else {
+            EitherMayCancel::Right(T::dispatch_at(tail, index - 1usize, ctx))
+        }
+    }
+}
+
 /// 一个 interface 的 RPC router。
 ///
-/// `I` 是 interface marker，`S` 是 service 实现的元组（由 [`add_service`](Self::add_service)
-/// 逐步增长）。router 只在装配期构建；请求处理只读地使用已装好的 service。
+/// `I` 是 interface marker，`S` 是 service 实现的类型级 `tlist` 列表（由
+/// [`add_service`](Self::add_service) 逐步增长）。router 只在装配期构建；请求处理只读地
+/// 使用已装好的 service。
+///
+/// 列表长度没有人为上限：`add_service` 只做一次类型级 cons 与一次运行期枚举构造。
+/// 使用者通常不需要写 `S`；默认值是 [`TNil`]。
+///
+/// service 实体直接存放在 [`ServiceValues`] 递归枚举里；因此没有 `dyn Any`、没有
+/// downcast，`RpcRouter` 的 `Send` / `Sync` 也由实际 service 类型决定。
 ///
 /// # Examples
 ///
@@ -81,66 +227,57 @@ impl Default for RpcServiceCtx {
 ///     .add_service::<GoodsCustomerServiceImpl>(move |_| GoodsCustomerServiceImpl::new())
 ///     .add_service::<GoodsAdminServiceImpl>(move |_| GoodsAdminServiceImpl::new());
 /// ```
-pub struct RpcRouter<I, S = ()> {
-    /// 已装入的 service 实现元组。
-    services_: S,
+pub struct RpcRouter<I, S: TrRpcServiceValues = TNil> {
+    /// 已装入的 service 运行期值；顺序与类型列表的头尾对应。
+    services_: S::Values,
 
     /// `I` 只出现在路径与 trait 约束里。
     _interface_: PhantomData<fn() -> I>,
 }
 
-impl<I> RpcRouter<I, ()> {
+impl<I> RpcRouter<I, TNil> {
     /// 用顶层 router 的装配上下文造一个空 router。
     ///
     /// `ctx` 目前不携带数据；保留参数是为了与 `Router::call(|ctx| ...)` 的装配链一致。
     pub const fn new<C>(_ctx: &RouterCtx<C>) -> Self {
         RpcRouter {
-            services_: (),
+            services_: ServiceValues::Nil,
             _interface_: PhantomData,
         }
     }
 }
 
-/// 为不同元组长度生成 `add_service`。
-macro_rules! impl_rpc_router_build {
-    ($($idx:tt => $ty:ident),*) => {
-        impl<I, $($ty),*> RpcRouter<I, ($($ty,)*)> {
-            /// 用一个构造闭包装入一个 service 实现。
-            ///
-            /// `T` 是 service 实现类型；它必须通过 `#[rpc(service_of(I))]` 获得
-            /// [`TrRpcService`] 实现。闭包在装配期调用一次，返回的实例由 router 持有。
-            pub fn add_service<T>(
-                self,
-                make_service: impl FnOnce(&RpcServiceCtx) -> T,
-            ) -> RpcRouter<I, ($($ty,)* T,)> {
-                let ctx = RpcServiceCtx::new();
-                RpcRouter {
-                    services_: (
-                        $(self.services_.$idx,)*
-                        make_service(&ctx),
-                    ),
-                    _interface_: PhantomData,
-                }
-            }
-        }
-    };
-}
+impl<I, S> RpcRouter<I, S>
+where
+    S: TrRpcServiceValues,
+{
+    /// 用一个构造闭包装入一个 service 实现。
+    ///
+    /// `T` 是 service 实现类型；它必须通过 `#[rpc(service_of(I))]` 获得
+    /// [`TrRpcService`] 实现。闭包在装配期调用一次，返回的实例由 router 持有。
+    ///
+    /// 本方法只做一次类型级 cons 与一次运行期枚举构造，因此不受固定元组长度限制。
+    pub fn add_service<T>(
+        self,
+        make_service: impl FnOnce(&RpcServiceCtx) -> T,
+    ) -> RpcRouter<I, TCons<T, S>> {
+        let ctx = RpcServiceCtx::new();
+        let RpcRouter {
+            services_,
+            _interface_: _,
+        } = self;
 
-impl_rpc_router_build!();
-impl_rpc_router_build!(0 => S0);
-impl_rpc_router_build!(0 => S0, 1 => S1);
-impl_rpc_router_build!(0 => S0, 1 => S1, 2 => S2);
-impl_rpc_router_build!(0 => S0, 1 => S1, 2 => S2, 3 => S3);
-impl_rpc_router_build!(0 => S0, 1 => S1, 2 => S2, 3 => S3, 4 => S4);
-impl_rpc_router_build!(0 => S0, 1 => S1, 2 => S2, 3 => S3, 4 => S4, 5 => S5);
-impl_rpc_router_build!(0 => S0, 1 => S1, 2 => S2, 3 => S3, 4 => S4, 5 => S5, 6 => S6);
-impl_rpc_router_build!(
-    0 => S0, 1 => S1, 2 => S2, 3 => S3, 4 => S4, 5 => S5, 6 => S6, 7 => S7
-);
+        RpcRouter {
+            services_: ServiceValues::Cons(make_service(&ctx), services_),
+            _interface_: PhantomData,
+        }
+    }
+}
 
 impl<I, S> mptp_smux::serving::TrPathHandler for RpcRouter<I, S>
 where
     I: TrRpcInterface,
+    S: TrRpcServiceValues,
 {
     const PATH: &'static str = I::PATH;
 }
@@ -197,192 +334,97 @@ where
     reply
 }
 
-/// 为不同元组长度生成 `TrReqHandler` 实现。
-macro_rules! impl_rpc_router_handler {
-    ($name:ident, $handle_ty:ident, $handle_fn:ident $(, $idx:tt => $ty:ident)*) => {
-        impl<I, C, $($ty),*> TrReqHandler<C> for RpcRouter<I, ($($ty,)*)>
-        where
-            I: TrRpcInterface,
-            C: TrServingConfig + 'static,
-            $($ty: TrRpcService<I, C, Err = RpcError>),*
-        {
-            type HandleAsync<'f>
-                = $handle_ty<'f, 'f, I, C, $($ty),*>
-            where
-                Self: 'f;
+impl<I, C, S> TrReqHandler<C> for RpcRouter<I, S>
+where
+    I: TrRpcInterface,
+    C: TrServingConfig + 'static,
+    S: TrRpcServiceList<I, C>,
+{
+    type HandleAsync<'f>
+        = RpcRouterHandleAsync<'f, 'f, I, C, S>
+    where
+        Self: 'f;
 
-            type Err = RpcError;
+    type Err = RpcError;
 
-            fn handle_async<'f>(
-                &'f self,
-                method: AccessMethod,
-                location: &'f str,
-                headers: &'f mut Headers,
-                chan_tx: ChannelTx<C>,
-                chan_rx: ChannelRx<C>,
-            ) -> Self::HandleAsync<'f> {
-                $handle_ty::<'f, 'f, I, C, $($ty),*>::new(
-                    self,
-                    method,
-                    location,
-                    headers,
-                    chan_tx,
-                    chan_rx,
-                )
-            }
-        }
-
-        /// [`RpcRouter`] 的 step 函数。
-        #[allow(clippy::needless_lifetimes, clippy::too_many_arguments)]
-        #[gen_may_cancel_future($name, pub, new(pub(crate)))]
-        async fn $handle_fn<'f, I, C, $($ty,)* K>(
-            router: &'f RpcRouter<I, ($($ty,)*)>,
-            method: AccessMethod,
-            location: &'f str,
-            headers: &'f mut Headers,
-            tx: ChannelTx<C>,
-            rx: ChannelRx<C>,
-            cancel: K,
-        ) -> RpcResult<()>
-        where
-            I: TrRpcInterface,
-            C: TrServingConfig + 'f,
-            $($ty: TrRpcService<I, C, Err = RpcError>,)*
-            K: TrCancellationToken,
-        {
-            if method != AccessMethod::Call {
-                return reject_async_::<C, K>(
-                    Status::MethodNotAllowed,
-                    "只接受 Call 访问方法".to_string(),
-                    location,
-                    headers,
-                    tx,
-                    rx,
-                    cancel,
-                )
-                .await;
-            }
-
-            let Option::Some(rest) = strip_interface_prefix_(I::PATH, location) else {
-                return reject_async_::<C, K>(
-                    Status::NotFound,
-                    location.to_string(),
-                    location,
-                    headers,
-                    tx,
-                    rx,
-                    cancel,
-                )
-                .await;
-            };
-
-            let mut best: Option<(usize, usize)> = Option::None;
-            $(
-                if let Option::Some(len) =
-                    path_prefix_len_(<$ty as TrRpcService<I, C>>::SERVICE_PATH, rest)
-                {
-                    if best.is_none_or(|(_, best_len)| len > best_len) {
-                        best = Option::Some(($idx, len));
-                    }
-                }
-            )*
-
-            let Option::Some((index, _)) = best else {
-                return reject_async_::<C, K>(
-                    Status::NotFound,
-                    location.to_string(),
-                    location,
-                    headers,
-                    tx,
-                    rx,
-                    cancel,
-                )
-                .await;
-            };
-
-            let mut ctx = RpcCallCtx::<C>::new(location, headers, tx, rx);
-            let result = match index {
-                $(
-                    $idx => <$ty as TrRpcService<I, C>>::dispatch_async(
-                        &router.services_.$idx,
-                        &mut ctx,
-                    )
-                    .may_cancel_with(cancel.child_token())
-                    .await,
-                )*
-                _ => Result::Ok(()),
-            };
-            ctx.close_async().await;
-            result
-        }
-    };
+    fn handle_async<'f>(
+        &'f self,
+        method: AccessMethod,
+        location: &'f str,
+        headers: &'f mut Headers,
+        chan_tx: ChannelTx<C>,
+        chan_rx: ChannelRx<C>,
+    ) -> Self::HandleAsync<'f> {
+        RpcRouterHandleAsync::<'f, 'f, I, C, S>::new(
+            self, method, location, headers, chan_tx, chan_rx,
+        )
+    }
 }
 
-impl_rpc_router_handler!(RpcRouterHandle1, RpcRouterHandle1Async, rpc_router_handle_1_async_, 0 => S0);
-impl_rpc_router_handler!(RpcRouterHandle2, RpcRouterHandle2Async, rpc_router_handle_2_async_, 0 => S0, 1 => S1);
-impl_rpc_router_handler!(
-    RpcRouterHandle3,
-    RpcRouterHandle3Async,
-    rpc_router_handle_3_async_,
-    0 => S0,
-    1 => S1,
-    2 => S2
-);
-impl_rpc_router_handler!(
-    RpcRouterHandle4,
-    RpcRouterHandle4Async,
-    rpc_router_handle_4_async_,
-    0 => S0,
-    1 => S1,
-    2 => S2,
-    3 => S3
-);
-impl_rpc_router_handler!(
-    RpcRouterHandle5,
-    RpcRouterHandle5Async,
-    rpc_router_handle_5_async_,
-    0 => S0,
-    1 => S1,
-    2 => S2,
-    3 => S3,
-    4 => S4
-);
-impl_rpc_router_handler!(
-    RpcRouterHandle6,
-    RpcRouterHandle6Async,
-    rpc_router_handle_6_async_,
-    0 => S0,
-    1 => S1,
-    2 => S2,
-    3 => S3,
-    4 => S4,
-    5 => S5
-);
-impl_rpc_router_handler!(
-    RpcRouterHandle7,
-    RpcRouterHandle7Async,
-    rpc_router_handle_7_async_,
-    0 => S0,
-    1 => S1,
-    2 => S2,
-    3 => S3,
-    4 => S4,
-    5 => S5,
-    6 => S6
-);
-impl_rpc_router_handler!(
-    RpcRouterHandle8,
-    RpcRouterHandle8Async,
-    rpc_router_handle_8_async_,
-    0 => S0,
-    1 => S1,
-    2 => S2,
-    3 => S3,
-    4 => S4,
-    5 => S5,
-    6 => S6,
-    7 => S7
-);
+/// [`RpcRouter`] 的 step 函数。
+#[allow(clippy::needless_lifetimes, clippy::too_many_arguments)]
+#[gen_may_cancel_future(RpcRouterHandle, pub, new(pub(crate)))]
+async fn rpc_router_handle_async_<'f, I, C, S, K>(
+    router: &'f RpcRouter<I, S>,
+    method: AccessMethod,
+    location: &'f str,
+    headers: &'f mut Headers,
+    tx: ChannelTx<C>,
+    rx: ChannelRx<C>,
+    cancel: K,
+) -> RpcResult<()>
+where
+    I: TrRpcInterface,
+    C: TrServingConfig + 'f,
+    S: TrRpcServiceList<I, C> + 'f,
+    K: TrCancellationToken,
+{
+    if method != AccessMethod::Call {
+        return reject_async_::<C, K>(
+            Status::MethodNotAllowed,
+            "只接受 Call 访问方法".to_string(),
+            location,
+            headers,
+            tx,
+            rx,
+            cancel,
+        )
+        .await;
+    }
+
+    let Option::Some(rest) = strip_interface_prefix_(I::PATH, location) else {
+        return reject_async_::<C, K>(
+            Status::NotFound,
+            location.to_string(),
+            location,
+            headers,
+            tx,
+            rx,
+            cancel,
+        )
+        .await;
+    };
+
+    let Option::Some((index, _)) = S::match_service(rest) else {
+        return reject_async_::<C, K>(
+            Status::NotFound,
+            location.to_string(),
+            location,
+            headers,
+            tx,
+            rx,
+            cancel,
+        )
+        .await;
+    };
+
+    let mut ctx = RpcCallCtx::<C>::new(location, headers, tx, rx);
+    let result = S::dispatch_at(&router.services_, index, &mut ctx)
+        .may_cancel_with(cancel.child_token())
+        .await;
+    ctx.close_async().await;
+    result
+}
 
 #[cfg(test)]
 mod tests_ {
@@ -419,5 +461,79 @@ mod tests_ {
         assert_eq!(path_prefix_len_("goods", "goods"), Some(5usize));
         assert_eq!(path_prefix_len_("goods", "goods/1"), Some(5usize));
         assert_eq!(path_prefix_len_("goods", "goods2"), None);
+    }
+
+    /// 测试 tlist 列表没有固定元组长度上限，且运行期用枚举存放实体。
+    /// Test that the tlist-based list has no fixed tuple-length limit and stores values in
+    /// the recursive enum.
+    ///
+    /// - 手段：构造 20 个 `DummyService` 的 `RpcRouter`，再断言它实现 `TrReqHandler<C>`。
+    /// - 判断：编译通过；运行期不建立连接。
+    ///
+    /// - Means: build an `RpcRouter` with 20 `DummyService` entries and assert it implements
+    ///   `TrReqHandler<C>`.
+    /// - Verdict: it compiles; no connection is opened.
+    #[allow(dead_code)]
+    fn supports_many_services_<C>(ctx: &RouterCtx<C>)
+    where
+        C: TrServingConfig + 'static,
+    {
+        struct Api;
+        struct DummyService;
+
+        impl TrRpcInterface for Api {
+            const PATH: &'static str = "api/v1";
+        }
+
+        impl<C> TrRpcService<Api, C> for DummyService
+        where
+            C: TrServingConfig,
+        {
+            const SERVICE_PATH: &'static str = "dummy";
+
+            type Err = RpcError;
+
+            fn dispatch_async<'f, X>(
+                &'f self,
+                _ctx: &'f mut X,
+            ) -> impl TrMayCancel<'f, MayCancelOutput = Result<(), Self::Err>> + 'f
+            where
+                C: 'f,
+                X: abs_rpc_serv::service::TrRpcCallCtx<C, Err = Self::Err> + 'f,
+            {
+                ReadyMayCancel::new(Result::Ok(()))
+            }
+        }
+
+        fn assert_handler<C, H>(_handler: &H)
+        where
+            C: TrServingConfig + 'static,
+            H: TrReqHandler<C>,
+        {
+        }
+
+        let router = RpcRouter::<Api>::new(ctx)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService)
+            .add_service::<DummyService>(|_| DummyService);
+
+        assert_handler::<C, _>(&router);
     }
 }

@@ -31,6 +31,11 @@ gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 
 thiserror = "2.0.20"
+# 顶层 `Router` 的 interface 列表用类型级 TList，不再按元组长度展开宏。
+tlist = { workspace = true }
+# 递归分派需要把两个不同 future 合成一个可取消 future；futures 的 Either 负责
+# 已转换 future 的承载，不引入运行时。
+futures = "0.3"
 
 # **本 crate 不选后端**：前缀编解码直接读写 ring 的段接口，不做任何同步等待，
 # 因此不需要 `abs_art_facade::Runtime`。后端的点亮是全图并集的，由**应用**（下游 crate）

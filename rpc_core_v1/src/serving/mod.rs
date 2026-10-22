@@ -37,3 +37,5 @@ pub use route_::{
 };
 pub use router_::{RpcDispatchError, RpcRouterHandler, TrRpcRouter};
 pub use rpc_router_::{RpcRouter, RpcServiceCtx};
+#[doc(hidden)]
+pub use rpc_router_::{ServiceValues, TrRpcServiceList, TrRpcServiceValues};

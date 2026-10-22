@@ -71,4 +71,5 @@ pub mod x_deps {
     pub use denco_macro;
     pub use mm_ptr;
     pub use mp_denco;
+    pub use tlist;
 }

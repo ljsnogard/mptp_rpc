@@ -11,14 +11,17 @@
 //! owned once by [`crate::messaging`]. The client's contract lives in [`crate::client`] and
 //! is deliberately separate.
 
+mod cancel_future_;
 mod prep_ctx_;
 mod router_;
 mod server_;
 
 pub mod config;
 
+#[doc(hidden)]
+pub use cancel_future_::{EitherMayCancel, MapErrMayCancel, ReadyMayCancel};
 pub use prep_ctx_::ServingPrepCtx;
-pub use router_::{
-    Route, Router, RouterCtx, RouterError, TrPathHandler, TrPathRouter, TrPathRouterMut,
-};
+#[doc(hidden)]
+pub use router_::{RouteValues, TrPathRouterList, TrRouteValues};
+pub use router_::{Router, RouterCtx, RouterError, TrPathHandler, TrPathRouter, TrPathRouterMut};
 pub use server_::{MptpServer, ServeError, close_channel_async};

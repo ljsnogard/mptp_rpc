@@ -157,7 +157,7 @@ impl InventoryService for DummyInventory {
     }
 }
 
-/// 系统服务的占位实现，用来验证同一 interface 下多个 service 的元组装配。
+/// 系统服务的占位实现，用来验证同一 interface 下多个 service 的 tlist 装配。
 struct DummySystem;
 
 #[rpc(service_of(ApiV1))]
