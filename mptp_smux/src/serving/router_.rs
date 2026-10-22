@@ -62,8 +62,10 @@ pub trait TrPathHandler {
 
 /// 路径 router：按前缀把请求分派给一个 handler。
 pub trait TrPathRouter {
+    /// 命中的 handler 类型。
     type Handler;
 
+    /// 按路径前缀匹配一个 handler；未命中返回 `None`。
     fn match_path<'f>(&'f self, path: &'f str) -> Option<&'f Self::Handler>;
 }
 
@@ -72,8 +74,10 @@ pub trait TrPathRouterMut
 where
     Self: TrPathRouter,
 {
+    /// 注册失败时的错误类型。
     type Err: core::error::Error;
 
+    /// 注册一条路径前缀路由。
     fn add_rule<'f, F>(&'f mut self, rule: &'f str, make_handler: F) -> Result<(), Self::Err>
     where
         Self: Sized,

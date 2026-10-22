@@ -1,3 +1,12 @@
+//! 服务端侧的资源分配约定与服务端配置契约。
+//!
+//! 这些 trait 由宏生成代码与核心实现共同依赖，因此定义放在本 crate，而不是
+//! `rpc_core_v1`。具体配置类型（如 `ServingConfig` / `DefaultServingAllocConfig`）在 core。
+//!
+//! # `config`: abstract serving configuration
+//!
+//! These traits define the serving allocation and configuration contract; concrete
+//! configuration types live in `rpc_core_v1`.
 use core::alloc::AllocatorClone;
 
 /// 服务端侧的资源分配约定。

@@ -61,6 +61,9 @@ pub use ring_prepare_::{PeerRole, RingBuffs, TrPrepFactory, TrPrepareCtx};
 /// （[`client::config::TrConfig::default_serving_dock`]），本 crate 只为它定一个数值。
 pub const K_DEFAULT_SERVING_DOCK: u8 = 0x80;
 
+/// 本 crate 依赖的外部 crate 转出，供下游不必逐条声明版本。
+///
+/// 这不是稳定的公共 API 面；下游需要时优先使用具体模块。
 pub mod x_deps {
     pub use abs_buff;
     pub use abs_buff::x_deps::{abs_cancel, anylr, funty, gen_mcf2};

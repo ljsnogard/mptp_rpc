@@ -27,6 +27,21 @@ serving dispatch; server organization is explicit user code (`Router` +
 `RpcRouter::add_service`). The MPTP wire format lives in `mptp_smux`; body framing lives in
 `abs_mptp`; neither is reimplemented here.
 
+## Prelude
+
+Most protocol / client / server code can start with one glob instead of a long list of
+paths:
+
+```rust
+use rpc_core_v1::preludes::*;
+```
+
+It re-exports the configuration types, client proxy traits, `RpcRouter` / `Router` /
+`MptpServer` / `MptpClient`, cancellation traits, `Shared` / `CoreAlloc` / `TrConnection`, the
+unified error / result types, and the `gen_may_cancel_future` / `TrEncodable` / `TrDecodable`
+macros. Re-exports only; no
+visibility or behavior changes.
+
 ## What?
 
 There are many protocols can carry RPC payload, for example, `gRPC` over `HTTP/2`.

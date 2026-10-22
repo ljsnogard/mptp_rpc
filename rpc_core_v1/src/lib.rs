@@ -30,7 +30,9 @@
 //! - 一个 service 的多个关联函数组织进一个 **body enum**；变体名直接用函数名，字段直接用
 //!   参数名，不再额外生成参数结构体；
 //! - service trait 的 `SERVICE_PATH` 由宏注入；客户端方法由宏对统一的 [`crate::client::ClientProxy`] 生成；
-//! - 服务端 dispatch 由宏生成 `match`，一次调用的解码 / 回复 / 收尾由 [`crate::serving::RpcCallCtx`] 承担。
+//! - 服务端 dispatch 由宏生成 `match`，一次调用的解码 / 回复 / 收尾由 [`crate::serving::RpcCallCtx`] 承担；
+//! - 常用类型与宏集中在 [`preludes`]：`use rpc_core_v1::preludes::*;` 即可覆盖协议、客户端
+//!   与服务端的大部分入口。
 //!
 //! # 分层位置
 //!
@@ -70,6 +72,7 @@
 
 pub mod client;
 pub mod messaging;
+pub mod preludes;
 pub mod serving;
 
 mod config_;
@@ -77,6 +80,9 @@ pub mod prep;
 
 pub use config_::{ClientConfig, ServingConfig, TrDefaultDock, TrUserConn};
 
+/// 本 crate 依赖的外部 crate 转出，供下游与宏生成代码不必逐条声明版本。
+///
+/// 这不是稳定的公共 API 面；下游需要时优先使用 `rpc_core_v1::preludes` 或具体模块。
 pub mod x_deps {
     pub use abs_art_facade;
     pub use abs_denco;
