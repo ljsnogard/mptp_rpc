@@ -18,5 +18,7 @@ mod server_;
 pub mod config;
 
 pub use prep_ctx_::ServingPrepCtx;
-pub use router_::{TrPathRouter, TrPathRouterMut};
+pub use router_::{
+    Route, Router, RouterCtx, RouterError, TrPathHandler, TrPathRouter, TrPathRouterMut,
+};
 pub use server_::{MptpServer, ServeError, close_channel_async};

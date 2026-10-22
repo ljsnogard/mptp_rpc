@@ -3,11 +3,12 @@ edition = "2024"
 name = "abs_rpc_serv"
 version = "0.1.0"
 
-description = "`core_rpc_mptp_smux_v1` 的前缀树 router 实现。"
+description = "RPC 服务端侧的抽象契约：供宏生成代码与核心实现共同依赖，不绑定具体运行时。"
 repository.workspace = true
-keywords = ["rpc", "router"]
+keywords = ["rpc", "service"]
 license = "MIT/Apache-2.0"
 readme = "README.md"
 
 [dependencies]
+# 契约只用到 mptp_smux 转出的协议类型（Headers / ChannelTx / Status）与取消 / 编解码抽象。
 mptp_smux = { path = "../mptp_smux" }

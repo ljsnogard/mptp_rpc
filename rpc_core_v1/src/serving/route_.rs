@@ -158,8 +158,9 @@ where
 
 /// 一个 service 的缺省注册项：service 相对路径与它的有界队列发送端。
 ///
-/// `#[rpc(service = "...")]` 生成的 worker 用 `Worker::route()` 交出本结构；interface
-/// 的 worker 组把它收集成 `Vec<ServiceRoute<C>>`，交给 router 实现注册。
+/// 这是**队列版**装配链的注册项：需要背压的使用者自己建立 worker / 队列，用
+/// [`ServiceRoute::new`] 交出本结构，再交给 `rpc_router_trie::RpcRouter` 注册。
+/// 宏不再生成 worker，也不再自动构造它。
 pub struct ServiceRoute<C: TrServingConfig> {
     /// service 相对路径；来自 service trait 的 `SERVICE_PATH`。
     path_: &'static str,
@@ -171,7 +172,7 @@ pub struct ServiceRoute<C: TrServingConfig> {
 impl<C: TrServingConfig> ServiceRoute<C> {
     /// 由 service 路径与队列发送端构造注册项。
     ///
-    /// 普通使用者不需要直接调用：service 宏生成的 `Worker::route` 已经封装了它。
+    /// 队列版装配时由使用者直接调用；宏不再生成 worker，也不会自动构造它。
     pub fn new(path: &'static str, tx: mpsc::Sender<RpcJob<C>>) -> Self {
         ServiceRoute {
             path_: path,

@@ -40,26 +40,25 @@ pub(crate) struct InterfaceModel_ {
 
     /// interface 路径前缀；不含首尾 `/`。
     pub(crate) path_: String,
-
-    /// `services = [...]` 里的 trait 路径，以及它们对应的隐藏模块路径。
-    ///
-    /// 隐藏模块由 service 宏生成在 trait 所在模块里，因此模块路径 = trait 路径的最后一段
-    /// 替换成 `__rpc_service_{TraitName}`。
-    pub(crate) services_: Vec<ServiceRef_>,
-
-    /// interface worker 组的类型名；生成在 interface marker 所在的同一模块里。
-    ///
-    /// 不用嵌套模块，是为了让 `services = [...]` 里的 trait 路径保持用户写下的相对关系。
-    pub(crate) workers_ident_: syn::Ident,
 }
 
-/// interface 列表里的一个 service 引用。
-pub(crate) struct ServiceRef_ {
-    /// service trait 的路径，例如 `GoodsCustomerService` 或 `super::Foo`。
+/// 一个 `#[rpc(service_of(ApiV1))] impl` 块的模型。
+///
+/// `service_of` 不生成 router 或 worker；它只为用户的 impl 类型补一个
+/// `TrRpcService` 实现，让 `RpcRouter::add_service`
+/// 能在装配期识别 service 路径并调用 dispatch。
+pub(crate) struct ServiceOfModel_ {
+    /// 原始 impl 块；展开时原样保留。
+    pub(crate) impl_item_: syn::ItemImpl,
+
+    /// impl 的 trait 路径，例如 `GoodsCustomerService`。
     pub(crate) trait_path_: syn::Path,
 
-    /// 该 trait 对应的隐藏模块路径，例如 `__rpc_service_GoodsCustomerService`。
-    pub(crate) module_path_: syn::Path,
+    /// impl 的自身类型，例如 `GoodsCustomerServiceImpl`。
+    pub(crate) self_ty_: syn::Type,
+
+    /// `service_of(...)` 里写的 interface marker 路径，例如 `ApiV1`。
+    pub(crate) interface_path_: syn::Path,
 }
 
 /// 一个 RPC 方法的模型。

@@ -31,38 +31,77 @@
 //! # service 宏展开后
 //!
 //! - trait 里多出 `const SERVICE_PATH: &'static str = "customer/goods";`；
+//! - trait 里多出一个隐藏的默认方法 `__rpc_dispatch_async`，它转到隐藏模块里的 dispatch；
 //! - 隐藏模块里的一个 **owned body enum** `Call`：变体名 = 方法名，字段名 = 参数名；
 //! - 为统一的 `ClientProxy` 实现该 service trait：每个方法把参数转成 owned 字段，
 //!   构造 body enum 变体并调用通用 unary 调用；
-//! - 服务端 dispatch：解码 `Call`、`match` 方法变体、调用用户实现并写回复；
-//! - 服务端 `Worker<S, C>`：一个 service 一条有界队列；`route()` 交出
-//!   `ServiceRoute<C>`，`run_async()` 循环「取 job → dispatch → 收尾」。worker 不 spawn、
-//!   不选运行时。
+//! - 服务端 dispatch：解码 `Call`、`match` 方法变体、调用用户实现并写回复。
+//!
+//! 宏**不再生成 `Worker`、队列或 `run_async`**；服务端如何组织 service 完全由使用者决定。
 //!
 //! # interface 宏展开后
 //!
 //! - `impl TrRpcInterface for ApiV1`，`PATH = "api/v1"`；
 //! - `impl ServiceSelector<C> for ApiV1`，客户端可用 `<ApiV1 as ServiceSelector<C>>::select`
 //!   或 `client.call::<ApiV1>()`；
-//! - `ApiV1::workers(service_0, ...)`：按 `services` 顺序建立每个 service 的 worker，
-//!   返回一个具体类型的 worker 组；
-//! - worker 组的 `routes()` 交给一个 router 实现的 `add_interface`（core 的契约是
-//!   `TrRpcRouter::add_interface`；缺省实现是 `rpc_router_trie::RpcRouter`），
-//!   `run_async()` 并发驱动全部 worker（内部是 `try_join` 树，任一 worker 出错时整体
-//!   提前结束）。
+//! - 不再生成 worker 组或 `routes()`。
 //!
-//! 服务端装配的形状（`ServingCfg` 是使用者的 `TrServingConfig` 实现）：
+//! # 服务端：用户自己组织
 //!
-//! ```text
-//! use rpc_router_trie::RpcRouter;
+//! 服务端实现先写普通 impl，再用 `#[rpc(service_of(ApiV1))]` 与 interface 关联：
 //!
-//! let mut workers = ApiV1::workers::<ServingCfg, _>(goods_impl);
-//! let mut router = RpcRouter::<ServingCfg>::new();
-//! router.add_interface(ApiV1::PATH, workers.routes())?;
-//! let handler = router.into_handler();
-//! // 由使用者选择线程 / 运行时：
-//! spawn(workers.run_async().may_cancel_with(server_token));
 //! ```
+//! #![feature(impl_trait_in_assoc_type)]
+//!
+//! use abs_cancel::{TrCancellationToken, TrMayCancel};
+//! use gen_mcf2::gen_may_cancel_future;
+//! use rpc_core_v1::messaging::RpcResult;
+//! use rpc_svc_macro::rpc;
+//!
+//! #[rpc(service = "system")]
+//! pub trait SystemService {
+//!     fn ping(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<bool>>;
+//! }
+//!
+//! #[rpc(path = "api/v1", services = [SystemService])]
+//! pub struct ApiV1;
+//!
+//! pub struct SystemImpl;
+//!
+//! /// 示意用的立即完成 future。
+//! #[allow(clippy::needless_lifetimes)]
+//! #[gen_may_cancel_future(Ready, pub(crate), new(pub(crate)))]
+//! async fn ready_<'f, T, Tok>(value: RpcResult<T>, cancel: Tok) -> RpcResult<T>
+//! where
+//!     T: 'f,
+//!     Tok: TrCancellationToken,
+//! {
+//!     let _ = cancel;
+//!     value
+//! }
+//!
+//! #[rpc(service_of(ApiV1))]
+//! impl SystemService for SystemImpl {
+//!     fn ping(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<bool>> {
+//!         ReadyAsync::<'_, '_, bool>::new(Ok(true))
+//!     }
+//! }
+//!
+//! fn build<C: rpc_core_v1::serving::TrServingConfig + 'static>() {
+//!     use rpc_core_v1::serving::RpcRouter;
+//!     use rpc_core_v1::x_deps::mptp_smux::serving::RouterCtx;
+//!
+//!     let ctx = RouterCtx::<C>::new();
+//!     let _router = RpcRouter::<ApiV1>::new(&ctx)
+//!         .add_service::<SystemImpl>(|_| SystemImpl);
+//! }
+//!
+//! fn main() {}
+//! ```
+//!
+//! 顶层用 `mptp_smux::serving::Router` 按 interface 前缀登记 `RpcRouter`，再交给
+//! `MptpServer`。`RpcRouter::add_service` 只接受实现了 `abs_rpc_serv::service::TrRpcService`
+//! 的类型；`#[rpc(service_of(...))]` 正是为用户的 impl 类型补上这条实现。
 //!
 //! # 使用约束
 //!
@@ -75,21 +114,20 @@
 //!   所以客户端与服务端共用一个 owned enum；借用参数在客户端被转成 owned 字段；
 //! - 变体顺序由方法声明顺序决定；**插入 / 重排方法会改变线上兼容性**，在稳定协议上
 //!   应只在末尾追加方法；
-//! - interface marker 必须是单元结构体；`services` 里写 service trait 的路径。trait 与
-//!   interface 不在同一模块时请写完整路径（例如 `super::goods::GoodsCustomerService`），
-//!   因为 worker 类型名由 service 宏生成在 trait 所在模块里；
-//! - `ApiV1::workers` 的配置类型 `C` 通常由后续 router 的使用推导；推导失败时用
-//!   `ApiV1::workers::<ServingCfg, _, _>(...)` 显式指定；
+//! - interface marker 必须是单元结构体；`services` 里写 service trait 的路径。`services`
+//!   仍会被解析与校验，但不再据此生成 worker；
+//! - `service_of(Interface)` 的 impl 块暂不支持泛型参数与 where 子句；一个 impl 类型在
+//!   **同一个 interface** 下只能对应一个 service trait（不同 interface 可以各有一条实现）；
 //! - 生成代码会调用 `gen_mcf2`，协议 crate 需要打开
-//!   `#![feature(impl_trait_in_assoc_type)]`。worker 的取消监听要求取消令牌实现
-//!   `TrCancellationToken`；`NonCancellableToken` 与 `cantok_rs` 的令牌都满足。
+//!   `#![feature(impl_trait_in_assoc_type)]`。
 //!
-//! # `rpc_svc_macro`: generate both sides of an MPTP RPC service
+//! # `rpc_svc_macro`: generate both sides without organizing the server
 //!
-//! The crate implements the service half (trait constant, one owned body enum, client proxy
-//! impl, serving dispatch, per-service worker) and the interface half (`TrRpcInterface`,
-//! `ServiceSelector`, `ApiV1::workers` and the worker group). Method order is wire-visible;
-//! append new methods at the end. Workers never spawn a thread or pick a runtime.
+//! The service macro generates the trait constant, one owned body enum, the client proxy
+//! impl, the serving dispatch and a hidden default dispatch method. The interface macro only
+//! generates the interface contract and client selector. Server-side organization is left to
+//! the user: `#[rpc(service_of(I))]` adds the `TrRpcService` impl, and
+//! `RpcRouter::add_service` registers services explicitly.
 
 mod analyze_;
 mod expand_;
@@ -97,10 +135,11 @@ mod model_;
 
 use zyn::syn::{self, spanned::Spanned};
 
-/// 把一个 service trait 或 interface marker 展开成 RPC 双端样板。
+/// 把一个 service trait、interface marker 或服务端 impl 块展开成 RPC 样板。
 ///
 /// - `#[rpc(service = "...")]` 用于 service trait；
-/// - `#[rpc(path = "...", services = [...])]` 用于 unit struct 形式的 interface marker。
+/// - `#[rpc(path = "...", services = [...])]` 用于 unit struct 形式的 interface marker；
+/// - `#[rpc(service_of(ApiV1))]` 用于服务端 trait impl 块，补上 `TrRpcService` 实现。
 ///
 /// # Examples
 ///
@@ -162,6 +201,16 @@ fn rpc(#[zyn(input)] item: syn::Item, args: zyn::Args) -> zyn::TokenStream {
                 };
                 let model = analyze_::analyze_interface_(item_struct, path, services)?;
                 expand_::expand_interface_(&model)
+            }
+            analyze_::RpcArgs_::ServiceOf { interface } => {
+                let syn::Item::Impl(item_impl) = &item else {
+                    return Result::Err(syn::Error::new(
+                        item.span(),
+                        "`#[rpc(service_of(...))]` 只能用于 trait impl 块",
+                    ));
+                };
+                let model = analyze_::analyze_service_of_(item_impl, interface)?;
+                expand_::expand_service_of_(&model)
             }
         }
     })();

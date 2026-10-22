@@ -36,10 +36,7 @@ use mptp_smux::{
 
 use crate::{
     messaging::body_::{
-        BodyRing_, K_BODY_RING_CAP_,
-        decode_body_from_async_,
-        encode_into_async_,
-        write_body_async_,
+        BodyRing_, K_BODY_RING_CAP_, decode_body_from_async_, encode_into_async_, write_body_async_,
     },
     messaging::{RpcError, RpcResult},
     serving::TrServingConfig,
@@ -158,6 +155,44 @@ impl<'a, C: TrServingConfig> RpcCallCtx<'a, C> {
             ..
         } = self;
         close_channel_async(tx, &mut rx).await
+    }
+}
+
+impl<'a, C: TrServingConfig> crate::x_deps::abs_rpc_serv::service::TrRpcCallCtx<C>
+    for RpcCallCtx<'a, C>
+{
+    type Err = RpcError;
+
+    fn decode_call_async<'f, T>(
+        &'f mut self,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<T>> + 'f
+    where
+        T: TrDecodableOwned + 'f,
+        Self: 'f,
+    {
+        RpcCallCtx::decode_call_async(self)
+    }
+
+    fn reply_ok_async<'f, T>(
+        &'f mut self,
+        value: T,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        T: TrEncodable + 'f,
+        Self: 'f,
+    {
+        RpcCallCtx::reply_ok_async(self, value)
+    }
+
+    fn reply_status_async<'f>(
+        &'f mut self,
+        status: Status,
+        message: String,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        Self: 'f,
+    {
+        RpcCallCtx::reply_status_async(self, status, message)
     }
 }
 

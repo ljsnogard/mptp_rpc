@@ -1,37 +1,39 @@
 //! `#[rpc]` 的代码展开。
 //!
-//! service 宏的展开分为五块：
+//! service 宏的展开分为四块：
 //!
-//! 1. 在 service trait 里注入 `SERVICE_PATH`；
+//! 1. 在 service trait 里注入 `SERVICE_PATH` 与隐藏的 `__rpc_dispatch_async` 方法；
 //! 2. 生成一个 **owned body enum**：变体名 = 方法名，字段名 = 参数名；
 //! 3. 生成客户端代理对统一 `ClientProxy` 的 trait 实现；
-//! 4. 在隐藏模块里生成服务端 dispatch（`match` body enum → 调用用户实现）；
-//! 5. 在隐藏模块里生成 `Worker`：有界队列、`route()` 与可取消的 `run_async()`。
+//! 4. 在隐藏模块里生成服务端 dispatch（`match` body enum → 调用用户实现）。
 //!
-//! interface 宏的展开生成 `TrRpcInterface`、`ServiceSelector`、`ApiV1::workers(...)` 与
-//! 具体类型的 worker 组（`routes()` / `run_async()`）。
+//! interface 宏只生成 `TrRpcInterface` 与 `ServiceSelector`，不再生成 worker 组。
+//!
+//! `#[rpc(service_of(ApiV1))]` 生成服务端 impl 块：它保留用户原来的 impl，并为该类型补一个
+//! `abs_rpc_serv::service::TrRpcService<ApiV1, C>` 实现；路由与 service 的组织由用户在装配
+//! 期自己调用 `RpcRouter::add_service` 完成。
 //!
 //! `denco_macro` 当前不支持带生命周期参数的派生类型，所以客户端与服务端共用同一个
 //! owned body enum；客户端方法在构造变体时把支持的借用参数转成 owned 字段。
 //!
-//! # `expand_`: code generation for both macro forms
+//! # `expand_`: code generation for every macro form
 //!
-//! Service expansion injects `SERVICE_PATH`, emits one owned body enum, implements the
-//! service trait for the unified `ClientProxy`, and generates the serving dispatch and worker
-//! inside a hidden module. Interface expansion emits the interface contract impls and the
-//! concrete worker group. `denco_macro` cannot derive lifetime-parameterized types yet, so
-//! both sides share the owned enum and the client converts supported borrowed arguments into
-//! owned fields.
+//! Service expansion injects `SERVICE_PATH` and a hidden dispatch method, emits one owned body
+//! enum, implements the service trait for the unified `ClientProxy`, and generates the serving
+//! dispatch inside a hidden module. Interface expansion only emits the interface contract and
+//! client selector. `service_of` keeps the user's impl and adds the serving association that
+//! `RpcRouter::add_service` consumes.
 
 use zyn::{
-    format_ident,
     quote::quote,
     syn::{self, Lifetime, Type, TypeParamBound},
 };
 
 use crate::{
     analyze_::cfg_attrs_,
-    model_::{ArgModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_},
+    model_::{
+        ArgModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_, ServiceOfModel_,
+    },
 };
 
 /// 展开一个 service trait。
@@ -224,7 +226,6 @@ fn dispatch_module_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
     let body_enum = body_enum_(model);
     let step = dispatch_step_(model)?;
     let wrapper = dispatch_wrapper_(model)?;
-    let worker = worker_(model);
 
     Result::Ok(quote! {
         #[doc(hidden)]
@@ -237,21 +238,13 @@ fn dispatch_module_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
                 TrMayCancel,
             };
             use ::rpc_core_v1::x_deps::abs_denco;
-            use ::rpc_core_v1::x_deps::futures;
-            use ::rpc_core_v1::x_deps::futures::StreamExt as _;
             use ::rpc_core_v1::x_deps::gen_mcf2;
-            use ::rpc_core_v1::serving::{
-                RpcCallCtx,
-                RpcJob,
-                ServiceRoute,
-                TrServingConfig,
-            };
+            use ::rpc_core_v1::x_deps::abs_rpc_serv::service::TrRpcCallCtx;
             use ::rpc_core_v1::messaging::RpcResult;
 
             #body_enum
             #step
             #wrapper
-            #worker
         }
     })
 }
@@ -269,15 +262,15 @@ fn dispatch_step_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
             pub(crate),
             new(pub(crate))
         )]
-        async fn dispatch_async_<'__a, '__f, __S, __C, __Tok>(
+        async fn dispatch_async_<'__f, __S, __C, __X, __Tok>(
             service: &'__f __S,
-            ctx: &'__f mut RpcCallCtx<'__a, __C>,
+            ctx: &'__f mut __X,
             cancel: __Tok,
         ) -> RpcResult<()>
         where
-            '__a: '__f,
-            __S: #trait_ident,
-            __C: TrServingConfig,
+            __S: #trait_ident + '__f,
+            __C: '__f,
+            __X: TrRpcCallCtx<__C, Err = ::rpc_core_v1::messaging::RpcError> + '__f,
             __Tok: abs_cancel::TrCancellationToken,
         {
             let call: Call = match ctx
@@ -288,8 +281,8 @@ fn dispatch_step_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
                 Ok(call) => call,
                 Err(err) => {
                     ctx.reply_status_async(err.status(), err.to_string())
-                    .may_cancel_with(cancel.child_token())
-                    .await?;
+                        .may_cancel_with(cancel.child_token())
+                        .await?;
                     return Ok(());
                 }
             };
@@ -361,145 +354,18 @@ fn dispatch_wrapper_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
     let trait_ident = &model.trait_ident_;
 
     Result::Ok(quote! {
-        pub fn dispatch_async<'__a, '__f, __S, __C>(
+        pub fn dispatch_async<'__f, __S, __C, __X>(
             service: &'__f __S,
-            ctx: &'__f mut RpcCallCtx<'__a, __C>,
+            ctx: &'__f mut __X,
         ) -> impl TrMayCancel<'__f, MayCancelOutput = RpcResult<()>> + '__f
         where
-            '__a: '__f,
-            __S: #trait_ident,
-            __C: TrServingConfig,
+            __S: #trait_ident + '__f,
+            __C: '__f,
+            __X: TrRpcCallCtx<__C, Err = ::rpc_core_v1::messaging::RpcError> + '__f,
         {
-            DispatchAsync::<'__a, '__f, '__f, __S, __C>::new(service, ctx)
+            DispatchAsync::<'__f, '__f, __S, __C, __X>::new(service, ctx)
         }
     })
-}
-
-/// 生成一个 service 的 worker：有界队列、`route()` 与 `run_async()`。
-///
-/// worker 不 spawn、不选运行时；它只把「取 job → 调用 dispatch → 收尾」这条循环包成一个
-/// 可取消 future，由使用者决定放到哪个线程 / 运行时上。
-fn worker_(model: &ServiceModel_) -> ::zyn::TokenStream {
-    let trait_ident = &model.trait_ident_;
-
-    quote! {
-        /// 一个 service 的 worker：持有用户实现与自己的有界队列。
-        ///
-        /// 用户实现 → `Worker` → `route()` → router 的 service Trie，是一条显式的装配链；
-        /// 框架不替使用者 spawn 线程，也不假定运行时。
-        pub struct Worker<__S, __C>
-        where
-            __C: TrServingConfig,
-        {
-            /// 用户实现。
-            service_: __S,
-
-            /// 本 service 的队列接收半边。
-            queue_: futures::channel::mpsc::Receiver<RpcJob<__C>>,
-
-            /// 交给 router 的注册项。
-            route_: ServiceRoute<__C>,
-        }
-
-        impl<__S, __C> Worker<__S, __C>
-        where
-            __S: #trait_ident,
-            __C: TrServingConfig,
-        {
-            /// 用缺省队列容量建立一个 worker。
-            pub fn new(service: __S) -> Self {
-                Self::with_capacity(
-                    service,
-                    ::rpc_core_v1::serving::K_DEFAULT_SERVICE_QUEUE_CAP,
-                )
-            }
-
-            /// 用指定队列容量建立一个 worker；容量为 0 时按 1 处理。
-            pub fn with_capacity(service: __S, capacity: usize) -> Self {
-                let (sender, queue) =
-                    futures::channel::mpsc::channel::<RpcJob<__C>>(capacity.max(1usize));
-                let route =
-                    ServiceRoute::new(<__S as #trait_ident>::SERVICE_PATH, sender);
-                Worker {
-                    service_: service,
-                    queue_: queue,
-                    route_: route,
-                }
-            }
-
-            /// 返回 `(SERVICE_PATH, 队列发送端)` 的注册项，供 router 插入 service Trie。
-            pub fn route(&self) -> ServiceRoute<__C> {
-                self.route_.clone()
-            }
-
-            /// 用户实现。
-            pub fn service(&self) -> &__S {
-                &self.service_
-            }
-
-            /// 驱动 worker 循环，直到队列关闭或取消令牌触发。
-            ///
-            /// 返回的 future 可以直接 `.await`（不可取消），也可以先
-            /// `.may_cancel_with(token)` 再等待。每处理完一个 job 都会检查取消信号；
-            /// 等待下一个 job 时同时等待取消信号，因此空闲 worker 也能被及时停止。
-            pub fn run_async<'__f>(
-                &'__f mut self,
-            ) -> impl TrMayCancel<'__f, MayCancelOutput = RpcResult<()>> + '__f
-            where
-                __S: '__f,
-                __C: '__f,
-            {
-                RunWorkerAsync::<'__f, '__f, __S, __C>::new(self)
-            }
-        }
-
-        /// `Worker::run_async` 的 step 函数。
-        #[allow(clippy::needless_lifetimes)]
-        #[gen_mcf2::gen_may_cancel_future(RunWorker, pub(crate), new(pub(crate)))]
-        async fn run_worker_async_<'__f, __S, __C, __Tok>(
-            worker: &'__f mut Worker<__S, __C>,
-            cancel: __Tok,
-        ) -> RpcResult<()>
-        where
-            __S: #trait_ident,
-            __C: TrServingConfig,
-            __Tok: TrCancellationToken,
-        {
-            let watcher = cancel.child_token();
-            let mut cancelled = ::core::pin::pin!(async move {
-                watcher.cancellation().await;
-            });
-            loop {
-                if cancel.is_cancelled() {
-                    break;
-                }
-                let job = {
-                    let mut next = ::core::pin::pin!(worker.queue_.next());
-                    match futures::future::select(next, cancelled.as_mut()).await {
-                        futures::future::Either::Left((
-                            ::core::option::Option::Some(job),
-                            _,
-                        )) => job,
-                        futures::future::Either::Left((
-                            ::core::option::Option::None,
-                            _,
-                        )) => break,
-                        futures::future::Either::Right(((), _)) => break,
-                    }
-                };
-
-                let (location, headers, tx, rx) = job.into_parts();
-                let mut ctx = RpcCallCtx::<__C>::new(&location, &headers, tx, rx);
-                let result = dispatch_async(&worker.service_, &mut ctx)
-                    .may_cancel_with(cancel.child_token())
-                    .await;
-                ctx.close_async().await;
-                result?;
-            }
-
-            ::core::result::Result::Ok(())
-        }
-    }
 }
 
 /// 展开一个 interface marker。
@@ -513,57 +379,13 @@ pub(crate) fn expand_interface_(model: &InterfaceModel_) -> syn::Result<zyn::Out
     })
 }
 
-/// 生成 interface 的契约实现、`workers(...)` 构造器与 worker 组。
+/// 生成 interface 的契约实现与客户端选择器。
+///
+/// 服务端组织不再由宏生成：用户用 `RpcRouter::<ApiV1>::new(ctx).add_service::<Impl>(...)`
+/// 自己决定装哪些 service、以什么顺序装、是否需要队列。
 fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
     let struct_ident = &model.struct_ident_;
     let path = &model.path_;
-    let workers_ident = &model.workers_ident_;
-    let run_prefix = format_ident!(
-        "__rpc_interface_{}RunWorkers",
-        struct_ident.to_string().trim_start_matches("r#")
-    );
-    let run_async_ident = format_ident!("{}Async", run_prefix);
-    let run_fn_ident = format_ident!(
-        "__rpc_interface_{}_run_workers_async_",
-        struct_ident.to_string().trim_start_matches("r#")
-    );
-
-    let service_idents = (0usize..model.services_.len())
-        .map(|index| format_ident!("__S{index}"))
-        .collect::<Vec<_>>();
-    let trait_paths = model
-        .services_
-        .iter()
-        .map(|service| &service.trait_path_)
-        .collect::<Vec<_>>();
-    let module_paths = model
-        .services_
-        .iter()
-        .map(|service| &service.module_path_)
-        .collect::<Vec<_>>();
-    let field_idents = (0usize..model.services_.len())
-        .map(|index| format_ident!("worker_{index}_"))
-        .collect::<Vec<_>>();
-    let param_idents = (0usize..model.services_.len())
-        .map(|index| format_ident!("service_{index}"))
-        .collect::<Vec<_>>();
-    let local_idents = (0usize..model.services_.len())
-        .map(|index| format_ident!("worker_{index}"))
-        .collect::<Vec<_>>();
-
-    let runners = local_idents
-        .iter()
-        .map(|local| {
-            quote! {
-                ::core::future::IntoFuture::into_future(
-                    #local
-                        .run_async()
-                        .may_cancel_with(cancel.child_token()),
-                )
-            }
-        })
-        .collect::<Vec<_>>();
-    let run_tree = join_tree_(&runners);
 
     quote! {
         impl ::rpc_core_v1::messaging::TrRpcInterface for #struct_ident {
@@ -586,121 +408,59 @@ fn interface_items_(model: &InterfaceModel_) -> ::zyn::TokenStream {
                 ::rpc_core_v1::client::ClientProxy::new(client)
             }
         }
-
-        impl #struct_ident {
-            /// 为这个 interface 建立每个 service 的队列与 worker 组。
-            ///
-            /// `C` 是服务端配置；调用点通常由后续的
-            /// [`TrRpcRouter::add_interface`](::rpc_core_v1::serving::TrRpcRouter::add_interface)
-            /// 推导。若编译器无法推导，可用
-            /// `ApiV1::workers::<ServingCfg, _, _>(...)` 显式指定。
-            pub fn workers<__C, #(#service_idents),*>(
-                #(#param_idents: #service_idents),*
-            ) -> #workers_ident<__C, #(#service_idents),*>
-            where
-                __C: ::rpc_core_v1::serving::TrServingConfig,
-                #(#service_idents: #trait_paths),*
-            {
-                #workers_ident::new(#(#param_idents),*)
-            }
-        }
-
-        /// 一个 interface 的 worker 组。
-        ///
-        /// 它按 service 列表顺序持有每个 service 的 `Worker`；`routes()` 交给 router，
-        /// `run_async()` 并发驱动全部 worker。
-        #[doc(hidden)]
-        pub struct #workers_ident<__C, #(#service_idents),*>
-        where
-            __C: ::rpc_core_v1::serving::TrServingConfig,
-            #(#service_idents: #trait_paths),*
-        {
-            #(#field_idents: #module_paths::Worker<#service_idents, __C>),*
-        }
-
-        impl<__C, #(#service_idents),*> #workers_ident<__C, #(#service_idents),*>
-        where
-            __C: ::rpc_core_v1::serving::TrServingConfig,
-            #(#service_idents: #trait_paths),*
-        {
-            /// 建立全部 service 的 worker；由 `ApiV1::workers` 调用。
-            #[allow(dead_code)]
-            pub(crate) fn new(
-                #(#param_idents: #service_idents),*
-            ) -> Self {
-                #workers_ident {
-                    #(#field_idents: #module_paths::Worker::new(#param_idents)),*
-                }
-            }
-
-            /// 收集全部 service 的注册项，供
-            /// [`TrRpcRouter::add_interface`](::rpc_core_v1::serving::TrRpcRouter::add_interface)
-            /// 插入该 interface 的 service 注册表。
-            pub fn routes(&self) -> ::std::vec::Vec<
-                ::rpc_core_v1::serving::ServiceRoute<__C>,
-            > {
-                ::std::vec![#(self.#field_idents.route()),*]
-            }
-
-            /// 并发驱动全部 service worker；返回的 future 可取消。
-            pub fn run_async<'__f>(
-                &'__f mut self,
-            ) -> impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
-                '__f,
-                MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<()>,
-            > + '__f
-            where
-                __C: '__f,
-                #(#service_idents: '__f),*
-            {
-                #run_async_ident::<'__f, '__f, __C, #(#service_idents),*>::new(self)
-            }
-        }
-
-        /// `Workers::run_async` 的 step 函数。
-        #[allow(clippy::needless_lifetimes)]
-        #[::rpc_core_v1::x_deps::gen_mcf2::gen_may_cancel_future(
-            #run_prefix,
-            pub(crate),
-            new(pub(crate))
-        )]
-        async fn #run_fn_ident<'__f, __C, #(#service_idents),*, __Tok>(
-            workers: &'__f mut #workers_ident<__C, #(#service_idents),*>,
-            cancel: __Tok,
-        ) -> ::rpc_core_v1::messaging::RpcResult<()>
-        where
-            __C: ::rpc_core_v1::serving::TrServingConfig,
-            #(#service_idents: #trait_paths),*,
-            __Tok: ::rpc_core_v1::x_deps::abs_cancel::TrCancellationToken,
-        {
-            let #workers_ident {
-                #(#field_idents: #local_idents),*
-            } = workers;
-            let result = #run_tree.await;
-            result?;
-            ::core::result::Result::Ok(())
-        }
     }
 }
 
-/// 把多个 worker future 组合成一棵 `try_join` 树。
-///
-/// `try_join` 只支持两个 future，因此这里按二分递归组合；任一 worker 出错时提前返回，
-/// 其余 worker future 被丢弃（队列随之关闭）。空列表不会出现：interface 分析已拒绝空
-/// `services`。
-fn join_tree_(runners: &[::zyn::TokenStream]) -> ::zyn::TokenStream {
-    match runners {
-        [single] => single.clone(),
-        [] => quote! {
-            async {
-                ::core::result::Result::<(), ::rpc_core_v1::messaging::RpcError>::Ok(())
+/// 展开一个服务端 impl 块：保留原 impl，并补上 `TrRpcService` 实现。
+pub(crate) fn expand_service_of_(model: &ServiceOfModel_) -> syn::Result<zyn::Output> {
+    let impl_item = &model.impl_item_;
+    let generated = service_of_impl_(model);
+
+    Result::Ok(zyn::zyn! {
+        {{ impl_item }}
+        {{ generated }}
+    })
+}
+
+/// 生成 `abs_rpc_serv::service::TrRpcService` 的实现。
+fn service_of_impl_(model: &ServiceOfModel_) -> ::zyn::TokenStream {
+    let impl_item = &model.impl_item_;
+    let trait_path = &model.trait_path_;
+    let self_ty = &model.self_ty_;
+    let interface = &model.interface_path_;
+    let cfg = cfg_attrs_(&impl_item.attrs);
+
+    quote! {
+        #(#cfg)*
+        #[automatically_derived]
+        impl<__C> ::rpc_core_v1::x_deps::abs_rpc_serv::service::TrRpcService<
+            #interface,
+            __C,
+        > for #self_ty
+        where
+            #interface: ::rpc_core_v1::messaging::TrRpcInterface,
+        {
+            const SERVICE_PATH: &'static str =
+                <#self_ty as #trait_path>::SERVICE_PATH;
+
+            type Err = ::rpc_core_v1::messaging::RpcError;
+
+            fn dispatch_async<'__f, __X>(
+                &'__f self,
+                ctx: &'__f mut __X,
+            ) -> impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
+                '__f,
+                MayCancelOutput = ::core::result::Result<(), Self::Err>,
+            > + '__f
+            where
+                __C: '__f,
+                __X: ::rpc_core_v1::x_deps::abs_rpc_serv::service::TrRpcCallCtx<
+                    __C,
+                    Err = Self::Err,
+                > + '__f,
+            {
+                <#self_ty as #trait_path>::__rpc_dispatch_async::<__C, __X>(self, ctx)
             }
-        },
-        _ => {
-            let middle = runners.len() / 2usize;
-            let left = join_tree_(&runners[..middle]);
-            let right = join_tree_(&runners[middle..]);
-            quote!(::rpc_core_v1::x_deps::futures::future::try_join(#left, #right))
         }
     }
 }

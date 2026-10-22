@@ -30,6 +30,9 @@ mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 # `abs_buff` 的上层（ring / 链式缓冲），与本 workspace 共用同一份本地 `abs_buff`。
 buffex = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 
+# 宏生成代码依赖的抽象服务端契约。本 crate 提供具体实现（`RpcCallCtx` / `RpcRouter`），
+# 但不把抽象契约定义在这里，避免宏展开与核心实现互相绑定。
+abs_rpc_serv = { path = "../abs_rpc_serv" }
 mptp_smux = { path = "../mptp_smux" }
 # abs_smux = { path = "../../../abs_smux" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }

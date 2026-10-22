@@ -21,15 +21,15 @@ use zyn::{
     format_ident,
     meta::Arg,
     syn::{
-        self, Attribute, Expr, FnArg, GenericArgument, ItemStruct, ItemTrait, Lifetime, Pat,
-        ReturnType, TraitItem, TraitItemFn, Type, TypeParamBound,
+        self, Attribute, Expr, FnArg, GenericArgument, ItemImpl, ItemStruct, ItemTrait, Lifetime,
+        Pat, ReturnType, TraitItem, TraitItemFn, Type, TypeParamBound,
         spanned::Spanned,
         visit::{self, Visit},
     },
 };
 
 use crate::model_::{
-    ArgModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_, ServiceRef_,
+    ArgModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_, ServiceOfModel_,
 };
 
 /// `#[rpc]` 的两种参数形态。
@@ -48,6 +48,12 @@ pub(crate) enum RpcArgs_ {
         /// `services` 列表里的 trait 路径。
         services: Vec<syn::Path>,
     },
+
+    /// `#[rpc(service_of(ApiV1))]`：服务端 impl 块。
+    ServiceOf {
+        /// 该实现所属的 interface marker 路径。
+        interface: syn::Path,
+    },
 }
 
 /// 解析 `#[rpc]` 属性参数，区分 service 宏与 interface 宏。
@@ -55,6 +61,7 @@ pub(crate) fn parse_rpc_args_(args: &zyn::Args) -> syn::Result<RpcArgs_> {
     let mut service: Option<(String, proc_macro2::Span)> = Option::None;
     let mut interface_path: Option<(String, proc_macro2::Span)> = Option::None;
     let mut services: Option<(Vec<syn::Path>, proc_macro2::Span)> = Option::None;
+    let mut service_of: Option<(syn::Path, proc_macro2::Span)> = Option::None;
 
     for arg in args {
         match arg.name().map(ToString::to_string).as_deref() {
@@ -81,45 +88,62 @@ pub(crate) fn parse_rpc_args_(args: &zyn::Args) -> syn::Result<RpcArgs_> {
                 let list = parse_services_arg_(arg)?;
                 services = Option::Some((list, arg_span_(arg)));
             }
+            Some("service_of") => {
+                if service_of.is_some() {
+                    return Result::Err(syn::Error::new(
+                        arg_span_(arg),
+                        "`service_of` 只能出现一次",
+                    ));
+                }
+                service_of = Option::Some(parse_service_of_arg_(arg)?);
+            }
             Some(other) => {
                 return Result::Err(syn::Error::new(
                     arg_span_(arg),
                     format!(
-                        "不认识的 `#[rpc]` 参数 `{other}`；当前只支持 `service = \"...\"` 或 \
-                         `path = \"...\", services = [...]`"
+                        "不认识的 `#[rpc]` 参数 `{other}`；当前只支持 `service = \"...\"`、\
+                         `path = \"...\", services = [...]` 或 `service_of(Interface)`"
                     ),
                 ));
             }
             None => {
                 return Result::Err(syn::Error::new(
                     arg_span_(arg),
-                    "`#[rpc]` 参数需要写成 `service = \"...\"` 或 `path = \"...\", services = [...]`",
+                    "`#[rpc]` 参数需要写成 `service = \"...\"`、`path = \"...\", services = [...]` \
+                     或 `service_of(Interface)`",
                 ));
             }
         }
     }
 
-    match (service, interface_path, services) {
-        (Option::Some((path, _)), Option::None, Option::None) => {
+    match (service, interface_path, services, service_of) {
+        (Option::Some((path, _)), Option::None, Option::None, Option::None) => {
             Result::Ok(RpcArgs_::Service { path })
         }
-        (Option::None, Option::Some((path, _)), Option::Some((services, _))) => {
+        (Option::None, Option::Some((path, _)), Option::Some((services, _)), Option::None) => {
             Result::Ok(RpcArgs_::Interface { path, services })
+        }
+        (Option::None, Option::None, Option::None, Option::Some((interface, _))) => {
+            Result::Ok(RpcArgs_::ServiceOf { interface })
         }
         (Option::Some((_, span)), ..) => Result::Err(syn::Error::new(
             span,
-            "`service` 不能与 `path` / `services` 混用：前者用于 service trait，后者用于 interface marker",
+            "`service` 不能与 `path` / `services` / `service_of` 混用：`service` 用于 service trait",
         )),
-        (Option::None, Option::Some((_, span)), Option::None) => {
+        (Option::None, Option::Some((_, span)), Option::None, _) => {
             Result::Err(syn::Error::new(span, "interface 宏缺少 `services = [...]`"))
         }
-        (Option::None, Option::None, Option::Some((_, span))) => {
+        (Option::None, Option::None, Option::Some((_, span)), _) => {
             Result::Err(syn::Error::new(span, "interface 宏缺少 `path = \"...\"`"))
         }
-        (Option::None, Option::None, Option::None) => Result::Err(syn::Error::new(
+        (Option::None, Option::Some((_, span)), _, Option::Some(_)) => Result::Err(
+            syn::Error::new(span, "`path` / `services` 不能与 `service_of` 混用"),
+        ),
+        (Option::None, Option::None, Option::None, Option::None) => Result::Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "缺少 `#[rpc]` 参数；service 用 `#[rpc(service = \"...\")]`，interface 用 \
-             `#[rpc(path = \"...\", services = [...])]`",
+             `#[rpc(path = \"...\", services = [...])]`，服务端 impl 用 \
+             `#[rpc(service_of(Interface))]`",
         )),
     }
 }
@@ -200,6 +224,30 @@ fn parse_services_arg_(arg: &Arg) -> syn::Result<Vec<syn::Path>> {
     }
 
     Result::Ok(paths)
+}
+
+/// 从 `service_of(Interface)` 里解析 interface marker 路径。
+fn parse_service_of_arg_(arg: &Arg) -> syn::Result<(syn::Path, proc_macro2::Span)> {
+    let Arg::List(_, args) = arg else {
+        return Result::Err(syn::Error::new(
+            arg_span_(arg),
+            "`service_of` 需要写成 `service_of(ApiV1)`",
+        ));
+    };
+    if args.len() != 1usize {
+        return Result::Err(syn::Error::new(
+            arg_span_(arg),
+            "`service_of` 需要且只能写一个 interface marker",
+        ));
+    }
+    let path: syn::Path = syn::parse2(zyn::quote::quote!(#args))?;
+    if path.segments.is_empty() {
+        return Result::Err(syn::Error::new(
+            arg_span_(arg),
+            "`service_of` 里需要一个 interface marker 路径",
+        ));
+    }
+    Result::Ok((path, arg_span_(arg)))
 }
 
 /// 两个路径在 token 层是否相同（用于拒绝重复的 service）。
@@ -284,34 +332,14 @@ pub(crate) fn analyze_interface_(
         ));
     }
 
-    let services_ = services
-        .into_iter()
-        .map(|trait_path_| {
-            let mut module_path_ = trait_path_.clone();
-            if let Some(last) = module_path_.segments.last_mut() {
-                last.ident = format_ident!(
-                    "__rpc_service_{}",
-                    last.ident.to_string().trim_start_matches("r#")
-                );
-            }
-            ServiceRef_ {
-                trait_path_,
-                module_path_,
-            }
-        })
-        .collect();
-
-    let workers_ident_ = format_ident!(
-        "__rpc_interface_{}_Workers",
-        item.ident.to_string().trim_start_matches("r#")
-    );
+    // `services = [...]` 目前只用于校验与未来客户端类型约束；服务端装配由用户显式调用
+    // `RpcRouter::add_service` 完成，宏不再生成 worker 组或 service 路由。
+    let _ = services;
 
     Result::Ok(InterfaceModel_ {
         struct_ident_: item.ident.clone(),
         struct_item_: item.clone(),
         path_: path,
-        services_,
-        workers_ident_,
     })
 }
 
@@ -381,6 +409,12 @@ pub(crate) fn analyze_service_(
                     "`#[rpc]` 不支持无法识别的 trait 项",
                 ));
             }
+            TraitItem::Fn(method) if method.sig.ident.to_string().starts_with("__rpc_") => {
+                return Result::Err(syn::Error::new(
+                    method.sig.ident.span(),
+                    "`__rpc_` 前缀保留给宏生成的 dispatch 方法，请不要在 service trait 里声明",
+                ));
+            }
             TraitItem::Fn(_) => {}
             _ => {}
         }
@@ -425,6 +459,33 @@ pub(crate) fn analyze_service_(
             const SERVICE_PATH: &'static str = #service_path_lit;
         },
     );
+    // 提供一个**默认实现**的隐藏方法：`#[rpc(service_of(...))]` 不需要知道隐藏模块路径，
+    // 只要通过 service trait 就能转到本 trait 所在模块里的 dispatch。用户 impl 不必实现它。
+    let module_ident_for_dispatch = module_ident.clone();
+    trait_item.items.insert(
+        1,
+        syn::parse_quote! {
+            #[doc(hidden)]
+            #[allow(clippy::needless_lifetimes)]
+            fn __rpc_dispatch_async<'__f, __C, __X>(
+                &'__f self,
+                ctx: &'__f mut __X,
+            ) -> impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
+                '__f,
+                MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<()>,
+            > + '__f
+            where
+                Self: ::core::marker::Sized + '__f,
+                __C: '__f,
+                __X: ::rpc_core_v1::x_deps::abs_rpc_serv::service::TrRpcCallCtx<
+                    __C,
+                    Err = ::rpc_core_v1::messaging::RpcError,
+                > + '__f,
+            {
+                #module_ident_for_dispatch::dispatch_async(self, ctx)
+            }
+        },
+    );
 
     Result::Ok(ServiceModel_ {
         trait_ident_: item.ident.clone(),
@@ -432,6 +493,67 @@ pub(crate) fn analyze_service_(
         module_ident_: module_ident,
         methods_: methods,
         requires_send_sync_: requires_send_sync,
+    })
+}
+
+/// 分析一个服务端 impl 块。
+pub(crate) fn analyze_service_of_(
+    item: &ItemImpl,
+    interface_path: syn::Path,
+) -> syn::Result<ServiceOfModel_> {
+    if item.unsafety.is_some() {
+        return Result::Err(syn::Error::new(
+            item.unsafety.span(),
+            "`#[rpc(service_of(...))]` 不支持 unsafe impl",
+        ));
+    }
+    if item.defaultness.is_some() {
+        return Result::Err(syn::Error::new(
+            item.defaultness.span(),
+            "`#[rpc(service_of(...))]` 不支持 default impl",
+        ));
+    }
+    let Some((bang, trait_path, _)) = &item.trait_ else {
+        return Result::Err(syn::Error::new(
+            item.self_ty.span(),
+            "`#[rpc(service_of(...))]` 只能用于 trait impl，例如 \
+             `impl GoodsCustomerService for GoodsCustomerServiceImpl`",
+        ));
+    };
+    if bang.is_some() {
+        return Result::Err(syn::Error::new(
+            bang.span(),
+            "`#[rpc(service_of(...))]` 不支持 negative impl（`impl !Trait`）",
+        ));
+    }
+    if trait_path
+        .segments
+        .iter()
+        .any(|segment| !matches!(segment.arguments, syn::PathArguments::None))
+    {
+        return Result::Err(syn::Error::new(
+            trait_path.span(),
+            "`#[rpc(service_of(...))]` 不支持带泛型参数的 service trait",
+        ));
+    }
+    if !item.generics.params.is_empty() {
+        return Result::Err(syn::Error::new(
+            item.generics.span(),
+            "`#[rpc(service_of(...))]` 暂不支持带泛型参数的 impl；请把泛型参数具体化",
+        ));
+    }
+    if let Some(where_clause) = &item.generics.where_clause {
+        return Result::Err(syn::Error::new(
+            where_clause.span(),
+            "`#[rpc(service_of(...))]` 暂不支持 impl 级 where 子句",
+        ));
+    }
+
+    Result::Ok(ServiceOfModel_ {
+        impl_item_: item.clone(),
+        trait_path_: trait_path.clone(),
+        self_ty_: (*item.self_ty).clone(),
+        interface_path_: interface_path,
     })
 }
 
@@ -973,6 +1095,70 @@ mod tests_ {
         }
     }
 
+    /// 测试属性参数解析接受 `service_of(Interface)` 形态。
+    /// Test that attribute parsing accepts the `service_of(Interface)` form.
+    ///
+    /// - 手段：解析 `service_of(ApiV1)`，再解析三个坏形态（空列表、两个 interface、
+    ///   写成赋值）。
+    /// - 判断：合法形态得到 `RpcArgs_::ServiceOf`；三个坏形态都返回 `Err`。
+    ///
+    /// - Means: parse a good `service_of(ApiV1)` and three malformed variants.
+    /// - Verdict: the good form is `ServiceOf`; all malformed ones are errors.
+    #[test]
+    fn parses_service_of_arg_() {
+        let args: zyn::Args = zyn::parse!("service_of(ApiV1)").expect("参数应当可解析");
+        match parse_rpc_args_(&args) {
+            Result::Ok(RpcArgs_::ServiceOf { interface }) => {
+                assert_eq!(
+                    zyn::quote::quote!(#interface).to_string().replace(' ', ""),
+                    "ApiV1"
+                );
+            }
+            _ => panic!("应当解析成 service_of 形态"),
+        }
+
+        for case in [
+            "service_of()",
+            "service_of(ApiV1, ApiV2)",
+            "service_of = ApiV1",
+        ] {
+            let args: zyn::Args = zyn::syn::parse_str(case).expect("参数应当可解析");
+            assert!(parse_rpc_args_(&args).is_err(), "应当拒绝：{case}");
+        }
+    }
+
+    /// 测试服务端 impl 分析接受普通 impl，并拒绝泛型 impl。
+    /// Test that service-of analysis accepts a plain impl and rejects generic ones.
+    ///
+    /// - 手段：分析 `impl GoodsService for GoodsImpl {}` 与
+    ///   `impl<T> GoodsService for GoodsImpl<T> {}`。
+    /// - 判断：前者得到 trait / self type / interface 路径；后者返回 `Err`。
+    ///
+    /// - Means: analyse a plain impl and a generic impl.
+    /// - Verdict: the plain one yields its trait, self type and interface; the generic one
+    ///   is rejected.
+    #[test]
+    fn analyses_service_of_impl_() {
+        let item: ItemImpl = parse_quote!(impl GoodsService for GoodsImpl {});
+        let model =
+            analyze_service_of_(&item, parse_quote!(ApiV1)).expect("普通 impl 应当分析成功");
+        let trait_path = &model.trait_path_;
+        assert_eq!(
+            zyn::quote::quote!(#trait_path).to_string().replace(' ', ""),
+            "GoodsService"
+        );
+        let self_ty = &model.self_ty_;
+        assert_eq!(
+            zyn::quote::quote!(#self_ty).to_string().replace(' ', ""),
+            "GoodsImpl"
+        );
+
+        let generic: ItemImpl = parse_quote!(
+            impl<T> GoodsService for GoodsImpl<T> {}
+        );
+        assert!(analyze_service_of_(&generic, parse_quote!(ApiV1)).is_err());
+    }
+
     /// 测试属性参数解析拒绝缺项、混用、非字符串值与坏路径。
     /// Test that attribute parsing rejects missing pieces, mixing forms, bad values and paths.
     ///
@@ -999,15 +1185,15 @@ mod tests_ {
         }
     }
 
-    /// 测试 interface 分析生成 worker 类型名与跨模块 hidden module 路径。
-    /// Test that interface analysis derives the workers type and hidden module paths.
+    /// 测试 interface 分析保留 marker 与路径，并接受跨模块 service 列表。
+    /// Test that interface analysis keeps the marker and path and accepts a cross-module list.
     ///
     /// - 手段：分析 `pub struct ApiV1;` 与 `services = [nested::GoodsService]`。
-    /// - 判断：workers 类型名是 `__rpc_interface_ApiV1_Workers`，模块路径是
-    ///   `nested::__rpc_service_GoodsService`。
+    /// - 判断：路径是 `api/v1`，结构体名是 `ApiV1`；`services` 不再用于生成 worker 组。
     ///
     /// - Means: analyse a unit marker listing a trait from a nested module.
-    /// - Verdict: the workers ident and the hidden module path match the naming rules.
+    /// - Verdict: the path is `api/v1`, the marker name is `ApiV1`, and no worker group is
+    ///   derived.
     #[test]
     fn analyses_interface_() {
         let item: ItemStruct = parse_quote!(
@@ -1017,17 +1203,8 @@ mod tests_ {
         let model = analyze_interface_(&item, "api/v1".to_string(), services)
             .expect("interface 应当分析成功");
 
-        assert_eq!(
-            model.workers_ident_.to_string(),
-            "__rpc_interface_ApiV1_Workers"
-        );
-        let module_path = &model.services_[0].module_path_;
-        assert_eq!(
-            zyn::quote::quote!(#module_path)
-                .to_string()
-                .replace(' ', ""),
-            "nested::__rpc_service_GoodsService"
-        );
+        assert_eq!(model.path_, "api/v1");
+        assert_eq!(model.struct_ident_.to_string(), "ApiV1");
     }
 
     /// 测试 interface 分析拒绝泛型、非单元结构体与空 services。

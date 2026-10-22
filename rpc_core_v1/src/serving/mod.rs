@@ -1,39 +1,39 @@
-//! 服务端侧：配置、分配约定、一次调用的上下文，以及 router 契约。
+//! 服务端侧：配置、一次调用的上下文，以及两代 router 契约。
 //!
 //! 这一层提供与业务无关的底座：
 //!
-//! - [`RpcCallCtx`]：一次调用的解码、回复与收尾；
-//! - [`RpcJob`] / [`ServiceRoute`]：交给 service worker 的请求，以及缺省的 service 注册项；
-//! - [`TrRpcServiceRoute`]：把 job 交给 service 的契约，允许使用者替换队列；
-//! - [`TrRpcRouter`]：按 interface / service 匹配 location 的契约；
-//! - [`RpcRouterHandler`]：把任意 [`TrRpcRouter`] 接入
-//!   [`TrReqHandler`](crate::x_deps::abs_mptp::serving::TrReqHandler) 的适配器。
+//! - [`TrServingConfig`] / [`TrServingAllocConfig`]：服务端配置契约（定义在
+//!   `abs_rpc_serv`，本模块转出并给出缺省实现）；
+//! - [`RpcCallCtx`]：一次调用的解码、回复与收尾，并实现
+//!   `abs_rpc_serv::service::TrRpcCallCtx`，因此宏生成的 dispatch 不绑定具体上下文；
+//! - [`RpcRouter`]：**内联**的 interface 级 router。用户用
+//!   `RpcRouter::<ApiV1>::new(ctx).add_service::<Impl>(...)` 自己组织 service；每个请求
+//!   在 router 内直接解码、调用 service、写回复、收尾；
+//! - [`RpcJob`] / [`ServiceRoute`] / [`TrRpcServiceRoute`] / [`TrRpcRouter`] /
+//!   [`RpcRouterHandler`]：**队列版**的旧装配链，保留给需要背压或自定义 worker 的使用者；
+//!   宏不再生成它们。
 //!
-//! 具体的前缀树 router 实现不在本 crate，而在 `rpc_router_trie`。`#[rpc(service = "...")]`
-//! 生成的 worker 只负责「从队列取 [`RpcJob`] → 调用生成的 dispatch → 收尾」；
-//! `#[rpc(path = "...", services = [...])]` 生成的 worker 组负责把多个 service 的
-//! [`ServiceRoute`] 收集起来。两者都不替使用者 spawn 线程或选择运行时。
+//! 顶层 interface 分派由 `mptp_smux::serving::Router` 完成：`RpcRouter` 实现
+//! `TrPathHandler`，用 `ApiV1::PATH` 作为前缀；`Router::call` 把它登记到顶层。
 //!
-//! # `serving`: configuration, per-call context and the router contracts
+//! # `serving`: configuration, per-call context and two router generations
 //!
-//! This module provides the business-agnostic serving base: the per-call context, the job /
-//! route types, the delivery contract, and the router contract plus its MPTP handler adapter.
-//! The concrete trie router lives in `rpc_router_trie`.
+//! The inline [`RpcRouter`] owns concrete service implementations and dispatches without a
+//! queue. The older [`TrRpcRouter`] / [`RpcRouterHandler`] chain remains for users who need
+//! backpressure or custom workers; the macro no longer generates it. Interface prefixes are
+//! registered on `mptp_smux::serving::Router` through `TrPathHandler`.
 
-mod alloc_config_;
 mod ctx_;
 mod route_;
 mod router_;
-mod service_;
+mod rpc_router_;
 
 pub mod config;
 
-pub use alloc_config_::TrServingAllocConfig;
-pub use config::{DefaultServingAllocConfig, TrServingConfig};
+pub use config::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfig};
 pub use ctx_::RpcCallCtx;
 pub use route_::{
-    K_DEFAULT_SERVICE_QUEUE_CAP,
-    RpcJob, RpcRouteError, ServiceRoute, TrRpcServiceRoute,
+    K_DEFAULT_SERVICE_QUEUE_CAP, RpcJob, RpcRouteError, ServiceRoute, TrRpcServiceRoute,
 };
 pub use router_::{RpcDispatchError, RpcRouterHandler, TrRpcRouter};
-pub use service_::TrRpcServiceRouter;
+pub use rpc_router_::{RpcRouter, RpcServiceCtx};

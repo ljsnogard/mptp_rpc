@@ -1,6 +1,6 @@
 # rpc_svc_macro
 
-`#[rpc]` 属性宏：从 service trait / interface marker 生成 MPTP RPC 的双端样板。
+`#[rpc]` 属性宏：从 service trait / interface marker / 服务端 impl 块生成 MPTP RPC 样板。
 
 Use it in the protocol crate shared by the client and the server:
 
@@ -33,6 +33,7 @@ pub struct ApiV1;
 ### service 宏
 
 - trait 里注入 `const SERVICE_PATH: &'static str = "customer/goods";`；
+- trait 里注入隐藏的默认方法 `__rpc_dispatch_async`，它转到隐藏模块里的 dispatch；
 - 隐藏模块 `__rpc_service_GoodsCustomerService` 里的一个 owned body enum `Call`：
   - 变体名 = 方法名，字段名 = 参数名；
   - 无参方法用 unit variant；
@@ -42,36 +43,65 @@ pub struct ApiV1;
   - 调用 `rpc_core_v1::client::call_unary_async`；
 - 隐藏模块里的 `dispatch_async`：
   - 解码 `Call`，`match` 方法变体；
-  - 调用用户实现，把成功值写成 `200 Ok`，业务错误按 `RpcError::status()` 写成错误回复；
-- 隐藏模块里的 `Worker<S, C>`：
-  - `new(service)` / `with_capacity(service, cap)` 建立本 service 的有界队列；
-  - `route()` 返回 `(SERVICE_PATH, Sender<RpcJob<C>>)` 的 `ServiceRoute<C>`；
-  - `run_async()` 循环取 job → 调用 `dispatch_async` → 收尾；返回的 future 可
-    `.may_cancel_with(token)`，等待下一个 job 时也会监听取消信号；
-  - worker 不 spawn，也不选择运行时。
+  - 调用用户实现，把成功值写成 `200 Ok`，业务错误按 `RpcError::status()` 写成错误回复。
+
+**不再生成** `Worker`、队列、`route()` 或 `run_async()`。
 
 ### interface 宏
 
 - `impl TrRpcInterface for ApiV1`，`PATH = "api/v1"`；
 - `impl ServiceSelector<C> for ApiV1`，返回 `ClientProxy<'_, C, ApiV1>`；
-- `ApiV1::workers(service...)`：按 `services` 顺序建立 worker，返回 worker 组；
-- worker 组：
-  - `routes()` 返回 `Vec<ServiceRoute<C>>`，交给 router 实现的 `add_interface`
-    （core 的契约是 `TrRpcRouter::add_interface`）；
-  - `run_async()` 用 `try_join` 树并发驱动全部 worker，返回的 future 同样可取消。
+- 不再生成 worker 组或任何服务端组织代码。
 
-服务端装配示意（`ServingCfg` 是使用者的 `TrServingConfig` 实现）：
+### service_of 宏
 
 ```rust
-use rpc_router_trie::RpcRouter;
-
-let mut workers = ApiV1::workers::<ServingCfg, _>(goods_impl);
-let mut router = RpcRouter::<ServingCfg>::new();
-router.add_interface(ApiV1::PATH, workers.routes())?;
-let handler = router.into_handler();
-// 由使用者选择线程 / 运行时：
-spawn(workers.run_async().may_cancel_with(server_token));
+#[rpc(service_of(ApiV1))]
+impl GoodsCustomerService for GoodsCustomerServiceImpl {
+    // 用户实现
+}
 ```
+
+它保留原来的 impl，并为 `GoodsCustomerServiceImpl` 补一个
+`abs_rpc_serv::service::TrRpcService<ApiV1, C>` 实现：
+
+- `SERVICE_PATH` 取自 `<Self as GoodsCustomerService>::SERVICE_PATH`；
+- `dispatch_async` 转到 trait 的隐藏方法，因此不需要知道隐藏模块路径；
+- `Err` 是 `rpc_core_v1::messaging::RpcError`。
+
+## 服务端：用户自己组织
+
+`RpcRouter` 是 interface 级的**内联** router；用户逐个 `add_service`，再用顶层
+`Router` 按 interface 前缀登记：
+
+```rust
+use mptp_smux::serving::{MptpServer, Router};
+use rpc_core_v1::serving::RpcRouter;
+
+let router = Router::<ServingCfg, _>::new()
+    .call(|ctx| {
+        RpcRouter::<ApiV1>::new(ctx)
+            .add_service::<GoodsCustomerServiceImpl>(move |_| {
+                GoodsCustomerServiceImpl::new(other_data)
+            })
+    })
+    .call(|ctx| {
+        RpcRouter::<ApiV2>::new(ctx)
+            .add_service::<GoodsAdminServiceImpl>(move |_| {
+                GoodsAdminServiceImpl::new(another_args)
+            })
+    });
+let server = MptpServer::<ServingCfg, _>::new(router);
+```
+
+- `Router` 按最长路径前缀把请求交给对应的 `RpcRouter`；
+- `RpcRouter` 剥掉 `ApiV1::PATH`，再按 service 的 `SERVICE_PATH` 匹配；
+- 未命中写 `404`，非 `Call` 写 `405`；
+- 命中后直接解码、调用 service、写回复、收尾；没有队列，也不替使用者 spawn。
+
+需要队列 / 背压时，可以继续使用 `rpc_router_trie` 的 `RpcRouter` +
+`TrRpcServiceRoute` 装配链（见 `rpc_core_v1::serving` 的旧一代契约），或在外层实现自己的
+`TrReqHandler`。
 
 ## 使用约束
 
@@ -89,30 +119,16 @@ spawn(workers.run_async().may_cancel_with(server_token));
   因此客户端与服务端共用一个 owned enum；借用参数在客户端被转成 owned 字段；
 - 变体顺序由方法声明顺序决定。稳定协议上只应在末尾追加方法；插入 / 重排方法会改变
   线上的变体编号；
-- interface marker 必须是单元结构体；`services` 写 service trait 的路径。trait 与 interface
-  不在同一模块时请写完整路径（例如 `super::goods::GoodsCustomerService`），因为 worker
-  类型名由 service 宏生成在 trait 所在模块里；
-- `ApiV1::workers` 的配置类型 `C` 通常由后续 router 的使用推导；推导失败时用
-  `ApiV1::workers::<ServingCfg, _, _>(...)` 显式指定；
-- worker 的 `run_async()` 可直接 await，也可 `.may_cancel_with(token)`；等待 job 时同样
-  监听取消信号。worker 不 spawn，线程 / 运行时由使用者选择。
-
-## 服务端接入
-
-core 提供 `RpcJob<C>` / `ServiceRoute<C>` 以及 router 契约
-`TrRpcServiceRoute<C>` / `TrRpcRouter<C>` / `RpcRouterHandler<R, C>`。缺省的前缀树实现
-在 `rpc_router_trie`：它按 interface → service 两级运行期 Trie 匹配，命中后把 job 发进
-对应 service 队列；`RpcRouterHandler` 负责未命中写 `404`、非 `Call` 写 `405`。worker
-收尾顺序是「写回复 → 半关闭 tx → 读完 rx」。
-
-一个 server 可以注册多个 interface；每个 interface 的 worker 组独立 `routes()` /
-`run_async()`。interface 与 service 路径都按完整路径段匹配，`api/v10` 不会误命中
-`api/v1`。
+- interface marker 必须是单元结构体；`services` 写 service trait 的路径。`services` 仍会
+  被解析与校验，但不再据此生成 worker；
+- `service_of(Interface)` 的 impl 块暂不支持泛型参数与 where 子句；同一个 impl 类型在
+  **同一个 interface** 下只能对应一个 service trait（不同 interface 可以各有一条实现）；
+- 生成代码会调用 `gen_mcf2`，协议 crate 需要打开
+  `#![feature(impl_trait_in_assoc_type)]`。
 
 ## 依赖
 
-生成代码使用 `rpc_core_v1` 的运行时与 `x_deps`。协议 crate 的 denco 派生会引用
-`abs_denco`、`abs_cancel` 与 `gen_mcf2`；`#[rpc]` 生成的隐藏模块已经为 body enum 补齐了这些
-导入，但用户自己的业务类型派生仍需要它们（或通过 `use rpc_core_v1::x_deps::...`
-引入）。`gen_mcf2` 的展开目前要求 crate 打开
-`#![feature(impl_trait_in_assoc_type)]`。
+生成代码使用 `rpc_core_v1` 的运行时与 `x_deps`（包括转出的 `abs_rpc_serv`）。协议 crate
+的 denco 派生会引用 `abs_denco`、`abs_cancel` 与 `gen_mcf2`；`#[rpc]` 生成的隐藏模块已经为
+body enum 补齐了这些导入，但用户自己的业务类型派生仍需要它们（或通过
+`use rpc_core_v1::x_deps::...` 引入）。

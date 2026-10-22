@@ -10,13 +10,17 @@
 //! - [`crate::messaging::TrRpcInterface`] 与 `/{interface}/{service}` 路径拼装；
 //! - 客户端极简代理 [`crate::client::ClientProxy`]、[`crate::client::TrRpcClientExt`] 与通用 unary 调用；
 //! - 服务端一次调用的上下文 [`crate::serving::RpcCallCtx`]：解码请求、写回复、收尾；
-//! - [`crate::serving::RpcJob`] / [`crate::serving::ServiceRoute`] 与 router 契约 [`crate::serving::TrRpcServiceRoute`] / [`crate::serving::TrRpcRouter`]：
-//!   把「找 service」与「把 job 交给 service」拆成可替换的两层，再由
-//!   [`crate::serving::RpcRouterHandler`] 接入 MPTP 服务端；
+//! - interface 级内联 router [`crate::serving::RpcRouter`]：用户用 `add_service` 装具体
+//!   service 实现，命中后直接 dispatch；`#[rpc(service_of(...))]` 为 impl 类型补上
+//!   `abs_rpc_serv::service::TrRpcService`；
+//! - 队列版旧契约 [`crate::serving::RpcJob`] / [`crate::serving::ServiceRoute`] /
+//!   [`crate::serving::TrRpcServiceRoute`] / [`crate::serving::TrRpcRouter`] /
+//!   [`crate::serving::RpcRouterHandler`]：保留给需要背压或自定义 worker 的使用者；
 //! - body 的 MessagePack 流式编解码：ring 边编码边发送，定长 / 分块帧都可解码。
 //!
-//! `#[rpc(service = "...")]` 的 worker 与 `#[rpc(path = "...", services = [...])]` 的
-//! worker 组都建立在上面这些运行时之上；宏本身不替使用者 spawn 线程或选择运行时。
+//! `#[rpc(service = "...")]` 只生成 trait 常量、body enum、客户端代理与服务端 dispatch；
+//! 它不再生成 worker 或 interface worker 组。服务端的组织由使用者显式调用
+//! `RpcRouter::add_service` 与顶层 `mptp_smux::serving::Router` 完成。
 //! 线上格式已由 [`mptp_smux`] 拥有，body 的定长 / 分块帧由 `abs_mptp` 拥有，本 crate
 //! 都不再重复实现。
 //!
@@ -42,8 +46,8 @@
 //! └───────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! 具体的前缀树 router 实现不在本 crate，而在 `rpc_router_trie`；本 crate 只保留
-//! 「怎么找」与「怎么送」的契约，以及把两者接入 MPTP 服务端的 [`crate::serving::RpcRouterHandler`]。
+//! 内联 [`crate::serving::RpcRouter`] 就在本 crate；队列版前缀树实现仍在
+//! `rpc_router_trie`，供需要 worker / 背压的使用者选用。
 //!
 //! # 为什么两端在同一个库里
 //!
@@ -53,11 +57,12 @@
 //!
 //! # `rpc_core_v1`: the RPC core on top of `smux_v1`
 //!
-//! Phase 1 provides the minimal runtime needed by `#[rpc(service = "...")]`: the unified
-//! error type, interface path composition, the minimal client proxy with unary calls, the
-//! per-call serving context, MessagePack body IO, and the router contracts. The concrete
-//! trie router lives in `rpc_router_trie`. The wire format belongs to [`mptp_smux`], and
-//! body framing belongs to `abs_mptp`.
+//! Phase 1 provides the runtime behind `#[rpc]`: the unified error type, interface path
+//! composition, the minimal client proxy with unary calls, the per-call serving context,
+//! the inline interface-level [`crate::serving::RpcRouter`], the queued legacy router
+//! contracts, and MessagePack body IO. The concrete trie for the queued router lives in
+//! `rpc_router_trie`; the wire format belongs to [`mptp_smux`], and body framing belongs to
+//! `abs_mptp`.
 
 #![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
@@ -75,12 +80,9 @@ pub use config_::{ClientConfig, ServingConfig, TrDefaultDock, TrUserConn};
 pub mod x_deps {
     pub use abs_art_facade;
     pub use abs_denco;
-
+    pub use abs_rpc_serv;
     pub use buffex;
-    pub use buffex::x_deps::{
-        abs_async_iter, abs_buff, abs_cancel,
-        anylr, funty, gen_mcf2,
-    };
+    pub use buffex::x_deps::{abs_async_iter, abs_buff, abs_cancel, anylr, funty, gen_mcf2};
     pub use denco_macro;
     pub use futures;
     pub use mm_ptr;

@@ -26,11 +26,17 @@ use gen_mcf2::gen_may_cancel_future;
 use mp_denco::{MpDecoder, MpEncoder};
 use rpc_core_v1::{
     client::{ClientProxy, ServiceSelector, TrRpcClientConfig},
-    messaging::{RpcResult, TrRpcInterface},
-    serving::{RpcCallCtx, ServiceRoute, TrServingConfig},
-    x_deps::mptp_smux::client::MptpClient,
+    messaging::{RpcError, RpcResult, TrRpcInterface},
+    serving::{RpcCallCtx, RpcRouter, TrServingConfig},
+    x_deps::{
+        abs_mptp::serving::TrReqHandler,
+        abs_rpc_serv::service::TrRpcService,
+        mptp_smux::{
+            client::MptpClient,
+            serving::{Router, RouterCtx, TrPathRouter},
+        },
+    },
 };
-use rpc_router_trie::RpcRouter;
 use rpc_svc_macro::rpc;
 
 /// 业务载体。
@@ -114,9 +120,10 @@ pub struct ApiV2;
 )]
 pub struct ApiV3;
 
-/// 只用于验证 `SERVICE_PATH` 注入的占位实现。
+/// 只用于验证 `SERVICE_PATH` 注入与服务端关联的占位实现。
 struct DummyInventory;
 
+#[rpc(service_of(ApiV1))]
 impl InventoryService for DummyInventory {
     fn list(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<Item>>> {
         DummyOkAsync::<'_, '_, Vec<Item>>::new(Vec::new())
@@ -147,6 +154,30 @@ impl InventoryService for DummyInventory {
 
     fn bump(&self, id: &u64) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<u64>> {
         DummyOkAsync::<'_, '_, u64>::new(*id)
+    }
+}
+
+/// 系统服务的占位实现，用来验证同一 interface 下多个 service 的元组装配。
+struct DummySystem;
+
+#[rpc(service_of(ApiV1))]
+impl SystemService for DummySystem {
+    fn ping(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<bool>> {
+        DummyOkAsync::<'_, '_, bool>::new(true)
+    }
+
+    fn add(&self, a: u32, b: u32) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<u32>> {
+        DummyOkAsync::<'_, '_, u32>::new(a + b)
+    }
+}
+
+/// 跨模块 service 的占位实现。
+struct DummyNested;
+
+#[rpc(service_of(ApiV2))]
+impl nested::NestedService for DummyNested {
+    fn echo(&self, value: u64) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<u64>> {
+        DummyOkAsync::<'_, '_, u64>::new(value)
     }
 }
 
@@ -222,7 +253,10 @@ where
 /// - Verdict: they equal `inventory` and `system` respectively.
 #[test]
 fn injects_service_path_() {
-    assert_eq!(DummyInventory::SERVICE_PATH, "inventory");
+    assert_eq!(
+        <DummyInventory as InventoryService>::SERVICE_PATH,
+        "inventory"
+    );
     assert_eq!(
         <DummyInventory as InventoryService>::SERVICE_PATH,
         "inventory"
@@ -365,50 +399,86 @@ where
     __rpc_service_SystemService::dispatch_async(service, ctx)
 }
 
-/// 编译期验证 service 宏生成的服务端 worker 能构造、取 route 并产生 run future。
-/// Compile-time check that the generated serving worker can be built, routed and run.
+/// 编译期验证 `service_of(ApiV1)` 为 impl 类型补上了 `TrRpcService`。
+/// Compile-time check that `service_of(ApiV1)` adds `TrRpcService` to the impl type.
 ///
-/// - 手段：在泛型函数里构造 `Worker`，取 `ServiceRoute`，再生成 `run_async` future。
-/// - 判断：编译通过；不建立真实连接，运行期行为由 router 的单元测试覆盖。
+/// - 手段：用泛型断言要求 `DummyInventory` / `DummySystem` 实现
+///   `TrRpcService<ApiV1, C>`。
+/// - 判断：编译通过；运行期不建立连接。
 ///
-/// - Means: build a `Worker`, take its `ServiceRoute` and create the `run_async` future.
-/// - Verdict: it compiles; no real connection is opened.
+/// - Means: a generic assertion requires both impl types to implement
+///   `TrRpcService<ApiV1, C>`.
+/// - Verdict: it compiles; no connection is opened.
 #[allow(dead_code)]
-fn worker_inventory_<C, S>(service: S)
+fn service_association_<C>()
 where
-    C: TrServingConfig,
-    S: InventoryService,
+    C: TrServingConfig + 'static,
 {
-    let mut worker = __rpc_service_InventoryService::Worker::<S, C>::new(service);
-    let _route: ServiceRoute<C> = worker.route();
-    let _service: &S = worker.service();
-    let _run = worker.run_async();
+    fn assert_service<S, C>()
+    where
+        C: TrServingConfig + 'static,
+        S: TrRpcService<ApiV1, C, Err = RpcError>,
+    {
+    }
+
+    assert_service::<DummyInventory, C>();
+    assert_service::<DummySystem, C>();
 }
 
-/// 编译期验证 interface 宏生成 `TrRpcInterface` / `ServiceSelector` / worker 组。
-/// Compile-time check for the interface macro's trait impls and worker group.
+/// 编译期验证 `RpcRouter<ApiV1>` 能用 `add_service` 装入两个 service，并成为 handler。
+/// Compile-time check that `RpcRouter<ApiV1>` accepts two services and becomes a handler.
 ///
-/// - 手段：构造两个 service 的 `ApiV1::workers`，收集 route 并注册到 `RpcRouter`，
-///   同时生成 `run_async`。
-/// - 判断：编译通过；`ApiV1::PATH` 在运行期等于 `api/v1`。
+/// - 手段：构造 `RpcRouter::<ApiV1>::new(ctx)`，连续 `add_service`，再交给一个只要求
+///   `TrReqHandler<C>` 的断言函数。
+/// - 判断：编译通过；不建立真实连接。
 ///
-/// - Means: build `ApiV1::workers`, collect routes, register them on an `RpcRouter`, and
-///   create the group's `run_async` future.
-/// - Verdict: it compiles, and `ApiV1::PATH` is `api/v1` at runtime.
+/// - Means: build `RpcRouter<ApiV1>`, add two services and pass it to an assertion that
+///   only requires `TrReqHandler<C>`.
+/// - Verdict: it compiles; no connection is opened.
 #[allow(dead_code)]
-fn interface_workers_<C, S1, S2>(inventory: S1, system: S2)
+fn router_api_v1_<C>(inventory: DummyInventory, system: DummySystem)
 where
-    C: TrServingConfig,
-    S1: InventoryService,
-    S2: SystemService,
+    C: TrServingConfig + 'static,
 {
-    let mut workers = ApiV1::workers::<C, _, _>(inventory, system);
-    let routes = workers.routes();
-    let mut router = RpcRouter::<C>::new();
-    router
-        .add_interface(ApiV1::PATH, routes)
-        .expect("service 路径不应重复");
-    let _run = workers.run_async();
+    fn assert_handler<C, H>(_handler: &H)
+    where
+        C: TrServingConfig + 'static,
+        H: TrReqHandler<C>,
+    {
+    }
+
+    let ctx = RouterCtx::<C>::new();
+    let router = RpcRouter::<ApiV1>::new(&ctx)
+        .add_service::<DummyInventory>(move |_| inventory)
+        .add_service::<DummySystem>(move |_| system);
+    assert_handler::<C, _>(&router);
+}
+
+/// 编译期验证顶层 `Router` 能按 interface 前缀登记 `RpcRouter`。
+/// Compile-time check that the top-level `Router` registers an `RpcRouter` by prefix.
+///
+/// - 手段：构造 `Router::<C, _>::new().call(...)`，再交给只要求 `TrPathRouter` 与
+///   `TrReqHandler<C>` 的断言函数。
+/// - 判断：编译通过；`RpcRouter` 的 `PATH` 来自 `ApiV1::PATH`。
+///
+/// - Means: build `Router::<C, _>::new().call(...)` and assert `TrPathRouter` plus
+///   `TrReqHandler<C>`.
+/// - Verdict: it compiles; the `RpcRouter` prefix comes from `ApiV1::PATH`.
+#[allow(dead_code)]
+fn top_router_<C>(inventory: DummyInventory)
+where
+    C: TrServingConfig + 'static,
+{
+    fn assert_router<C, R>(_router: &R)
+    where
+        C: TrServingConfig + 'static,
+        R: TrPathRouter + TrReqHandler<C>,
+    {
+    }
+
+    let router = Router::<C, _>::new()
+        .call(|ctx| RpcRouter::<ApiV1>::new(ctx).add_service::<DummyInventory>(move |_| inventory));
+    assert_router::<C, _>(&router);
 }
 
 /// 编译期验证 interface 宏生成的 `ServiceSelector` 返回统一客户端代理。
@@ -435,43 +505,25 @@ fn interface_injects_path_() {
     let _marker = ApiV1;
 }
 
-/// 编译期验证 interface 能引用其它模块里的 service trait。
-/// Compile-time check that an interface can list a service trait from another module.
+/// 测试跨模块 impl 的 `service_of(ApiV2)` 能正确关联到 interface。
+/// Test that a cross-module `service_of(ApiV2)` impl is associated with the interface.
 ///
-/// - 手段：用 `ApiV2::workers` 构造一个 `nested::NestedService` worker 组。
-/// - 判断：编译通过；跨模块的 hidden module 路径 `nested::__rpc_service_NestedService`
-///   能被正确解析。
+/// - 手段：用泛型断言要求 `DummyNested` 实现 `TrRpcService<ApiV2, C>`。
+/// - 判断：编译通过；`SERVICE_PATH` 来自 `NestedService`。
 ///
-/// - Means: build an `ApiV2::workers` group from a `nested::NestedService`.
-/// - Verdict: it compiles, so the cross-module hidden module path resolves correctly.
+/// - Means: assert `DummyNested: TrRpcService<ApiV2, C>`.
+/// - Verdict: it compiles, so the cross-module association resolves.
 #[allow(dead_code)]
-fn nested_interface_workers_<C, S>(service: S)
+fn nested_service_association_<C>()
 where
-    C: TrServingConfig,
-    S: nested::NestedService,
+    C: TrServingConfig + 'static,
 {
-    let mut workers = ApiV2::workers::<C, _>(service);
-    let _routes: Vec<ServiceRoute<C>> = workers.routes();
-    let _run = workers.run_async();
-}
+    fn assert_service<S, C>()
+    where
+        C: TrServingConfig + 'static,
+        S: TrRpcService<ApiV2, C, Err = RpcError>,
+    {
+    }
 
-/// 编译期验证三个 service 的 worker 组会生成嵌套 `try_join` 树。
-/// Compile-time check that a three-service group generates a nested `try_join` tree.
-///
-/// - 手段：构造 `ApiV3::workers` 并生成 `run_async`。
-/// - 判断：编译通过，证明二分递归的 `try_join` 组合对奇数个 worker 也成立。
-///
-/// - Means: build `ApiV3::workers` and create its `run_async` future.
-/// - Verdict: it compiles, so the recursive `try_join` tree works for an odd worker count.
-#[allow(dead_code)]
-fn triple_interface_workers_<C, S1, S2, S3>(inventory: S1, system: S2, nested: S3)
-where
-    C: TrServingConfig,
-    S1: InventoryService,
-    S2: SystemService,
-    S3: nested::NestedService,
-{
-    let mut workers = ApiV3::workers::<C, _, _, _>(inventory, system, nested);
-    let _routes: Vec<ServiceRoute<C>> = workers.routes();
-    let _run = workers.run_async();
+    assert_service::<DummyNested, C>();
 }

@@ -11,6 +11,9 @@
 //! 这样使用者可以只实现自己的 router（例如正则、静态表、前缀树），而拒绝回复与收尾逻辑
 //! 不必重写。具体实现见 `rpc_router_trie`。
 //!
+//! 这是**队列版**装配链；不需要队列的内联 router 见
+//! [`RpcRouter`](crate::serving::RpcRouter)。宏只面向后者生成 `TrRpcService` 关联。
+//!
 //! # `router_`: the router contract and its MPTP handler adapter
 //!
 //! [`TrRpcRouter`] owns only matching. [`RpcRouterHandler`] owns the MPTP-facing behavior:

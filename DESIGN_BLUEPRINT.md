@@ -23,6 +23,8 @@
 
 ```rust
 
+// 假设这里的代码都在一个叫做 goods 的 crate
+
 #[derive(TrEncodable, TrDecodable)]
 pub struct GoodsId(u64);
 
@@ -97,6 +99,9 @@ impl RpcClientInterface for ApiV1 {
 于是，在 **客户端 crate** 里，用户就可以通过这样的代码发起 RPC 请求：
 
 ```rust
+
+use goods::{ApiV1, GoodsInfo};
+
 let client = Client; // 示意，非真实代码
 let goods_list: Vec<GoodsInfo> = client
     .call::<ApiV1>() // &ApiV1_ClientProxy
@@ -108,18 +113,24 @@ let goods_list: Vec<GoodsInfo> = client
 在服务端一侧的 crate 里，用户则可以通过这样的代码定义 RPC 服务的实现：
 
 ```rust
+use goods::{ApiV1, GoodsCustomerService, GoodsAdminService, GoodsInfo};
 
 pub struct GoodsCustomerServiceImpl {
     // 用户编写的任意内容，省略
 }
 
-
+#[rpc(service_of(ApiV1))]  // 使用 rpc(service_of) 与 `ApiV1` 关联起来
 impl GoodsCustomerService for GoodsCustomerServiceImpl {
     fn find<'f>(&'f self, name: &'f str) -> impl TrMayCancel<'_, MayCancelOutput = Result<Vec<GoodsInfo>>> {
         // GoodsCustSvcFindGoodsAsync 是由 gen_mcf2 生成的，
         // 也可以由用户手写生成。
         GoodsCustSvcFindGoodsAsync::new(self, name)
     }
+}
+
+#[rpc(service_of(ApiV1))]  // 使用 rpc(service_of) 与 `ApiV1` 关联起来
+impl GoodsAdminService for GoodsAdminServiceImpl {
+    // 省略实现代码
 }
 
 #[gen_mcf2::gen_may_cancel_future(GoodsCustSvcFindGoods)]
@@ -131,68 +142,109 @@ async fn list_goods_<'f>(
 
 ```
 
-并且可以通过这样的代码，将这一系列服务实现注册到服务器：
+并且可以通过这样的代码，将这一系列服务实现注册到服务器。
+注意，这里的示例代码，只在服务器启动阶段运行一次，router 路由规则和 handler 实体构建完成后就不再更改。
+因此 `ctx` 等内容都应该是 'static 的，通过 move 参与构建后，被 handler 持有。
 
 ```rust
-// 一次性注册这些服务路径，能被 AccessMethod::Call 访问
+let other_data;
+let another_args;
+
+// 将根据上面 goods crate 中描述的路径，添加以下路径
 // `/api/v1/customer/goods`
 // `/api/v1/admin/goods`
-let router = Router::with_path("/").call::<ApiV1>();
+// 并绑定对应的 impl
+
+// Router 是 MPTP 协议的路由。
+// RpcRouter 是 RPC over MPTP 的路由，有一部分内容是宏生成的。
+// 两者可能有相似的实现基础，但不必然是同一个类型。
+
+// 通过 Call 表明要注册的是 AccessMethod::Call 的 API 路由，特殊处理
+let router = Router::new().call(|ctx|
+    RpcRouter::<ApiV1>::new(ctx)
+        .add_dispatcher(|r| MyNewDispatcher::new())  // 暂未设计，用于分发 interface 收到的请求到具体的 service 和 handler
+        .add_service::<GoodsAdminServiceImpl>(move |cx| GoodsAdminServiceImpl::new(cx, other_data)) // 识别为 GoodsAdminService，绑定 "admin/goods"
+        .add_service::<GoodsCustomerServiceImpl>(move |cx| GoodsCustomerServiceImpl::new(cx, another_args)) // 识别为 GoodsCustomerService，绑定 "customer/goods"
+);
 ```
 
 ---
 
-## 实现现状（2026-10-20）
+## 实现现状（2026-10-22）
 
-`rpc_svc_macro` 已经实现了蓝图中的两种宏：
+服务端宏已按「宏只出样板，用户自己组织」重构完成。当前形状：
 
-- **service 宏** `#[rpc(service = "...")]`：
-  - 注入 `const SERVICE_PATH`；
-  - 生成隐藏模块里的 owned body enum（变体名 = 方法名，字段名 = 参数名）；
-  - 为 `ClientProxy` 实现 service trait；
-  - 生成服务端 dispatch（解码 body enum → `match` → 调用用户实现 → 写回复）；
-  - 生成每 service 的 `Worker<S, C>`：有界队列、`route()`、可取消的 `run_async()`。
-- **interface 宏** `#[rpc(path = "...", services = [...])]`：
-  - 实现 `TrRpcInterface` 与 `ServiceSelector`；
-  - 生成 `ApiV1::workers(...)` 与具体类型的 worker 组：`routes()` / `run_async()`。
+### 宏
 
-core 侧同时补上了服务端运行时与 router 契约：
+- **service 宏** `#[rpc(service = "...")]` 保留：
+  - `SERVICE_PATH`；
+  - 隐藏模块里的 owned body enum（变体名 = 方法名，字段名 = 参数名）；
+  - 隐藏模块里的 dispatch 与公开包装（泛型于 `TrRpcCallCtx`）；
+  - 客户端 `ClientProxy` 的 service trait 实现。
+- service 宏**删除**了 `Worker`、队列、`route()`、`run_async()`；
+- **interface 宏**只保留 `TrRpcInterface`、`ServiceSelector` 与 `PATH`，删除
+  `ApiV1::workers(...)` / worker 组 / `routes()` / `run_async()`；
+- 新增 **`#[rpc(service_of(ApiV1))]`**：用于服务端 trait impl 块。它保留用户 impl，
+  并为该类型补一个 `abs_rpc_serv::service::TrRpcService<ApiV1, C>` 实现：
+  - `SERVICE_PATH` 取自 service trait；
+  - `dispatch_async` 通过 trait 里的隐藏默认方法转到隐藏模块，不需要知道模块路径。
 
-- `RpcJob<C>`：一次调用的 location、头表与收发半边；
-- `ServiceRoute<C>`：service 路径 + 有界队列发送端；
-- `TrRpcServiceRoute<C>`：把 job 交给 service 的抽象，允许换成自定义队列；
-- `TrRpcRouter<C>`：interface / service 匹配的抽象；
-- `RpcRouterHandler<R, C>`：把任意 router 适配成 `TrReqHandler`，统一处理未命中 `404`、
-  非 `Call` `405`、`RpcJob` 构造与入队。
+### 抽象契约与辅助类型
 
-缺省的两级 `PathTrie` 实现拆到了独立 crate `rpc_router_trie`：
+- `abs_rpc_serv::service::TrRpcCallCtx<C>`：一次调用的上下文抽象；宏生成的 dispatch 只依赖它；
+- `abs_rpc_serv::service::TrRpcService<I, C>`：service 实现如何被调度；
+- `rpc_core_v1::serving::RpcCallCtx` 实现 `TrRpcCallCtx`；
+- `rpc_core_v1::serving::RpcRouter<I, S>`：interface 级**内联** router；
+  `add_service::<Impl>(closure)` 把具体实现装进元组，命中后直接解码 / dispatch / 回复 / 收尾；
+- `mptp_smux::serving::Router`：顶层 MPTP router，按最长 interface 前缀把请求交给一个
+  `RpcRouter`；它自身实现 `TrReqHandler`，可直接交给 `MptpServer`；
+- 旧的队列链 `RpcJob` / `ServiceRoute` / `TrRpcServiceRoute` / `TrRpcRouter` /
+  `RpcRouterHandler` 仍在 core 中，`rpc_router_trie::RpcRouter` 仍在独立 crate 中，
+  供需要背压或自定义 worker 的使用者显式组合。
 
-- `RpcRouter<C>`：interface → service 两级运行期 `PathTrie`，实现 `TrRpcRouter<C>`；
-- `RpcRouterError`：注册重复；
-- 不再直接实现 `TrReqHandler`，统一经 `RpcRouterHandler` / `into_handler()` 接入。
-
-实际装配形状与本文最初的示意略有差异（以现有 API 为准）：
+### 实际装配形状
 
 ```rust
-use rpc_router_trie::RpcRouter;
+use mptp_smux::serving::{MptpServer, Router};
+use rpc_core_v1::serving::RpcRouter;
 
-let mut workers = ApiV1::workers::<ServingCfg, _>(customer_impl);
-let mut router = RpcRouter::<ServingCfg>::new();
-router.add_interface(ApiV1::PATH, workers.routes())?;
-let handler = router.into_handler();
-
-// worker 组由使用者选择线程 / 运行时来驱动；core 不替使用者 spawn。
-spawn(workers.run_async().may_cancel_with(server_token));
+let router = Router::<ServingCfg, _>::new()
+    .call(|ctx| {
+        RpcRouter::<ApiV1>::new(ctx)
+            .add_service::<GoodsAdminServiceImpl>(move |_| {
+                GoodsAdminServiceImpl::new(other_data)
+            })
+            .add_service::<GoodsCustomerServiceImpl>(move |_| {
+                GoodsCustomerServiceImpl::new(another_args)
+            })
+    })
+    .call(|ctx| {
+        RpcRouter::<ApiV2>::new(ctx)
+            .add_service::<GoodsAdminServiceImpl>(move |_| {
+                GoodsAdminServiceImpl::new(other_data)
+            })
+    });
+let server = MptpServer::<ServingCfg, _>::new(router);
 ```
 
-与本文最初设计的两点差异仍然成立：
+与本文最初示意的差异：
 
-1. `denco_macro` 当前不支持带生命周期参数的派生类型，因此客户端不再生成借用版
-   `Call<'f>`；客户端与服务端共用一个 owned body enum，客户端把 `&str` / `&[u8]` /
-   `&String` / `&Vec<u8>` / `&Copy` 标量转成 owned 字段。
-2. 方法级分派仍由 body enum 的 `match` 完成；interface / service 两级由运行期
-   `PathTrie` 完成，宏不生成路径 `match`。
+1. `RpcRouter::new` 接收顶层 `Router::call` 提供的 `RouterCtx`；`add_service` 的闭包接收
+   一个零大小的 `RpcServiceCtx`，业务数据由闭包自己捕获；
+2. 顶层 `Router` 支持多个 interface：每次 `.call` 按 `TrPathHandler::PATH` 追加一条前缀
+   路由，内部用元组静态分派，不需要 enum 或 `dyn`；
+3. 默认是内联分派，没有队列 / 背压；需要时用旧的队列链或自己包一层 `TrReqHandler`；
+4. `service_of` 暂不支持泛型 impl / where 子句；同一个 impl 类型在同一个 interface 下
+   只能对应一个 service trait（不同 interface 可以各有一条实现）。
+
+### 验证
+
+- `rpc_svc_macro` 的集成测试真实编译了 `service_of`、`RpcRouter::add_service` 与顶层
+  `Router` 的装配；
+- `mptp_cs_smoke` 已迁移到新装配，compio + UDS 的 11 条 RPC（含 `ApiV1` / `ApiV2`）
+  端到端通过；
+- workspace 的 check / clippy / test 与 rustdoc 均通过。
 
 细节、限制与验证结果见
 [`dev-notes/rpc-framework-20261020-0332.md`](dev-notes/rpc-framework-20261020-0332.md)
-第 12 节。
+第 17 节。
