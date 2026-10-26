@@ -7,6 +7,7 @@ authors.workspace = true
 description = "mptp_smux 的下游实现：在 smux_v1 + denco 上跑通一问一答，用来验证 mptp_smux 的实现符合实际。"
 readme = "README.md"
 publish = false
+license.workspace = true
 
 [dependencies]
 # 被测对象：`mptp_smux` 只认 `abs_mptp` 的形状与 `abs_smux` 的契约，本 crate 是它的**使用者**。

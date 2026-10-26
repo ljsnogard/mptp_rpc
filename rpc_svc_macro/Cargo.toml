@@ -5,7 +5,7 @@ version = "0.1.0"
 
 description = "`#[rpc]` 属性宏：从 service trait / interface / 服务端 impl 生成 RPC 客户端与服务端样板。"
 readme = "README.md"
-license = "MIT/Apache-2.0"
+license.workspace = true
 
 [lib]
 proc-macro = true

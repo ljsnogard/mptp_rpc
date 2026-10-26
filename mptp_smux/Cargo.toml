@@ -7,7 +7,7 @@ description = "MPTP implementation based on `abs_smux`"
 repository.workspace = true
 keywords = ["rpc"]
 categories = ["no-std"]
-license = "MIT/Apache-2.0"
+license.workspace = true
 readme = "README.md"
 
 [dependencies]

@@ -7,14 +7,14 @@ description = "Core library for RPC over Message Packing and Transportation Prot
 repository = "https://github.com/ljsnogard/msgpk_rpc_core"
 keywords = ["rpc"]
 categories = ["no-std"]
-license = "MIT/Apache-2.0"
+license.workspace = true
 readme = "README.md"
 
 [dependencies]
 # **后端门面**：本 crate 只认 `abs_art_facade::Runtime`，不再直接依赖 `abs_art-bridge`。
 # 门面是全家族唯一决定「当前后端」的地方；下游点亮 `abs_art-facade/rt-tokio`，全图就都是
 # tokio，不需要逐层转发。
-abs_art-facade = { git = "https://gitee.com/lino_snsalias/abs_art.git", branch = "dev/0.3.0" }
+abs_art-facade = { git = "https://gitee.com/lino_snsalias/abs_art.git" }
 # abs_art-facade = { path = "../../../abs_art/abs_art-facade" }
 
 # RPC body 编解码直接使用 denco 的异步抽象。
