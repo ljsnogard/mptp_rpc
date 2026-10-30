@@ -231,8 +231,8 @@ where
     P: 'static + TrPrepareRing<B, u8>,
     K: TrCancellationToken,
 {
-    // 欢迎信息当前不由 MPTP 使用（`smux_v1` 按空载荷发出，见其 channel_handle 文档）。
-    let mut welcome: &mut [u8] = &mut [];
+    // 欢迎信息当前不由 MPTP 使用：传一个空读源，smux 会编码成空 message（`0x0000`）。
+    let mut welcome: &[u8] = &[];
     let (mut tx, rx) = match handle
         .accept_async(&mut welcome, prepare)
         .may_cancel_with(cancel.child_token())

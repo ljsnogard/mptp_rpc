@@ -318,7 +318,7 @@ where
             .map_err(|err| ServeError::RingPrepare(err.to_string()))?;
 
         // 3. 最终裁决：交出准备器，换回这条子流的收发半边。
-        let mut welcome: &mut [u8] = &mut [];
+        let mut welcome: &[u8] = &[];
         let (tx, rx) = handle
             .accept_async(&mut welcome, prepare)
             .may_cancel_with(cancel.child_token())
