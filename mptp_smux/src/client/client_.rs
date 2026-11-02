@@ -37,7 +37,7 @@ use core::{
 use thiserror::Error;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-use abs_mm::res_man::TrUnique;
+use abs_mm::res_man::{TrAllocBy, TrUnique};
 use abs_mptp::client::TrMptpClient;
 use abs_smux::{
     chan::{TrChannelHandle, TrPrepareRing},
@@ -139,7 +139,11 @@ where
     ) -> ClientRequestToDockWithPrepAsync<'f, 'f, C, B, P>
     where
         C: 'f,
-        B: 'static + Send + Sync + TrUnique<Item = [MaybeUninit<u8>], Alloc: AllocatorClone>,
+        B: 'static
+            + Send
+            + Sync
+            + TrUnique<Item = [MaybeUninit<u8>]>
+            + TrAllocBy<Alloc: AllocatorClone>,
         P: 'static + TrPrepareRing<B, u8>,
     {
         ClientRequestToDockWithPrepAsync::new(self, dock, request, prepare)
@@ -227,7 +231,11 @@ async fn accept_send_async_<'f, C, B, P, K>(
 ) -> Result<MptpSession<C>, ClientError>
 where
     C: 'f + TrConfig,
-    B: 'static + Send + Sync + TrUnique<Item = [MaybeUninit<u8>], Alloc: AllocatorClone>,
+    B: 'static
+            + Send
+            + Sync
+            + TrUnique<Item = [MaybeUninit<u8>]>
+            + TrAllocBy<Alloc: AllocatorClone>,
     P: 'static + TrPrepareRing<B, u8>,
     K: TrCancellationToken,
 {
@@ -314,7 +322,11 @@ async fn client_request_to_dock_with_prep_async_<'f, C, B, P, K>(
 ) -> Result<MptpSession<C>, ClientError>
 where
     C: TrConfig,
-    B: 'static + Send + Sync + TrUnique<Item = [MaybeUninit<u8>], Alloc: AllocatorClone>,
+    B: 'static
+            + Send
+            + Sync
+            + TrUnique<Item = [MaybeUninit<u8>]>
+            + TrAllocBy<Alloc: AllocatorClone>,
     P: 'static + TrPrepareRing<B, u8>,
     K: TrCancellationToken,
 {

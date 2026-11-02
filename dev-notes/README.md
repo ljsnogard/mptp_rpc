@@ -8,6 +8,9 @@
   的重构计划、Phase 0 结果与待确认问题。
 - [`rpc-preludes-20261022-2110.md`](rpc-preludes-20261022-2110.md)：`rpc_core_v1::preludes`
   的导出内容与后续文档补全清单。
+- [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
+  `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
+  dev/0.3.0 的改动、依赖统一与验证结果。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。

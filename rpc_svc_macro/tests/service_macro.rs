@@ -18,10 +18,7 @@ use core::{
 };
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
-use abs_denco::{
-    de::{TrDecodable, TrDecodableOwned},
-    ser::TrEncodable,
-};
+use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use gen_mcf2::gen_may_cancel_future;
 use mp_denco::{MpDecoder, MpEncoder};
 use rpc_core_v1::{
@@ -230,13 +227,13 @@ where
 }
 
 /// 从内存字节解出一个 owned 值。
-fn decode_owned_<'de, T>(bytes: &'de [u8]) -> T
+fn decode_owned_<T>(bytes: &[u8]) -> T
 where
     T: TrDecodableOwned,
 {
-    let mut slice: &'de [u8] = bytes;
+    let mut slice: &[u8] = bytes;
     block_on_(
-        <T as TrDecodable<'de>>::decode_async(MpDecoder::new(&mut slice))
+        T::decode_async(MpDecoder::new(&mut slice))
             .may_cancel_with(NonCancellableToken::new())
             .into_future(),
     )

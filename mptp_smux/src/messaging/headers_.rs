@@ -40,7 +40,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{
-    de::{MapAccess, MapAccessExt, TrDecodable, TrDecoder, Visitor},
+    de::{MapAccess, MapAccessExt, TrArena, TrDecodable, TrDecoder, Visitor},
     ser::{TrEncodable, TrEncodeMap, TrEncoder},
 };
 use abs_mptp::spec::{
@@ -797,8 +797,9 @@ struct HeadersVisitor<S> {
     _marker_: PhantomData<S>,
 }
 
-impl<'de, S> Visitor<'de> for HeadersVisitor<S>
+impl<'de, 'alloc, Alloc, S> Visitor<'de, 'alloc, Alloc> for HeadersVisitor<S>
 where
+    Alloc: TrArena<'alloc> + 'alloc,
     S: Borrow<str> + Ord + From<String> + 'de,
 {
     type Value = Headers<S>;
@@ -813,25 +814,28 @@ where
     ) -> impl TrMayCancel<'a, MayCancelOutput = Result<Self::Value, A::Error>>
     where
         'de: 'a,
+        'alloc: 'a,
         Self: 'a,
         Self::Value: 'a,
-        A: MapAccess<'de> + 'a,
+        A: MapAccess<'de, 'alloc, Alloc> + 'a,
         A::Error: 'a,
     {
-        DecodeHeadersMapAsync::<'de, 'a, 'a, S, A>::new(map)
+        DecodeHeadersMapAsync::<'de, 'alloc, 'a, 'a, Alloc, S, A>::new(map)
     }
 }
 
 /// [`Headers`] 解码的 step 函数：读出整张映射，再交给 [`Headers`]。
 #[gen_may_cancel_future(DecodeHeadersMap, pub, new(pub(crate)))]
-async fn decode_headers_map_async_<'de, 'a, S, A, C>(
+async fn decode_headers_map_async_<'de, 'alloc, 'a, Alloc, S, A, C>(
     mut map: A,
     cancel: C,
 ) -> Result<Headers<S>, A::Error>
 where
     'de: 'a,
+    'alloc: 'a,
+    Alloc: TrArena<'alloc> + 'alloc,
     S: Borrow<str> + Ord + From<String> + 'a + 'de,
-    A: MapAccess<'de> + 'a,
+    A: MapAccess<'de, 'alloc, Alloc> + 'a,
     A::Error: 'a,
     C: TrCancellationToken,
 {
@@ -846,22 +850,25 @@ where
     Result::Ok(Headers(Arc::new(values)))
 }
 
-impl<'de, S> TrDecodable<'de> for Headers<S>
+impl<'de, 'alloc, Alloc, S> TrDecodable<'de, 'alloc, Alloc> for Headers<S>
 where
+    Alloc: TrArena<'alloc> + 'alloc,
     S: Borrow<str> + Ord + From<String> + 'de,
 {
     type DecodeAsync<'a, D>
-        = DecodeHeadersAsync<'de, 'a, 'a, S, D>
+        = DecodeHeadersAsync<'de, 'alloc, 'a, 'a, Alloc, S, D>
     where
         'de: 'a,
-        D: TrDecoder<'de> + 'a,
+        'alloc: 'a,
+        D: TrDecoder<'de, 'alloc, Alloc> + 'a,
         D::Error: 'a,
         Self: 'a;
 
     fn decode_async<'a, D>(decoder: D) -> Self::DecodeAsync<'a, D>
     where
         'de: 'a,
-        D: TrDecoder<'de> + 'a,
+        'alloc: 'a,
+        D: TrDecoder<'de, 'alloc, Alloc> + 'a,
         D::Error: 'a,
         Self: 'a,
     {
@@ -871,14 +878,16 @@ where
 
 /// [`Headers`] 解码的 step 函数：交给 `decode_map`，由 [`HeadersVisitor`] 遍历。
 #[gen_may_cancel_future(DecodeHeaders, pub, new(pub(crate)))]
-async fn decode_headers_async_<'de, 'a, S, D, C>(
+async fn decode_headers_async_<'de, 'alloc, 'a, Alloc, S, D, C>(
     decoder: D,
     cancel: C,
 ) -> Result<Headers<S>, D::Error>
 where
     'de: 'a,
+    'alloc: 'a,
+    Alloc: TrArena<'alloc> + 'alloc,
     S: Borrow<str> + Ord + From<String> + 'de + 'a,
-    D: TrDecoder<'de> + 'a,
+    D: TrDecoder<'de, 'alloc, Alloc> + 'a,
     D::Error: 'a,
     C: TrCancellationToken,
 {

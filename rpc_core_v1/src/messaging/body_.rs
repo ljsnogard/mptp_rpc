@@ -21,10 +21,7 @@ use abs_buff::{
     error::{ReadErrTag, TrTaggedError},
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-use abs_denco::{
-    de::{TrDecodable, TrDecodableOwned},
-    ser::TrEncodable,
-};
+use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use abs_mptp::messaging::{chunked::ChunkedReader, limited::LimitedReader};
 use buffex::ring::Ring;
 use mp_denco::{MpDecoder, MpEncoder};
@@ -50,11 +47,7 @@ pub(crate) type BodyRing_ = Ring<[MaybeUninit<u8>; K_BODY_RING_CAP_]>;
 /// # Errors
 ///
 /// 业务值无法编码，或写口报错时返回 [`RpcError::Encode`]。
-pub(crate) async fn encode_into_async_<V, T, K>(
-    value: &V,
-    tx: &mut T,
-    cancel: K,
-) -> RpcResult<()>
+pub(crate) async fn encode_into_async_<V, T, K>(value: &V, tx: &mut T, cancel: K) -> RpcResult<()>
 where
     V: ?Sized + TrEncodable,
     T: TrBuffWrite<u8>,
@@ -68,16 +61,16 @@ where
 }
 
 /// 从接收半边直接解出一个值。
-pub(crate) async fn decode_from_async_<'de, V, R, K>(
-    rx: &mut R,
-    cancel: K,
-) -> RpcResult<V>
+pub(crate) async fn decode_from_async_<V, R, K>(rx: &mut R, cancel: K) -> RpcResult<V>
 where
-    V: TrDecodable<'de>,
+    V: TrDecodableOwned,
     R: TrBuffRead<u8>,
     K: TrCancellationToken,
 {
-    <V as TrDecodable<'de>>::decode_async(MpDecoder::new(&mut *rx))
+    // `MpDecoder::new` 的 arena 固定为 `NoArena`，与 `TrDecodableOwned` 的
+    // `for<'de, 'alloc> TrDecodable<'de, 'alloc, NoArena>` 对上；这里不需要再显式
+    // 写 `'de` / `'alloc`。
+    V::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await
         .map_err(|err| RpcError::Decode(err.to_string()))

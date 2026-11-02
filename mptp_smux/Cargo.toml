@@ -19,6 +19,9 @@ abs_mptp = { path = "../abs_mptp" }
 # 编解码器按值推进，不把整个前缀预攒进 `Vec`。`abs_denco` 是格式抽象；头表已改为手写
 # `TrEncodable` / `TrDecodable`（键是 `U16OrStr<S>`），`denco_macro` 仍经 `x_deps`
 # 转出给下游派生业务类型，`alloc-collections` 保留给其它集合实现。
+# 三个 `denco` crate 一律取默认分支：squash 后的 `main`（9550d95）已包含
+# `feat/bump-alloc` 的全部内容，不必再钉在特性分支上。下游 manifest 也都不写
+# `branch`，否则 Cargo 会把同一份代码解析成两个 `abs_denco` source。
 abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git", features = ["alloc-collections"] }
 denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }

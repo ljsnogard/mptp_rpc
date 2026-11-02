@@ -12,10 +12,7 @@ use abs_buff::{
 };
 use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
-use abs_denco::{
-    de::{TrDecodable, TrDecodableOwned},
-    ser::TrEncodable,
-};
+use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use anylr::SomeOf;
 use mp_denco::{MpDecoder, MpEncoder};
 use thiserror::Error;
@@ -78,16 +75,18 @@ where
 }
 
 /// 从接收半边直接解出一个值。
-pub(crate) async fn decode_from_async_<'de, T, TyRx, TyTok>(
+pub(crate) async fn decode_from_async_<T, TyRx, TyTok>(
     rx: &mut TyRx,
     cancel: TyTok,
 ) -> Result<T, BodyError>
 where
-    T: TrDecodable<'de>,
+    T: TrDecodableOwned,
     TyRx: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
 {
-    <T as TrDecodable<'de>>::decode_async(MpDecoder::new(&mut *rx))
+    // `MpDecoder::new` 的 arena 固定为 `NoArena`，对应 `TrDecodableOwned` 的
+    // `for<'de, 'alloc> TrDecodable<'de, 'alloc, NoArena>`。
+    T::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await
         .map_err(|err| BodyError::Decode(err.to_string()))

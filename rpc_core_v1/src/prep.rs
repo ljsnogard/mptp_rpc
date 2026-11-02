@@ -217,8 +217,11 @@ where
 const _: fn() = || {
     fn assert_prepare_ring<B, T, P>()
     where
-        B: 'static + Send + Sync + abs_mm::res_man::TrUnique<Item = [MaybeUninit<T>]>,
-        B::Alloc: AllocatorClone,
+        B: 'static
+            + Send
+            + Sync
+            + abs_mm::res_man::TrUnique<Item = [MaybeUninit<T>]>
+            + abs_mm::res_man::TrAllocBy<Alloc: AllocatorClone>,
         T: 'static + Sized,
         P: abs_smux::chan::TrPrepareRing<B, T>,
     {}

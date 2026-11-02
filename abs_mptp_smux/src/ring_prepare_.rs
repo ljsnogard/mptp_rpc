@@ -8,7 +8,7 @@ use abs_smux::{
     chan::TrPrepareRing,
     dock::TrDock,
 };
-use abs_mm::res_man::TrUnique;
+use abs_mm::res_man::{TrAllocBy, TrUnique};
 
 use crate::x_deps::{abs_cancel, abs_mm, abs_smux};
 
@@ -153,7 +153,11 @@ pub trait TrPrepFactory {
     ///
     /// 数据元素类型写死 `u8`：`mptp_smux` 的配置层已把 `Data` 收紧为 `u8`，不必再从配置
     /// 参数里问一次。
-    type RingBuff: 'static + Send + Sync + TrUnique<Item = [MaybeUninit<u8>], Alloc: AllocatorClone>;
+    type RingBuff: 'static
+        + Send
+        + Sync
+        + TrUnique<Item = [MaybeUninit<u8>]>
+        + TrAllocBy<Alloc: AllocatorClone>;
 
     /// 本工厂交出的**准备器**：实现上游 [`TrPrepareRing`]，由 `accept_async` 拿去建环。
     ///

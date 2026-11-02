@@ -48,7 +48,7 @@ use abs_smux::{
     chan::{RingBuffAlloc, TrPrepareRing},
     dock::TrDock,
 };
-use abs_mm::res_man::TrUnique;
+use abs_mm::res_man::{TrAllocBy, TrUnique};
 
 use crate::x_deps::{abs_cancel, abs_mm, abs_smux};
 
@@ -193,7 +193,11 @@ pub trait TrPrepFactory {
     ///
     /// 数据元素类型写死 `u8`：`mptp_smux` 的配置层已把 `Data` 收紧为 `u8`，不必再从配置
     /// 参数里问一次。
-    type RingBuff: 'static + Send + Sync + TrUnique<Item = [MaybeUninit<u8>], Alloc: AllocatorClone>;
+    type RingBuff: 'static
+        + Send
+        + Sync
+        + TrUnique<Item = [MaybeUninit<u8>]>
+        + TrAllocBy<Alloc: AllocatorClone>;
 
     /// 本工厂交出的**准备器**：实现上游 [`TrPrepareRing`]，由 `accept_async` 拿去建环。
     ///
@@ -253,8 +257,7 @@ pub trait TrPrepFactory {
 /// ```
 pub struct RingBuffs<B, T = u8>
 where
-    B: 'static + TrUnique<Item = [MaybeUninit<T>]>,
-    B::Alloc: AllocatorClone,
+    B: 'static + TrUnique<Item = [MaybeUninit<T>]> + TrAllocBy<Alloc: AllocatorClone>,
     T: 'static + Sized,
 {
     /// 发送方向的 ring 内存。
@@ -269,8 +272,7 @@ where
 
 impl<B, T> RingBuffs<B, T>
 where
-    B: 'static + TrUnique<Item = [MaybeUninit<T>]>,
-    B::Alloc: AllocatorClone,
+    B: 'static + TrUnique<Item = [MaybeUninit<T>]> + TrAllocBy<Alloc: AllocatorClone>,
     T: 'static + Sized,
 {
     /// 由两个方向的内存构造。
@@ -300,8 +302,7 @@ where
 
 impl<B, T> TrPrepareRing<B, T> for RingBuffs<B, T>
 where
-    B: 'static + TrUnique<Item = [MaybeUninit<T>]>,
-    B::Alloc: AllocatorClone,
+    B: 'static + TrUnique<Item = [MaybeUninit<T>]> + TrAllocBy<Alloc: AllocatorClone>,
     T: 'static + Sized,
 {
     fn prepare(self) -> RingBuffAlloc<B, T> {

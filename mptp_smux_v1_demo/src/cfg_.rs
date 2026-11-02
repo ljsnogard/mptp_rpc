@@ -22,7 +22,10 @@ use core::{alloc::AllocatorClone, convert::Infallible, mem::MaybeUninit};
 
 use abs_buff::{gen_may_cancel_future, x_deps::abs_cancel};
 use abs_cancel::TrCancellationToken;
-use abs_mm::{CoreAlloc, res_man::TrUnique};
+use abs_mm::{
+    CoreAlloc,
+    res_man::{TrAllocBy, TrUnique},
+};
 use abs_smux::{chan::TrPrepareRing, dock::Dock as MuxDock};
 use mm_ptr::{Owned, Shared};
 use mptp_smux::{
@@ -216,8 +219,11 @@ const _: fn() = || {
     fn assert_prepare_ring<B, T, P>()
     where
         P: TrPrepareRing<B, T>,
-        B: 'static + TrUnique<Item = [MaybeUninit<T>]> + Send + Sync,
-        B::Alloc: AllocatorClone,
+        B: 'static
+            + TrUnique<Item = [MaybeUninit<T>]>
+            + TrAllocBy<Alloc: AllocatorClone>
+            + Send
+            + Sync,
         T: 'static + Sized,
     {
     }

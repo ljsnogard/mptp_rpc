@@ -15,7 +15,7 @@ use core::{borrow::Borrow, fmt, future, marker::PhantomData};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{
-    de::{Error as DencoError, TrDecodable, TrDecoder, Unexpected, Visitor},
+    de::{Error as DencoError, TrArena, TrDecodable, TrDecoder, Unexpected, Visitor},
     ser::{TrEncodable, TrEncoder},
 };
 use abs_mptp::spec::{NumOrStr as AbsNumOrStr, StdHeaderKey, TrNumOrStr as AbsTrNumOrStr};
@@ -162,8 +162,9 @@ where
 /// [`U16OrStr`] 的访问者：按 MessagePack 线类型区分整数与字符串。
 struct KeyVisitor<S>(PhantomData<S>);
 
-impl<'de, S> Visitor<'de> for KeyVisitor<S>
+impl<'de, 'alloc, Alloc, S> Visitor<'de, 'alloc, Alloc> for KeyVisitor<S>
 where
+    Alloc: TrArena<'alloc> + 'alloc,
     S: Borrow<str> + From<String> + 'de,
 {
     type Value = U16OrStr<S>;
@@ -181,9 +182,12 @@ where
         Self::Value: 'a,
         E: DencoError + 'a,
     {
-        let result = u16::try_from(value)
-            .map(U16OrStr::U16)
-            .map_err(|_| <E as DencoError>::invalid_value(Unexpected::Unsigned(value), &self));
+        let result = u16::try_from(value).map(U16OrStr::U16).map_err(|_| {
+            <E as DencoError>::invalid_value(
+                Unexpected::Unsigned(value),
+                &"a non-negative integer or a string",
+            )
+        });
         future::ready(result)
     }
 
@@ -196,9 +200,12 @@ where
         Self::Value: 'a,
         E: DencoError + 'a,
     {
-        let result = u16::try_from(value)
-            .map(U16OrStr::U16)
-            .map_err(|_| <E as DencoError>::invalid_value(Unexpected::Signed(value), &self));
+        let result = u16::try_from(value).map(U16OrStr::U16).map_err(|_| {
+            <E as DencoError>::invalid_value(
+                Unexpected::Signed(value),
+                &"a non-negative integer or a string",
+            )
+        });
         future::ready(result)
     }
 
@@ -227,22 +234,25 @@ where
     }
 }
 
-impl<'de, S> TrDecodable<'de> for U16OrStr<S>
+impl<'de, 'alloc, Alloc, S> TrDecodable<'de, 'alloc, Alloc> for U16OrStr<S>
 where
+    Alloc: TrArena<'alloc> + 'alloc,
     S: Borrow<str> + From<String> + 'de,
 {
     type DecodeAsync<'a, D>
-        = DecodeKeyAsync<'de, 'a, 'a, S, D>
+        = DecodeKeyAsync<'de, 'alloc, 'a, 'a, Alloc, S, D>
     where
         'de: 'a,
-        D: TrDecoder<'de> + 'a,
+        'alloc: 'a,
+        D: TrDecoder<'de, 'alloc, Alloc> + 'a,
         D::Error: 'a,
         Self: 'a;
 
     fn decode_async<'a, D>(decoder: D) -> Self::DecodeAsync<'a, D>
     where
         'de: 'a,
-        D: TrDecoder<'de> + 'a,
+        'alloc: 'a,
+        D: TrDecoder<'de, 'alloc, Alloc> + 'a,
         D::Error: 'a,
         Self: 'a,
     {
@@ -252,11 +262,16 @@ where
 
 /// [`U16OrStr`] 解码的 step 函数：交给 `decode_any`，由 `KeyVisitor` 分派。
 #[gen_may_cancel_future(DecodeKey, pub, new(pub(crate)))]
-async fn decode_key_async_<'de, 'a, S, D, C>(decoder: D, cancel: C) -> Result<U16OrStr<S>, D::Error>
+async fn decode_key_async_<'de, 'alloc, 'a, Alloc, S, D, C>(
+    decoder: D,
+    cancel: C,
+) -> Result<U16OrStr<S>, D::Error>
 where
     'de: 'a,
+    'alloc: 'a,
+    Alloc: TrArena<'alloc> + 'alloc,
     S: Borrow<str> + From<String> + 'de + 'a,
-    D: TrDecoder<'de> + 'a,
+    D: TrDecoder<'de, 'alloc, Alloc> + 'a,
     D::Error: 'a,
     C: TrCancellationToken,
 {
