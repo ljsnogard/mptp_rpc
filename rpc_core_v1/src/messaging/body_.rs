@@ -68,8 +68,8 @@ where
     K: TrCancellationToken,
 {
     // `MpDecoder::new` 的 arena 固定为 `NoArena`，与 `TrDecodableOwned` 的
-    // `for<'de, 'alloc> TrDecodable<'de, 'alloc, NoArena>` 对上；这里不需要再显式
-    // 写 `'de` / `'alloc`。
+    // `for<'alloc> TrDecodable<'alloc, NoArena>` 对上；这里不需要再显式写
+    // `'alloc`。
     V::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await

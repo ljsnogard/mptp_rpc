@@ -162,10 +162,10 @@ where
 /// [`U16OrStr`] 的访问者：按 MessagePack 线类型区分整数与字符串。
 struct KeyVisitor<S>(PhantomData<S>);
 
-impl<'de, 'alloc, Alloc, S> Visitor<'de, 'alloc, Alloc> for KeyVisitor<S>
+impl<'alloc, Alloc, S> Visitor<'alloc, Alloc> for KeyVisitor<S>
 where
     Alloc: TrArena<'alloc> + 'alloc,
-    S: Borrow<str> + From<String> + 'de,
+    S: Borrow<str> + From<String> + 'alloc,
 {
     type Value = U16OrStr<S>;
 
@@ -234,25 +234,23 @@ where
     }
 }
 
-impl<'de, 'alloc, Alloc, S> TrDecodable<'de, 'alloc, Alloc> for U16OrStr<S>
+impl<'alloc, Alloc, S> TrDecodable<'alloc, Alloc> for U16OrStr<S>
 where
     Alloc: TrArena<'alloc> + 'alloc,
-    S: Borrow<str> + From<String> + 'de,
+    S: Borrow<str> + From<String> + 'alloc,
 {
     type DecodeAsync<'a, D>
-        = DecodeKeyAsync<'de, 'alloc, 'a, 'a, Alloc, S, D>
+        = DecodeKeyAsync<'alloc, 'a, 'a, Alloc, S, D>
     where
-        'de: 'a,
         'alloc: 'a,
-        D: TrDecoder<'de, 'alloc, Alloc> + 'a,
+        D: TrDecoder<'alloc, Alloc> + 'a,
         D::Error: 'a,
         Self: 'a;
 
     fn decode_async<'a, D>(decoder: D) -> Self::DecodeAsync<'a, D>
     where
-        'de: 'a,
         'alloc: 'a,
-        D: TrDecoder<'de, 'alloc, Alloc> + 'a,
+        D: TrDecoder<'alloc, Alloc> + 'a,
         D::Error: 'a,
         Self: 'a,
     {
@@ -262,16 +260,15 @@ where
 
 /// [`U16OrStr`] 解码的 step 函数：交给 `decode_any`，由 `KeyVisitor` 分派。
 #[gen_may_cancel_future(DecodeKey, pub, new(pub(crate)))]
-async fn decode_key_async_<'de, 'alloc, 'a, Alloc, S, D, C>(
+async fn decode_key_async_<'alloc, 'a, Alloc, S, D, C>(
     decoder: D,
     cancel: C,
 ) -> Result<U16OrStr<S>, D::Error>
 where
-    'de: 'a,
     'alloc: 'a,
     Alloc: TrArena<'alloc> + 'alloc,
-    S: Borrow<str> + From<String> + 'de + 'a,
-    D: TrDecoder<'de, 'alloc, Alloc> + 'a,
+    S: Borrow<str> + From<String> + 'alloc + 'a,
+    D: TrDecoder<'alloc, Alloc> + 'a,
     D::Error: 'a,
     C: TrCancellationToken,
 {

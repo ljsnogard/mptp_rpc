@@ -85,7 +85,7 @@ where
     TyTok: TrCancellationToken,
 {
     // `MpDecoder::new` 的 arena 固定为 `NoArena`，对应 `TrDecodableOwned` 的
-    // `for<'de, 'alloc> TrDecodable<'de, 'alloc, NoArena>`。
+    // `for<'alloc> TrDecodable<'alloc, NoArena>`。
     T::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await
