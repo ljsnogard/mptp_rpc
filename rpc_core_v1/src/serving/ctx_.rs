@@ -143,6 +143,22 @@ impl<'a, C: TrServingConfig> RpcCallCtx<'a, C> {
         ReplyStatusAsync::<'a, 'f, 'f, C>::new(self, status, message)
     }
 
+    /// 写一条由 [`RpcError`] 描述的错误回复。
+    ///
+    /// 状态码与 message 由 [`RpcError::into_reply_parts`] 决定：业务实现返回的
+    /// [`RpcError::Service`] 的 message 原样写出，不会经过 `Display` 的前缀。
+    ///
+    /// # Errors
+    ///
+    /// - [`RpcError::Transport`]：写回复前缀或 body 失败。
+    pub fn reply_error_async<'f>(
+        &'f mut self,
+        error: RpcError,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f {
+        let (status, message) = error.into_reply_parts();
+        self.reply_status_async(status, message)
+    }
+
     /// 收尾一条已经处理完的子流：半关闭发送半边，再读到对端关闭。
     ///
     /// 返回被丢弃的字节数。与 `mptp_smux::serving::close_channel_async` 一样，收尾阶段
@@ -193,6 +209,16 @@ impl<'a, C: TrServingConfig> crate::x_deps::abs_rpc_serv::service::TrRpcCallCtx<
         Self: 'f,
     {
         RpcCallCtx::reply_status_async(self, status, message)
+    }
+
+    fn reply_error_async<'f>(
+        &'f mut self,
+        error: Self::Err,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        Self: 'f,
+    {
+        RpcCallCtx::reply_error_async(self, error)
     }
 }
 

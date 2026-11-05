@@ -86,6 +86,22 @@ pub trait TrRpcCallCtx<C> {
     ) -> impl TrMayCancel<'f, MayCancelOutput = Result<(), Self::Err>> + 'f
     where
         Self: 'f;
+
+    /// 写一条由上下文错误类型描述的错误回复。
+    ///
+    /// 宏生成的 dispatch 把业务实现返回的 `Self::Err` 原样交给上下文，由上下文决定
+    /// 状态码与线上 message。核心实现 `rpc_core_v1::serving::RpcCallCtx` 会把
+    /// `RpcError::Service` 的 message 原样写出，不使用 `Display`。
+    ///
+    /// # Errors
+    ///
+    /// 写入失败时返回 [`Self::Err`]。
+    fn reply_error_async<'f>(
+        &'f mut self,
+        error: Self::Err,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = Result<(), Self::Err>> + 'f
+    where
+        Self: 'f;
 }
 
 /// 一个可以被 RPC 服务端调度的 service 实现。

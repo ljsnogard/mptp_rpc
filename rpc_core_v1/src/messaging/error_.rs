@@ -77,7 +77,7 @@ pub enum RpcError {
 impl RpcError {
     /// 把错误映射成线上状态码。
     ///
-    /// 服务端 dispatch 用它决定 `reply_status_async` 的状态；客户端也可以据此做
+    /// 服务端 dispatch 用它决定 `reply_error_async` 的状态；客户端也可以据此做
     /// 统一的上报。映射规则：
     ///
     /// | 错误 | 状态码 |
@@ -100,6 +100,40 @@ impl RpcError {
     /// 是否由取消令牌中止。
     pub const fn is_cancelled(&self) -> bool {
         matches!(self, RpcError::Cancelled)
+    }
+
+    /// 把错误拆成线上错误回复需要的状态码与 message。
+    ///
+    /// 业务错误 [`RpcError::Service`] 的 `message` 是业务数据，必须原样返回，不能
+    /// 经过 [`fmt::Display`]；否则 `Display` 的 `"RPC 业务错误 ...："` 前缀会被写进
+    /// 对端的业务错误体。`Remote` 的 body 当前按 UTF-8 lossy 转成文本，其它变体
+    /// 继续使用 `Display` 作为诊断文本。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rpc_core_v1::messaging::RpcError;
+    /// use rpc_core_v1::x_deps::abs_mptp::spec::Status;
+    ///
+    /// let err = RpcError::Service {
+    ///     status: Status::NotFound,
+    ///     message: "goods 不存在".to_string(),
+    /// };
+    /// let (status, message) = err.into_reply_parts();
+    /// assert_eq!(status, Status::NotFound);
+    /// assert_eq!(message, "goods 不存在");
+    /// ```
+    pub fn into_reply_parts(self) -> (Status, String) {
+        match self {
+            RpcError::Service { status, message } => (status, message),
+            RpcError::Remote { status, body } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
+            other => {
+                let status = other.status();
+                (status, other.to_string())
+            }
+        }
     }
 }
 
@@ -208,5 +242,63 @@ mod tests_ {
         };
         let text = err.to_string();
         assert!(text.contains("502"), "状态码应出现在错误文本里：{text}");
+    }
+
+    /// 测试业务错误的 message 原样进入线上回复，不被 `Display` 前缀污染。
+    /// Test that a business message reaches the wire verbatim, without the Display prefix.
+    ///
+    /// - 手段：构造 message 含 `）：` 与换行的 `Service`，调用 `into_reply_parts`。
+    /// - 判断：状态码不变，且 message 与输入逐字节相等。
+    ///
+    /// - Means: build a `Service` whose message contains `）：` and a newline.
+    /// - Verdict: the status is unchanged and the message is byte-for-byte equal.
+    #[test]
+    fn keeps_service_message_verbatim_() {
+        let message = "工作区）：不存在\n请检查路径";
+        let err = RpcError::Service {
+            status: Status::NotFound,
+            message: message.to_string(),
+        };
+        let (status, actual) = err.into_reply_parts();
+        assert_eq!(status, Status::NotFound);
+        assert_eq!(actual, message);
+        assert!(
+            !actual.contains("RPC 业务错误"),
+            "不应带 Display 前缀：{actual}"
+        );
+    }
+
+    /// 测试远端 body 转文本时对非法 UTF-8 使用 lossy 处理。
+    /// Test that remote bodies are converted with UTF-8 lossy handling.
+    ///
+    /// - 手段：构造 body 为非法 UTF-8 的 `Remote`，调用 `into_reply_parts`。
+    /// - 判断：状态码保留，message 非空且不 panic。
+    ///
+    /// - Means: build a `Remote` with invalid UTF-8 and call `into_reply_parts`.
+    /// - Verdict: the status is preserved; the message is non-empty and no panic occurs.
+    #[test]
+    fn converts_remote_body_lossily_() {
+        let err = RpcError::Remote {
+            status: Status::BadGateway,
+            body: vec![0xffu8, 0xfeu8],
+        };
+        let (status, message) = err.into_reply_parts();
+        assert_eq!(status, Status::BadGateway);
+        assert!(!message.is_empty());
+    }
+
+    /// 测试非业务错误仍使用带类别信息的 `Display` 文本。
+    /// Test that non-business errors still use the categorized Display text.
+    ///
+    /// - 手段：构造 `Decode` 错误，调用 `into_reply_parts`。
+    /// - 判断：状态为 400，message 含 `RPC body 解码失败`。
+    ///
+    /// - Means: build a `Decode` error and call `into_reply_parts`.
+    /// - Verdict: the status is 400 and the message contains the codec diagnostic.
+    #[test]
+    fn keeps_display_for_transport_errors_() {
+        let (status, message) = RpcError::Decode("bad".to_string()).into_reply_parts();
+        assert_eq!(status, Status::BadRequest);
+        assert!(message.contains("RPC body 解码失败"), "实际：{message}");
     }
 }
