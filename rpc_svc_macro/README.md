@@ -43,7 +43,7 @@ pub struct ApiV1;
   - 调用 `rpc_core_v1::client::call_unary_async`；
 - 隐藏模块里的 `dispatch_async`：
   - 解码 `Call`，`match` 方法变体；
-  - 调用用户实现，把成功值写成 `200 Ok`，业务错误按 `RpcError::status()` 写成错误回复。
+  - 调用用户实现，把成功值写成 `200 Ok`，业务错误交给 `TrRpcCallCtx::reply_error_async`，由上下文把 `RpcError` 拆成状态码与线上 message。
 
 **不再生成** `Worker`、队列、`route()` 或 `run_async()`。
 

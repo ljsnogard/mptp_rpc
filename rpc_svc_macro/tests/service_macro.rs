@@ -26,8 +26,8 @@ use rpc_core_v1::{
     messaging::{RpcError, RpcResult, TrRpcInterface},
     serving::{RpcCallCtx, RpcRouter, TrServingConfig},
     x_deps::{
-        abs_mptp::serving::TrReqHandler,
-        abs_rpc_serv::service::TrRpcService,
+        abs_mptp::{serving::TrReqHandler, spec::Status},
+        abs_rpc_serv::service::{TrRpcCallCtx, TrRpcService},
         mptp_smux::{
             client::MptpClient,
             serving::{Router, RouterCtx, TrPathRouter},
@@ -178,6 +178,97 @@ impl nested::NestedService for DummyNested {
     }
 }
 
+/// 捕获错误回复的测试上下文。
+///
+/// 只实现 `(C = ())` 这一种配置即可；`dispatch_async` 的类型参数会显式指定。
+struct CaptureCtx {
+    captured_: Option<(Status, String)>,
+}
+
+impl TrRpcCallCtx<()> for CaptureCtx {
+    type Err = RpcError;
+
+    fn decode_call_async<'f, T>(
+        &'f mut self,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<T>> + 'f
+    where
+        T: TrDecodableOwned + 'f,
+        Self: 'f,
+    {
+        DummyResultAsync::<'f, 'f, T>::new(Err(RpcError::Service {
+            status: Status::NotFound,
+            message: "工作区）：不存在".to_string(),
+        }))
+    }
+
+    fn reply_ok_async<'f, T>(
+        &'f mut self,
+        _value: T,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        T: TrEncodable + 'f,
+        Self: 'f,
+    {
+        DummyResultAsync::<'f, 'f, ()>::new(Ok(()))
+    }
+
+    fn reply_status_async<'f>(
+        &'f mut self,
+        _status: Status,
+        _message: String,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        Self: 'f,
+    {
+        DummyResultAsync::<'f, 'f, ()>::new(Ok(()))
+    }
+
+    fn reply_error_async<'f>(
+        &'f mut self,
+        error: Self::Err,
+    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+    where
+        Self: 'f,
+    {
+        self.captured_ = Some(error.into_reply_parts());
+        DummyResultAsync::<'f, 'f, ()>::new(Ok(()))
+    }
+}
+
+/// 测试宏生成的 dispatch 走结构化错误回复，而不是 `Display` 文本。
+/// Test that generated dispatch uses the structured error reply instead of `Display`.
+///
+/// - 手段：让测试上下文的 `decode_call_async` 返回 `RpcError::Service`，驱动
+///   `InventoryService` 的 dispatch，并记录 `reply_error_async` 收到的内容。
+/// - 判断：dispatch 成功返回，记录的 message 是原始业务文本，不含 `RPC 业务错误`。
+///
+/// - Means: make the test context's `decode_call_async` return `RpcError::Service`,
+///   drive the generated `InventoryService` dispatch, and record `reply_error_async`.
+/// - Verdict: dispatch succeeds and the recorded message is the original business text
+///   without the `RPC 业务错误` prefix.
+#[test]
+fn dispatch_error_uses_structured_reply_() {
+    let mut ctx = CaptureCtx { captured_: None };
+    let service = DummyInventory;
+
+    let result = block_on_(
+        __rpc_service_InventoryService::dispatch_async::<DummyInventory, (), CaptureCtx>(
+            &service, &mut ctx,
+        )
+        .may_cancel_with(NonCancellableToken::new())
+        .into_future(),
+    );
+    assert!(result.is_ok(), "dispatch 应当成功：{result:?}");
+
+    let (status, message) = ctx.captured_.expect("应当收到一次错误回复");
+    assert_eq!(status, Status::NotFound);
+    assert_eq!(message, "工作区）：不存在");
+    assert!(
+        !message.contains("RPC 业务错误"),
+        "不应带 Display 前缀：{message}"
+    );
+}
+
 /// 测试用的立即成功 future；让占位实现返回真正的 `TrMayCancel` 类型。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(DummyOk, pub(crate), new(pub(crate)))]
@@ -188,6 +279,25 @@ where
 {
     let _ = cancel;
     Result::Ok(value)
+}
+
+/// 测试用的立即完成 future，直接返回一个已有的 `RpcResult`。
+/// A ready future that returns an existing `RpcResult` unchanged.
+///
+/// - 手段：`gen_mcf2` 生成 `DummyResultAsync`，构造时传入 `RpcResult<T>`。
+/// - 判断：返回的 future 原样产出传入的 `Result`，供错误回复测试使用。
+///
+/// - Means: `gen_mcf2` generates `DummyResultAsync` from an existing `RpcResult<T>`.
+/// - Verdict: the future yields the supplied result unchanged for error-reply tests.
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(DummyResult, pub(crate), new(pub(crate)))]
+async fn dummy_result_<'f, T, TyTok>(value: RpcResult<T>, cancel: TyTok) -> RpcResult<T>
+where
+    T: 'f,
+    TyTok: TrCancellationToken,
+{
+    let _ = cancel;
+    value
 }
 
 /// 用立即完成的执行器驱动纯内存 future。

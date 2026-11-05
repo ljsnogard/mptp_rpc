@@ -4,7 +4,7 @@ RPC 服务端侧的**抽象契约**：供 `rpc_svc_macro` 生成的代码与 `rp
 不绑定具体运行时。
 
 - `config::TrServingConfig` / `config::TrServingAllocConfig`：服务端配置；
-- `service::TrRpcCallCtx`：一次调用的上下文；宏生成的 dispatch 只依赖它；
+- `service::TrRpcCallCtx`：一次调用的上下文；宏生成的 dispatch 只依赖它，错误回复走 `reply_error_async`；
 - `service::TrRpcService`：一个 service 实现如何被服务端调度；`#[rpc(service_of(I))]`
   为用户的 impl 类型实现它。
 

@@ -280,7 +280,7 @@ fn dispatch_step_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
             {
                 Ok(call) => call,
                 Err(err) => {
-                    ctx.reply_status_async(err.status(), err.to_string())
+                    ctx.reply_error_async(err)
                         .may_cancel_with(cancel.child_token())
                         .await?;
                     return Ok(());
@@ -340,7 +340,7 @@ fn dispatch_arm_(method: &MethodModel_) -> ::zyn::TokenStream {
                         .await
                 }
                 Err(err) => {
-                    ctx.reply_status_async(err.status(), err.to_string())
+                    ctx.reply_error_async(err)
                         .may_cancel_with(cancel.child_token())
                         .await
                 }
