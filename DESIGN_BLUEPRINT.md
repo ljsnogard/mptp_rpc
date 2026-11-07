@@ -142,35 +142,74 @@ async fn list_goods_<'f>(
 
 ```
 
-并且可以通过这样的代码，将这一系列服务实现注册到服务器。
-注意，这里的示例代码，只在服务器启动阶段运行一次，router 路由规则和 handler 实体构建完成后就不再更改。
-因此 `ctx` 等内容都应该是 'static 的，通过 move 参与构建后，被 handler 持有。
+并且可以通过这样的代码，将这一系列服务实现注册到服务器。服务端装配既可以在启动阶段
+一次性完成（最常见），也可以在运行期继续绑定（资源可以动态出现 / 消失）；router 的
+具体形状见下一节「Router 设计目标」。
 
 ```rust
 let other_data;
 let another_args;
 
-// 将根据上面 goods crate 中描述的路径，添加以下路径
+// 顶层 router：以自己为根，根 handler 是绝对根；规则路径相对自己。
+let top = Arc::new(RadixRouter::<ServingCfg>::new(EndpointRoot));
+
+// RPC 层辅助：interface 只是挂在 "api/v1" 下的子 router；
+// add_service 再为每个 service 建一个子 router 挂在 SERVICE_PATH 下。
+// 将根据协议端描述的路径，等价于挂载：
 // `/api/v1/customer/goods`
 // `/api/v1/admin/goods`
-// 并绑定对应的 impl
+top.rpc_interface::<ApiV1>(|api| {
+    api.add_service::<GoodsAdminServiceImpl>(move |cx| {
+        GoodsAdminServiceImpl::new(cx, other_data)
+    })?;
+    api.add_service::<GoodsCustomerServiceImpl>(move |cx| {
+        GoodsCustomerServiceImpl::new(cx, another_args)
+    })?;
+    Ok(())
+})?;
 
-// Router 是 MPTP 协议的路由。
-// RpcRouter 是 RPC over MPTP 的路由，有一部分内容是宏生成的。
-// 两者可能有相似的实现基础，但不必然是同一个类型。
+// 普通规则：一条规则要么绑定 handler，要么绑定子 router；
+// 同一 router 内两者路径不得重叠 / 互为前缀。
+top.on("health", MethodSet::ALL, HealthHandler)?;
 
-// 通过 Call 表明要注册的是 AccessMethod::Call 的 API 路由，特殊处理
-let router = Router::new().call(|ctx|
-    RpcRouter::<ApiV1>::new(ctx)
-        .add_dispatcher(|r| MyNewDispatcher::new())  // 暂未设计，用于分发 interface 收到的请求到具体的 service 和 handler
-        .add_service::<GoodsAdminServiceImpl>(move |cx| GoodsAdminServiceImpl::new(cx, other_data)) // 识别为 GoodsAdminService，绑定 "admin/goods"
-        .add_service::<GoodsCustomerServiceImpl>(move |cx| GoodsCustomerServiceImpl::new(cx, another_args)) // 识别为 GoodsCustomerService，绑定 "customer/goods"
-);
+// 子 router：挂载在 "docs"；它内部的规则相对自己，父层不知道具体规则。
+let docs = Arc::new(RadixRouter::<ServingCfg>::new(DocsRoot));
+docs.view("{id}", DocView::new())?;
+docs.pull("changes", ChangeStream::new())?;
+top.bind_router("docs", docs)?;
+
+let server = MptpServer::<ServingCfg, _>::new(top);
 ```
+
+## Router 设计目标
+
+（详细讨论与开放问题见 [`dev-notes/router-20261106-0112.md`](dev-notes/router-20261106-0112.md)；
+以下只列对框架使用者的形状约定。该设计**尚未实施**。）
+
+1. **分层 router**：每个 router 以自己为根维护「根 handler + handler 规则 + 子 router
+   规则」。父 router 只知道「在哪个前缀挂了子 router」，不知道子 router 内部规则，也
+   不知道父层还有哪些兄弟路由；子 router 也不知道父层与自己被挂载的绝对前缀。
+2. **添加规则只有两个入口**：
+   - `bind_handler(rule, methods, handler)`：一条**精确路径规则**绑定 handler；
+   - `bind_router(rule, child_router)`：一条**静态前缀规则**绑定子 router。
+   七种访问方法用方法糖（`.head/.view/.post/.drop/.push/.pull/.call`）或
+   `.on(rule, MethodSet, handler)` 绑定；一个 handler 可以同时响应多种方法。
+3. **匹配递归向下**：本层 handler 规则 → 子 router → 本层根 handler。子 router 未命中
+   由它自己的根 handler 兜底，**不会**自动上抛给父层或绝对根。
+4. **每个 router 必须有根 handler**：顶层 router 的根 handler 是**绝对根**；子 router
+   的根 handler 是**相对根**，负责该命名空间里未命中的请求（404 / 405 / redirect）。
+5. **契约分离**：注册契约 `TrRouter`（两个添加方法 + 撤销）与匹配契约
+   `TrRouteMatcher` 分离；`MptpServer` 只依赖 `TrRouteMatcher`，因此可以注入自定义
+   router 实现。默认实现 `RadixRouter` 同时实现两者。
 
 ---
 
-## 实现现状（2026-10-22）
+## 实现现状（2026-10-22，Router 重构前）
+
+> 注意：以下是当前代码（旧 router 形状）的现状记录。router 部分正在按
+> [`dev-notes/router-20261106-0112.md`](dev-notes/router-20261106-0112.md) 的分层 router
+> 方案重新设计，**尚未改代码**；下面的「实际装配形状」是重构前的形状，迁移完成后本节会
+> 更新。
 
 服务端宏已按「宏只出样板，用户自己组织」重构完成。当前形状：
 
@@ -203,7 +242,7 @@ let router = Router::new().call(|ctx|
   `RpcRouterHandler` 仍在 core 中，`rpc_router_trie::RpcRouter` 仍在独立 crate 中，
   供需要背压或自定义 worker 的使用者显式组合。
 
-### 实际装配形状
+### 当前实际装配形状（旧）
 
 ```rust
 use mptp_smux::serving::{MptpServer, Router};
@@ -246,6 +285,11 @@ let server = MptpServer::<ServingCfg, _>::new(router);
 - `mptp_cs_smoke` 已迁移到新装配，compio + UDS 的 11 条 RPC（含 `ApiV1` / `ApiV2`）
   端到端通过；
 - workspace 的 check / clippy / test 与 rustdoc 均通过。
+
+> 以上验证对应的是**旧 router 形状**。分层 router 落地后，`mptp_cs_smoke`、两个 demo
+> 与宏集成测试都需要按新的装配形状（`RadixRouter::new` + `rpc_interface` +
+> `add_service` + `bind_router`）迁移并重新验证；具体迁移清单见
+> [`dev-notes/router-20261106-0112.md`](dev-notes/router-20261106-0112.md) 第 8 节。
 
 细节、限制与验证结果见
 [`dev-notes/rpc-framework-20261020-0332.md`](dev-notes/rpc-framework-20261020-0332.md)

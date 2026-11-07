@@ -8,12 +8,14 @@
   的重构计划、Phase 0 结果与待确认问题。
 - [`rpc-preludes-20261022-2110.md`](rpc-preludes-20261022-2110.md)：`rpc_core_v1::preludes`
   的导出内容与后续文档补全清单。
-- [`router-20261106-0112.md`](router-20261106-0112.md)：统一 router 的设计提案——
-  可注入的 `TrRouter` 契约（默认实现参考 matchit、功能参考 salvo 的嵌套路由）；层级
-  （level）与精确 route 的二级结构；绝对根 handler + 每层相对根 handler 的分层兜底
-  （下层未命中不得上抛给绝对根）；运行期动态绑定；请求级 `RequestCancel`；以及
-  「资源 = handle + route 绑定、不抽 `TrResource` trait」的资源模型；含 trait 设计与
-  示例用法。初稿的两层 router / 静态动态双入口 / 空前缀祖先回退方案已被取代。
+- [`router-20261106-0112.md`](router-20261106-0112.md)：分层 router 的设计提案——
+  可注入的注册契约 `TrRouter`（**添加规则只有两个入口**：绑定 handler / 绑定子 router）
+  与匹配契约 `TrRouteMatcher`；每个 router 以自己为根的局部路由表，父层不枚举子 router
+  内部规则；每个 router 自带根 handler（顶层绝对根 / 子 router 相对根，下层未命中不上抛）；
+  七种访问方法用方法糖或 `MethodSet` 绑定；运行期动态增删；请求级 `RequestCancel`；
+  以及「资源 = handle + 绑定、不抽 `TrResource` trait」的资源模型；含 trait 设计与示例
+  用法。初稿的两层 router / 全局单表 / level+interface+scope / 静态动态双入口等方案已被
+  取代。
 - [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
   `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
   dev/0.3.0 的改动、依赖统一与验证结果。
