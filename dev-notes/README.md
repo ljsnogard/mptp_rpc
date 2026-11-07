@@ -8,9 +8,12 @@
   的重构计划、Phase 0 结果与待确认问题。
 - [`rpc-preludes-20261022-2110.md`](rpc-preludes-20261022-2110.md)：`rpc_core_v1::preludes`
   的导出内容与后续文档补全清单。
-- [`router-20261106-0112.md`](router-20261106-0112.md)：`mptp_smux::serving` 的 router
-  设计综述、service 开发者使用指南，以及面向「运行期动态资源 + 七种访问方法」的差距分析
-  与分阶段演进提案。
+- [`router-20261106-0112.md`](router-20261106-0112.md)：统一 router 的设计提案——
+  可注入的 `TrRouter` 契约（默认实现参考 matchit、功能参考 salvo 的嵌套路由）；层级
+  （level）与精确 route 的二级结构；绝对根 handler + 每层相对根 handler 的分层兜底
+  （下层未命中不得上抛给绝对根）；运行期动态绑定；请求级 `RequestCancel`；以及
+  「资源 = handle + route 绑定、不抽 `TrResource` trait」的资源模型；含 trait 设计与
+  示例用法。初稿的两层 router / 静态动态双入口 / 空前缀祖先回退方案已被取代。
 - [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
   `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
   dev/0.3.0 的改动、依赖统一与验证结果。
