@@ -12,7 +12,9 @@
   可注入的注册契约 `TrRouter`（**添加规则只有两个入口**：绑定 handler / 绑定子 router）
   与匹配契约 `TrRouteMatcher`；每个 router 以自己为根的局部路由表，父层不枚举子 router
   内部规则；每个 router 自带根 handler（顶层绝对根 / 子 router 相对根，下层未命中不上抛）；
-  七种访问方法用方法糖或 `MethodSet` 绑定；运行期动态增删；请求级 `RequestCancel`；
+  七种访问方法用类型化方法糖（规则由参数类型 `P::PATTERN` 提供，derive 宏编译期校验
+  `{id}` 与 handler 参数结构体字段一致）或 `MethodSet` 绑定；运行期动态增删；请求级
+  `RequestCancel`；
   以及「资源 = handle + 绑定、不抽 `TrResource` trait」的资源模型；含 trait 设计与示例
   用法。初稿的两层 router / 全局单表 / level+interface+scope / 静态动态双入口等方案已被
   取代。

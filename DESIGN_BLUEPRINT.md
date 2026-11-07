@@ -170,12 +170,19 @@ top.rpc_interface::<ApiV1>(|api| {
 
 // 普通规则：一条规则要么绑定 handler，要么绑定子 router；
 // 同一 router 内两者路径不得重叠 / 互为前缀。
-top.on("health", MethodSet::ALL, HealthHandler)?;
+top.bind_handler("health", MethodSet::ALL, Arc::new(HealthHandler))?;
 
 // 子 router：挂载在 "docs"；它内部的规则相对自己，父层不知道具体规则。
+// 路径参数类型同时提供规则与 handler 参数结构。
+#[derive(TrRouteParams)]
+#[route("items/{id}")]
+struct DocParams {
+    id: DocId,          // 必须与模式里的 {id} 同名；derive 宏编译期校验
+}
+
 let docs = Arc::new(RadixRouter::<ServingCfg>::new(DocsRoot));
-docs.view("{id}", DocView::new())?;
-docs.pull("changes", ChangeStream::new())?;
+docs.view::<DocParams>(DocView)?;
+docs.pull::<DocParams>(DocPull)?;
 top.bind_router("docs", docs)?;
 
 let server = MptpServer::<ServingCfg, _>::new(top);
@@ -193,7 +200,12 @@ let server = MptpServer::<ServingCfg, _>::new(top);
    - `bind_handler(rule, methods, handler)`：一条**精确路径规则**绑定 handler；
    - `bind_router(rule, child_router)`：一条**静态前缀规则**绑定子 router。
    七种访问方法用方法糖（`.head/.view/.post/.drop/.push/.pull/.call`）或
-   `.on(rule, MethodSet, handler)` 绑定；一个 handler 可以同时响应多种方法。
+   `.on` + `MethodSet` 绑定；一个 handler 可以同时响应多种方法。
+   **路径参数类型化**：规则字符串不直接传给绑定调用，而是由参数类型
+   `P: TrRouteParams` 提供 `P::PATTERN`；`#[derive(TrRouteParams)]` 在编译期校验
+   模式中的 `{id}` 与结构体字段名一致，handler 通过 `TrRouteHandler<C, P>` 拿到
+   `params: P`（例如 `params.id`），因此不存在「规则里没有 id 却要求 handler 取
+   id」的组合；参数值解析失败时在进入 handler 前返回 400。
 3. **匹配递归向下**：本层 handler 规则 → 子 router → 本层根 handler。子 router 未命中
    由它自己的根 handler 兜底，**不会**自动上抛给父层或绝对根。
 4. **每个 router 必须有根 handler**：顶层 router 的根 handler 是**绝对根**；子 router
