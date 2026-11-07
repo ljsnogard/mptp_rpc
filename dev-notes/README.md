@@ -8,6 +8,9 @@
   的重构计划、Phase 0 结果与待确认问题。
 - [`rpc-preludes-20261022-2110.md`](rpc-preludes-20261022-2110.md)：`rpc_core_v1::preludes`
   的导出内容与后续文档补全清单。
+- [`router-20261106-0112.md`](router-20261106-0112.md)：`mptp_smux::serving` 的 router
+  设计综述、service 开发者使用指南，以及面向「运行期动态资源 + 七种访问方法」的差距分析
+  与分阶段演进提案。
 - [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
   `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
   dev/0.3.0 的改动、依赖统一与验证结果。
