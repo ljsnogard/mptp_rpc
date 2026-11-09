@@ -1,32 +1,46 @@
-use crate::escape::{UnescapedRef, UnescapedRoute};
-use crate::tree::{denormalize_params, Node};
+//! 注册 / 匹配 / 合并错误。
 
-use std::fmt;
-use std::ops::Deref;
+use alloc::{alloc::Global, vec::Vec};
+use core::{fmt, ops::Deref};
 
-/// Represents errors that can occur when inserting a new route.
+use abs_str::str_alloc::String;
+
+use crate::{
+    escape::{UnescapedRef, UnescapedRoute},
+    tree::{Node, denormalize_params},
+};
+
+/// 把字节路径复制成全局分配器上的字符串。
+///
+/// 正常路径一定来自 `&str`，所以这里只需在极端情况下退化为空串。
+fn to_global_string(bytes: &[u8]) -> String<Global> {
+    match core::str::from_utf8(bytes) {
+        Ok(s) => String::from_str_in(s, Global),
+        Err(_) => String::from_str_in("", Global),
+    }
+}
+
+/// 插入路由时可能出现的错误。
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum InsertError {
-    /// Attempted to insert a path that conflicts with an existing route.
+    /// 新路由与已注册路由冲突。
     Conflict {
-        /// The existing route that the insertion is conflicting with.
-        with: String,
+        /// 已注册的冲突路由。
+        with: String<Global>,
     },
 
-    /// Only one parameter per route segment is allowed.
-    ///
-    /// For example, `/foo-{bar}` and `/{bar}-foo` are valid routes, but `/{foo}-{bar}`
-    /// is not.
+    /// 同一个路径段里出现了多个参数。
     InvalidParamSegment,
 
-    /// Parameters must be registered with a valid name and matching braces.
-    ///
-    /// Note you can use `{{` or `}}` to escape literal brackets.
+    /// 参数名非法或花括号不匹配；字面量 `{` / `}` 请写成 `{{` / `}}`。
     InvalidParam,
 
-    /// Catch-all parameters are only allowed at the end of a path.
+    /// catch-all 参数只能出现在路径末尾。
     InvalidCatchAll,
+
+    /// 一条路由里的参数超过 26 个，无法用单字母规范化。
+    TooManyParams,
 }
 
 impl fmt::Display for InsertError {
@@ -46,69 +60,63 @@ impl fmt::Display for InsertError {
                 f,
                 "Catch-all parameters are only allowed at the end of a route"
             ),
+            Self::TooManyParams => write!(f, "Too many route parameters (maximum is 26)"),
         }
     }
 }
 
-impl std::error::Error for InsertError {}
+impl core::error::Error for InsertError {}
 
 impl InsertError {
-    /// Returns an error for a route conflict with the given node.
-    ///
-    /// This method attempts to find the full conflicting route.
-    pub(crate) fn conflict<T>(
-        route: &UnescapedRoute,
-        prefix: UnescapedRef<'_>,
-        current: &Node<T>,
+    /// 构造一条“与现有路由冲突”的错误，并尽量还原出完整的冲突路径。
+    pub(crate) fn conflict<'a, T>(
+        route: &UnescapedRoute<'a>,
+        prefix: UnescapedRef<'a, '_>,
+        current: &Node<'a, T>,
     ) -> Self {
         let mut route = route.clone();
 
-        // The route is conflicting with the current node.
+        // 冲突正好发生在当前节点。
         if prefix.unescaped() == current.prefix.unescaped() {
             denormalize_params(&mut route, &current.remapping);
             return InsertError::Conflict {
-                with: String::from_utf8(route.into_unescaped()).unwrap(),
+                with: to_global_string(route.unescaped()),
             };
         }
 
-        // Remove the non-matching suffix from the route.
+        // 去掉不匹配的后缀，再拼上冲突节点的前缀。
         route.truncate(route.len() - prefix.len());
 
-        // Add the conflicting prefix.
         if !route.ends_with(&current.prefix) {
             route.append(&current.prefix);
         }
 
-        // Add the prefixes of any conflicting children.
+        // 继续拼上冲突子树的最左侧路径。
         let mut child = current.children.first();
         while let Some(node) = child {
             route.append(&node.prefix);
             child = node.children.first();
         }
 
-        // Denormalize any route parameters.
+        // 还原参数名。
         let mut last = current;
         while let Some(node) = last.children.first() {
             last = node;
         }
         denormalize_params(&mut route, &last.remapping);
 
-        // Return the conflicting route.
         InsertError::Conflict {
-            with: String::from_utf8(route.into_unescaped()).unwrap(),
+            with: to_global_string(route.unescaped()),
         }
     }
 }
 
-/// A failed merge attempt.
-///
-/// See [`Router::merge`](crate::Router::merge) for details.
+/// 一次合并失败；可能只合并成功了一部分路由。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MergeError(pub(crate) Vec<InsertError>);
 
 impl MergeError {
-    /// Returns a list of [`InsertError`] for every insertion that failed
-    /// during the merge.
+    /// 取出全部插入错误。
     pub fn into_errors(self) -> Vec<InsertError> {
         self.0
     }
@@ -124,7 +132,7 @@ impl fmt::Display for MergeError {
     }
 }
 
-impl std::error::Error for MergeError {}
+impl core::error::Error for MergeError {}
 
 impl Deref for MergeError {
     type Target = Vec<InsertError>;
@@ -134,24 +142,19 @@ impl Deref for MergeError {
     }
 }
 
-/// A failed match attempt.
+/// 匹配失败。
 ///
-/// ```
+/// ```rust
 /// use matchit_route::{MatchError, Router};
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut router = Router::new();
-/// router.insert("/home", "Welcome!")?;
-/// router.insert("/blog", "Our blog.")?;
 ///
-/// // no routes match
-/// if let Err(err) = router.at("/blo") {
-///     assert_eq!(err, MatchError::NotFound);
-/// }
-/// # Ok(())
-/// # }
+/// let mut router = Router::new();
+/// router.insert("/home", "Welcome!").unwrap();
+///
+/// assert!(matches!(router.at("/blog"), Err(MatchError::NotFound)));
+/// ```
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum MatchError {
-    /// No matching route was found.
+    /// 没有任何路由匹配该路径。
     NotFound,
 }
 
@@ -161,4 +164,4 @@ impl fmt::Display for MatchError {
     }
 }
 
-impl std::error::Error for MatchError {}
+impl core::error::Error for MatchError {}

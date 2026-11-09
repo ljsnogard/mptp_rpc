@@ -18,6 +18,9 @@
   以及「资源 = handle + 绑定、不抽 `TrResource` trait」的资源模型；含 trait 设计与示例
   用法。初稿的两层 router / 全局单表 / level+interface+scope / 静态动态双入口等方案已被
   取代。
+- [`matchit-no_std-20261110-0520.md`](matchit-no_std-20261110-0520.md)：`matchit_route`
+  的 no_std / bumpalo 移植：router 自有 arena、`T: 'static`、`Send` / `Sync` 的安全
+  论证，以及第 3 步删除 `rpc_router_trie`、统一为一套路径匹配算法的计划。
 - [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
   `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
   dev/0.3.0 的改动、依赖统一与验证结果。

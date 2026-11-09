@@ -1,129 +1,85 @@
-/*!
-A high performance, zero-copy URL router.
+//! 高性能、零拷贝 URL router 的 `no_std` 移植版（源自 `matchit` 0.8.6）。
+//!
+//! 路由规则在构建完成后保持内存稳定：整棵基数树、节点前缀与参数名都放在 router
+//! 自有的 `bumpalo` arena 里；`Router` 被丢弃时，值先析构，arena 随后整体释放。
+//! 只有参数列表、回溯栈与错误信息这类**一次性**数据会临时走全局分配器。
+//!
+//! ```rust
+//! use matchit_route::Router;
+//!
+//! let mut router = Router::new();
+//! router.insert("/home", "Welcome!").unwrap();
+//! router.insert("/users/{id}", "A User").unwrap();
+//!
+//! let matched = router.at("/users/978").unwrap();
+//! assert_eq!(matched.params.get("id"), Some("978"));
+//! assert_eq!(*matched.value, "A User");
+//! ```
+//!
+//! # 参数
+//!
+//! 支持命名参数 `/{id}` 与 catch-all 参数 `/{*rest}`；同一个路径段内只允许一个命名
+//! 参数。`{` / `}` 可以用 `{{` / `}}` 转义为静态字符。
+//!
+//! ```rust
+//! use matchit_route::Router;
+//!
+//! let mut router = Router::new();
+//! router.insert("/images/img{id}.png", true).unwrap();
+//!
+//! assert_eq!(router.at("/images/img1.png").unwrap().params.get("id"), Some("1"));
+//! assert!(router.at("/images/img1.jpg").is_err());
+//! ```
+//!
+//! ```rust
+//! use matchit_route::Router;
+//!
+//! let mut router = Router::new();
+//! router.insert("/{*p}", true).unwrap();
+//!
+//! assert_eq!(router.at("/foo.js").unwrap().params.get("p"), Some("foo.js"));
+//! assert_eq!(router.at("/c/bar.css").unwrap().params.get("p"), Some("c/bar.css"));
+//! assert!(router.at("/").is_err());
+//! ```
+//!
+//! # 优先级
+//!
+//! 静态段优先于参数段，参数段优先于 catch-all：
+//!
+//! ```rust
+//! use matchit_route::Router;
+//!
+//! let mut router = Router::new();
+//! router.insert("/", "root").unwrap();
+//! router.insert("/about", "about").unwrap();
+//! router.insert("/{*filepath}", "catch-all").unwrap();
+//!
+//! assert_eq!(*router.at("/about").unwrap().value, "about");
+//! assert_eq!(*router.at("/other").unwrap().value, "catch-all");
+//! ```
+//!
+//! # 内存模型
+//!
+//! - `Router<T>` 自己持有一个 `bumpalo::Bump`，节点用 `bumpalo::boxed::Box` 持有值，
+//!   因此 `Drop` 会按 RAII 语义先析构 `T`，再释放 arena；
+//! - `Router` 只在 `&mut self` 的注册 / 删除路径上写 arena，匹配路径只读；
+//! - 因 arena 分配器不是 `Sync`，但匹配过程不触碰分配器，本 crate 为
+//!   `Router<T>: Send`（`T: Send`）与 `Router<T>: Sync`（`T: Sync`）提供了带安全论证的
+//!   手动实现。
+//!
+//! # `matchit_route`: a no_std port of matchit
+//!
+//! A zero-copy URL router with `matchit`'s API and matching algorithm. The routing
+//! tree lives in a router-owned bump arena; only transient data (parameter overflow,
+//! backtracking stack and error messages) uses the global allocator. Values are kept
+//! in `bumpalo::boxed::Box`, so dropping the router runs their destructors before the
+//! arena is released.
 
-```rust
-use matchit_route::Router;
+#![no_std]
+#![deny(rust_2018_idioms)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut router = Router::new();
-    router.insert("/home", "Welcome!")?;
-    router.insert("/users/{id}", "A User")?;
-
-    let matched = router.at("/users/978")?;
-    assert_eq!(matched.params.get("id"), Some("978"));
-    assert_eq!(*matched.value, "A User");
-
-    Ok(())
-}
-```
-
-# Parameters
-
-The router supports dynamic route segments. These can either be named or catch-all parameters.
-
-Named parameters like `/{id}` match anything until the next static segment or the end of the path.
-
-```rust
-# use matchit_route::Router;
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut m = Router::new();
-m.insert("/users/{id}", true)?;
-
-assert_eq!(m.at("/users/1")?.params.get("id"), Some("1"));
-assert_eq!(m.at("/users/23")?.params.get("id"), Some("23"));
-assert!(m.at("/users").is_err());
-# Ok(())
-# }
-```
-
-Prefixes and suffixes within a segment are also supported. However, there may only be a single named parameter per route segment.
-```rust
-# use matchit_route::Router;
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut m = Router::new();
-m.insert("/images/img{id}.png", true)?;
-
-assert_eq!(m.at("/images/img1.png")?.params.get("id"), Some("1"));
-assert!(m.at("/images/img1.jpg").is_err());
-# Ok(())
-# }
-```
-
-Catch-all parameters start with `*` and match anything until the end of the path. They must always be at the **end** of the route.
-
-```rust
-# use matchit_route::Router;
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut m = Router::new();
-m.insert("/{*p}", true)?;
-
-assert_eq!(m.at("/foo.js")?.params.get("p"), Some("foo.js"));
-assert_eq!(m.at("/c/bar.css")?.params.get("p"), Some("c/bar.css"));
-
-// Note that this would lead to an empty parameter.
-assert!(m.at("/").is_err());
-# Ok(())
-# }
-```
-
-The literal characters `{` and `}` may be included in a static route by escaping them with the same character. For example, the `{` character is escaped with `{{` and the `}` character is escaped with `}}`.
-
-```rust
-# use matchit_route::Router;
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut m = Router::new();
-m.insert("/{{hello}}", true)?;
-m.insert("/{hello}", true)?;
-
-// Match the static route.
-assert!(m.at("/{hello}")?.value);
-
-// Match the dynamic route.
-assert_eq!(m.at("/hello")?.params.get("hello"), Some("hello"));
-# Ok(())
-# }
-```
-
-# Routing Priority
-
-Static and dynamic route segments are allowed to overlap. If they do, static segments will be given higher priority:
-
-```rust
-# use matchit_route::Router;
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut m = Router::new();
-m.insert("/", "Welcome!").unwrap();      // Priority: 1
-m.insert("/about", "About Me").unwrap(); // Priority: 1
-m.insert("/{*filepath}", "...").unwrap();  // Priority: 2
-# Ok(())
-# }
-```
-
-# How does it work?
-
-The router takes advantage of the fact that URL routes generally follow a hierarchical structure. Routes are stored them in a radix trie that makes heavy use of common prefixes.
-
-```text
-Priority   Path             Value
-9          \                1
-3          ├s               None
-2          |├earch\         2
-1          |└upport\        3
-2          ├blog\           4
-1          |    └{post}     None
-1          |          └\    5
-2          ├about-us\       6
-1          |        └team\  7
-1          └contact\        8
-```
-
-This allows us to reduce the route search to a small number of branches. Child nodes on the same level of the tree are also prioritized
-by the number of children with registered values, increasing the chance of choosing the correct branch of the first try.
-
-As it turns out, this method of routing is extremely fast. See the [benchmark results](https://github.com/ibraheemdev/matchit?tab=readme-ov-file#benchmarks) for details.
-*/
-
-#![deny(rust_2018_idioms, clippy::all)]
+extern crate alloc;
 
 mod error;
 mod escape;
@@ -134,6 +90,12 @@ mod tree;
 pub use error::{InsertError, MatchError, MergeError};
 pub use params::{Params, ParamsIter};
 pub use router::{Match, Router};
+
+/// 依赖重导出，便于下游命名错误信息里的 `String` 或自行使用同一套分配工具。
+pub mod x_deps {
+    pub use abs_str;
+    pub use bumpalo;
+}
 
 #[cfg(doctest)]
 mod readme {
