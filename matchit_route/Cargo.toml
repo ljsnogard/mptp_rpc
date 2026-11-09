@@ -3,10 +3,10 @@ name = "matchit_route"
 version = "0.1.0"
 edition = "2024"
 
-description = "A high performance, zero-copy URL router (forked from matchit 0.8.6)."
+description = "A no_std, bumpalo-backed URL router forked from matchit 0.8.6."
 repository = "https://github.com/ljsnogard/mptp_rpc"
-keywords = ["router", "path", "tree", "match", "url"]
-categories = ["network-programming", "algorithms"]
+keywords = ["router", "path", "tree", "match", "url", "no_std"]
+categories = ["network-programming", "algorithms", "no-std"]
 
 # 本 crate 是 matchit 0.8.6 的移植版本，必须保留上游的双许可证。
 license = "MIT AND BSD-3-Clause"
@@ -19,6 +19,18 @@ path = "src/lib.rs"
 [features]
 __test_helpers = []
 default = []
+
+[dependencies]
+# 带分配器参数的 String：错误信息等一次性字符串使用全局分配器。
+abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git", default-features = false, features = [
+    "str_alloc",
+] }
+# 路由树本体全部放在 router 自有的 bump arena 里。
+bumpalo = { version = "3.20.3", features = ["boxed", "collections"] }
+
+[[test]]
+name = "arena_"
+path = "tests/arena_.rs"
 
 [[test]]
 name = "insert"

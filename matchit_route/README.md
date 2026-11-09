@@ -1,8 +1,18 @@
-# `matchit`
+# `matchit_route`
 
-[<img alt="crates.io" src="https://img.shields.io/crates/v/matchit?style=for-the-badge" height="25">](https://crates.io/crates/matchit)
-[<img alt="github" src="https://img.shields.io/badge/github-matchit-blue?style=for-the-badge" height="25">](https://github.com/ibraheemdev/matchit)
-[<img alt="docs.rs" src="https://img.shields.io/docsrs/matchit?style=for-the-badge" height="25">](https://docs.rs/matchit)
+`matchit_route` 是 [`matchit`](https://github.com/ibraheemdev/matchit) 0.8.6 的
+`no_std` 移植版，保留上游的匹配算法与公开 API 形状：
+
+- 路由树、节点前缀与参数名表放在 router 自有的 `bumpalo` arena 里；
+- 节点值用 `bumpalo::boxed::Box` 持有，`Router` 析构时按 RAII 先运行值的
+  `Drop`，再整体释放 arena；
+- 参数表溢出、回溯栈与错误信息这类一次性数据使用全局分配器；
+- 因为值存放在 arena 里，`Router<T>` 要求 `T: 'static`。
+
+`matchit_route` is a `no_std` port of `matchit` 0.8.6. The routing tree lives in a
+router-owned bump arena; values are kept in `bumpalo::boxed::Box` so dropping the
+router runs their destructors before the arena is released. Only transient data uses
+the global allocator, and `T: 'static` is required because values live in the arena.
 
 A high performance, zero-copy URL router.
 

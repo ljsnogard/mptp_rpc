@@ -1,5 +1,11 @@
 use matchit_route::{MatchError, Router};
 
+type MatchExpectation = (
+    &'static str,
+    &'static str,
+    Result<Vec<(&'static str, &'static str)>, ()>,
+);
+
 // https://github.com/ibraheemdev/matchit/issues/22
 #[test]
 fn partial_overlap() {
@@ -63,11 +69,7 @@ fn overlapping_param_backtracking() {
 
 struct MatchTest {
     routes: Vec<&'static str>,
-    matches: Vec<(
-        &'static str,
-        &'static str,
-        Result<Vec<(&'static str, &'static str)>, ()>,
-    )>,
+    matches: Vec<MatchExpectation>,
 }
 
 impl MatchTest {
@@ -78,6 +80,7 @@ impl MatchTest {
             assert_eq!(router.insert(route, route.to_owned()), Ok(()), "{route}");
         }
 
+        #[cfg(feature = "__test_helpers")]
         router.check_priorities().unwrap();
 
         for (path, route, params) in self.matches {
@@ -88,7 +91,7 @@ impl MatchTest {
                     let got = x.params.iter().collect::<Vec<_>>();
                     assert_eq!(params.unwrap(), got);
 
-                    router.at_mut(path).unwrap().value.push_str("Z");
+                    router.at_mut(path).unwrap().value.push('Z');
                     assert!(router.at(path).unwrap().value.contains("Z"));
                     router.at_mut(path).unwrap().value.pop();
                 }
