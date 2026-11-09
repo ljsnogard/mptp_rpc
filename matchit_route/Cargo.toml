@@ -1,0 +1,37 @@
+[package]
+name = "matchit_route"
+version = "0.1.0"
+edition = "2024"
+
+description = "A high performance, zero-copy URL router (forked from matchit 0.8.6)."
+repository = "https://github.com/ljsnogard/mptp_rpc"
+keywords = ["router", "path", "tree", "match", "url"]
+categories = ["network-programming", "algorithms"]
+
+# 本 crate 是 matchit 0.8.6 的移植版本，必须保留上游的双许可证。
+license = "MIT AND BSD-3-Clause"
+readme = "README.md"
+
+[lib]
+name = "matchit_route"
+path = "src/lib.rs"
+
+[features]
+__test_helpers = []
+default = []
+
+[[test]]
+name = "insert"
+path = "tests/insert.rs"
+
+[[test]]
+name = "match"
+path = "tests/match.rs"
+
+[[test]]
+name = "merge"
+path = "tests/merge.rs"
+
+[[test]]
+name = "remove"
+path = "tests/remove.rs"
