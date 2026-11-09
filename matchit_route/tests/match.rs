@@ -1,11 +1,5 @@
 use matchit_route::{MatchError, Router};
 
-type MatchExpectation = (
-    &'static str,
-    &'static str,
-    Result<Vec<(&'static str, &'static str)>, ()>,
-);
-
 // https://github.com/ibraheemdev/matchit/issues/22
 #[test]
 fn partial_overlap() {
@@ -67,9 +61,14 @@ fn overlapping_param_backtracking() {
     assert_eq!(matched.params.get("id"), Some("978"));
 }
 
+#[allow(clippy::type_complexity)]
 struct MatchTest {
     routes: Vec<&'static str>,
-    matches: Vec<MatchExpectation>,
+    matches: Vec<(
+        &'static str,
+        &'static str,
+        Result<Vec<(&'static str, &'static str)>, ()>,
+    )>,
 }
 
 impl MatchTest {
@@ -92,7 +91,7 @@ impl MatchTest {
                     assert_eq!(params.unwrap(), got);
 
                     router.at_mut(path).unwrap().value.push('Z');
-                    assert!(router.at(path).unwrap().value.contains("Z"));
+                    assert!(router.at(path).unwrap().value.contains('Z'));
                     router.at_mut(path).unwrap().value.pop();
                 }
                 Err(err) => {
@@ -111,6 +110,16 @@ macro_rules! p {
     };
 }
 
+// https://github.com/ibraheemdev/matchit/issues/75
+#[test]
+fn empty_route() {
+    MatchTest {
+        routes: vec!["", "/foo"],
+        matches: vec![("", "", p! {}), ("/foo", "/foo", p! {})],
+    }
+    .run()
+}
+
 // https://github.com/ibraheemdev/matchit/issues/42
 #[test]
 fn bare_catchall() {
@@ -122,6 +131,16 @@ fn bare_catchall() {
             ("/foo/x/y", "{*foo}", p! { "foo" => "/foo/x/y" }),
             ("foo/x/y", "foo/{*bar}", p! { "bar" => "x/y" }),
         ],
+    }
+    .run()
+}
+
+// https://github.com/ibraheemdev/matchit/issues/83
+#[test]
+fn param_suffix_flag_issue() {
+    MatchTest {
+        routes: vec!["/foo/{foo}suffix", "/foo/{foo}/bar"],
+        matches: vec![("/foo/barsuffix", "/foo/{foo}suffix", p! { "foo" => "bar" })],
     }
     .run()
 }
@@ -609,15 +628,7 @@ fn empty_param() {
 #[test]
 fn wildcard_suffix() {
     MatchTest {
-        routes: vec![
-            "/",
-            "/{foo}x",
-            "/foox",
-            "/{foo}x/bar",
-            "/{foo}x/bar/baz",
-            "/x{foo}",
-            "/x{foo}/bar",
-        ],
+        routes: vec!["/", "/{foo}x", "/foox", "/{foo}x/bar", "/{foo}x/bar/baz"],
         matches: vec![
             ("/", "/", p! {}),
             ("/foox", "/foox", p! {}),
@@ -628,9 +639,9 @@ fn wildcard_suffix() {
             ("/mx/bar", "/{foo}x/bar", p! { "foo" => "m" }),
             ("/mxm/bar", "", Err(())),
             ("/x", "", Err(())),
-            ("/xfoo", "/x{foo}", p! { "foo" => "foo" }),
-            ("/xfoox", "/x{foo}", p! { "foo" => "foox" }),
-            ("/xfoox/bar", "/x{foo}/bar", p! { "foo" => "foox" }),
+            ("/xfoo", "", Err(())),
+            ("/xfoox", "/{foo}x", p! { "foo" => "xfoo" }),
+            ("/xfoox/bar", "/{foo}x/bar", p! { "foo" => "xfoo" }),
             ("/xfoox/bar/baz", "/{foo}x/bar/baz", p! { "foo" => "xfoo" }),
         ],
     }

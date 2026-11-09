@@ -1,14 +1,14 @@
 [package]
 name = "matchit_route"
-version = "0.1.0"
+version = "0.9.2"
 edition = "2024"
 
-description = "A no_std, bumpalo-backed URL router forked from matchit 0.8.6."
+description = "A no_std, bumpalo-backed URL router forked from matchit 0.9.2."
 repository = "https://github.com/ljsnogard/mptp_rpc"
 keywords = ["router", "path", "tree", "match", "url", "no_std"]
 categories = ["network-programming", "algorithms", "no-std"]
 
-# 本 crate 是 matchit 0.8.6 的移植版本，必须保留上游的双许可证。
+# 本 crate 是 matchit 0.9.2 的移植版本，必须保留上游的双许可证。
 license = "MIT AND BSD-3-Clause"
 readme = "README.md"
 
