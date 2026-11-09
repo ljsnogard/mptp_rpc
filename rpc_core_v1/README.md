@@ -16,9 +16,8 @@ against:
 - `RpcRouter<I>`: the inline interface-level router; users register concrete services with
   `add_service::<Impl>(...)`, and `#[rpc(service_of(I))]` adds the required
   `TrRpcService` impl;
-- the queued legacy chain `RpcJob<C>` / `ServiceRoute<C>` / `TrRpcServiceRoute` /
-  `TrRpcRouter` / `RpcRouterHandler`; the concrete two-level trie router lives in the
-  separate `rpc_router_trie` crate;
+- path matching delegated to the single `matchit_route` matcher; the queued legacy chain
+  and the separate `rpc_router_trie` crate were removed;
 - streaming MessagePack body IO: a bounded SPSC ring feeds `send_req_body_async` / chunked
   reply writers, with no whole-body staging buffer.
 

@@ -99,9 +99,8 @@ let server = MptpServer::<ServingCfg, _>::new(router);
 - 未命中写 `404`，非 `Call` 写 `405`；
 - 命中后直接解码、调用 service、写回复、收尾；没有队列，也不替使用者 spawn。
 
-需要队列 / 背压时，可以继续使用 `rpc_router_trie` 的 `RpcRouter` +
-`TrRpcServiceRoute` 装配链（见 `rpc_core_v1::serving` 的旧一代契约），或在外层实现自己的
-`TrReqHandler`。
+路径匹配统一由 `matchit_route` 完成；需要队列 / 背压时，在 `TrReqHandler` 或 target
+内部实现自己的队列，框架不再提供第二套 router 装配链。
 
 ## 使用约束
 

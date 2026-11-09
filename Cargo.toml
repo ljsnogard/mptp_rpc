@@ -7,7 +7,6 @@ members = [
     "matchit_route",
     "mptp_smux",
     "rpc_core_v1",
-    "rpc_router_trie",
     "rpc_svc_macro",
 
     "abs_mptp-tests",

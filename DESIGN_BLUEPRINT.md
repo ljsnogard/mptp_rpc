@@ -216,12 +216,13 @@ let server = MptpServer::<ServingCfg, _>::new(top);
 
 ---
 
-## 实现现状（2026-10-22，Router 重构前）
+## 实现现状（2026-11-10，matchit_route 已接管路径匹配）
 
-> 注意：以下是当前代码（旧 router 形状）的现状记录。router 部分正在按
-> [`dev-notes/router-20261106-0112.md`](dev-notes/router-20261106-0112.md) 的分层 router
-> 方案重新设计，**尚未改代码**；下面的「实际装配形状」是重构前的形状，迁移完成后本节会
-> 更新。
+> 注意：`matchit_route`（matchit 0.8.6 的 no_std 移植）已经接管
+> `mptp_smux::serving::Router` 与 `rpc_core_v1::serving::RpcRouter` 的路径匹配，
+> `rpc_router_trie` 与队列版 router 契约已删除。分层 `RadixRouter` / 子 router / 方法糖
+> 仍按 [`dev-notes/router-20261106-0112.md`](dev-notes/router-20261106-0112.md) 设计，
+> **尚未实施**；下面的「实际装配形状」仍是当前形状。
 
 服务端宏已按「宏只出样板，用户自己组织」重构完成。当前形状：
 
@@ -249,10 +250,12 @@ let server = MptpServer::<ServingCfg, _>::new(top);
   `add_service::<Impl>(closure)` 把具体实现装进 `tlist` 类型级列表，命中后直接解码 /
   dispatch / 回复 / 收尾；
 - `mptp_smux::serving::Router`：顶层 MPTP router，按最长 interface 前缀把请求交给一个
-  `RpcRouter`；它自身实现 `TrReqHandler`，可直接交给 `MptpServer`；
+  `RpcRouter`；它自身实现 `TrReqHandler`，可直接交给 `MptpServer`。interface 前缀匹配
+  由 `matchit_route` 完成；
+- `rpc_core_v1::serving::RpcRouter` 的 service 路径匹配同样委托给 `matchit_route`；
 - 旧的队列链 `RpcJob` / `ServiceRoute` / `TrRpcServiceRoute` / `TrRpcRouter` /
-  `RpcRouterHandler` 仍在 core 中，`rpc_router_trie::RpcRouter` 仍在独立 crate 中，
-  供需要背压或自定义 worker 的使用者显式组合。
+  `RpcRouterHandler` 与 `rpc_router_trie` 已删除（2026-11-10）；需要背压时在
+  handler / target 内部实现队列，不再引入第二套路径匹配算法。
 
 ### 当前实际装配形状（旧）
 
