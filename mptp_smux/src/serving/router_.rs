@@ -6,7 +6,8 @@
 //! 答案，硬造一条链只会把这件事变成框架的猜谜。
 //!
 //! 匹配规则是**最长前缀**：登记 `/topic` 与 `/topic/chat` 时，`/topic/chat/42` 命中后者。
-//! 同一前缀重复登记时，**后登记的那条**生效。
+//! 同一前缀重复登记时，**后登记的那条**生效。内部把每条前缀展开成 `matchit_route` 的
+//! 精确规则 + `{*rest}` catch-all，因此项目里只有一套路径匹配算法。
 //!
 //! # 两个层次的 router
 //!
@@ -35,10 +36,12 @@
 //! on the request path.
 
 use core::marker::PhantomData;
+use std::sync::OnceLock;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{serving::TrReqHandler, spec::access_method::AccessMethod};
 use gen_mcf2::gen_may_cancel_future;
+use matchit_route::Router as MatchitRouter;
 use thiserror::Error;
 use tlist::{TCons, TList, TNil};
 
@@ -177,6 +180,9 @@ pub struct Router<C, R: TrRouteValues = TNil> {
     /// 已登记的路由运行期值；顺序与类型列表的头尾对应。
     routes_: R::Values,
 
+    /// 第一次匹配时由类型列表构建的 `matchit_route` 索引表。
+    matcher_: OnceLock<MatchitRouter<usize>>,
+
     /// `C` 只出现在 handler 的约束里。
     _cfg_: PhantomData<fn() -> C>,
 }
@@ -186,6 +192,7 @@ impl<C> Router<C, TNil> {
     pub const fn new() -> Self {
         Router {
             routes_: RouteValues::Nil,
+            matcher_: OnceLock::new(),
             _cfg_: PhantomData,
         }
     }
@@ -208,7 +215,11 @@ impl<C, R: TrRouteValues> Router<C, R> {
         make_handler: impl FnOnce(&RouterCtx<C>) -> H,
     ) -> Router<C, TCons<H, R>> {
         let ctx = RouterCtx::<C>::new();
-        let Router { routes_, _cfg_: _ } = self;
+        let Router {
+            routes_,
+            matcher_: _,
+            _cfg_: _,
+        } = self;
 
         Router {
             routes_: RouteValues::Cons {
@@ -216,6 +227,7 @@ impl<C, R: TrRouteValues> Router<C, R> {
                 handler_: make_handler(&ctx),
                 tail_: routes_,
             },
+            matcher_: OnceLock::new(),
             _cfg_: PhantomData,
         }
     }
@@ -263,23 +275,6 @@ where
     RouterError::Handler(err.to_string())
 }
 
-/// 返回 `prefix` 在 `path` 上的前缀长度；按完整路径段比较。
-///
-/// 空前缀匹配一切（长度为 0）；`api/v1` 不会命中 `api/v10`。
-fn path_prefix_len_(prefix: &str, path: &str) -> Option<usize> {
-    let prefix = prefix.trim_matches('/');
-    let path = path.trim_matches('/');
-    if prefix.is_empty() {
-        return Option::Some(0usize);
-    }
-    match path.strip_prefix(prefix) {
-        Option::Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            Option::Some(prefix.len())
-        }
-        _ => Option::None,
-    }
-}
-
 /// 一个顶层 handler 类型列表：按前缀匹配，并按索引分派。
 ///
 /// 本 trait 由 `tlist` 的 [`TNil`] / [`TCons`] 实现；使用者不需要手写实现。
@@ -288,10 +283,10 @@ pub trait TrPathRouterList<C>: TrRouteValues
 where
     C: TrConfig,
 {
-    /// 返回命中的 `(索引, 命中路径长度)`；索引从列表头开始。
-    fn match_route(routes: &Self::Values, location: &str) -> Option<(usize, usize)>;
+    /// 把本列表的前缀登记到 `matchit_route` 索引表；`offset` 是当前头节点在列表中的索引。
+    fn register_routes(values: &Self::Values, registry: &mut MatchitRouter<usize>, offset: usize);
 
-    /// 按索引分派；`index` 必须来自 [`Self::match_route`]。
+    /// 按索引分派；`index` 来自 `matchit_route` 索引表。
     fn dispatch_at<'f>(
         routes: &'f Self::Values,
         index: usize,
@@ -309,8 +304,11 @@ impl<C> TrPathRouterList<C> for TNil
 where
     C: TrConfig,
 {
-    fn match_route(_routes: &Self::Values, _location: &str) -> Option<(usize, usize)> {
-        Option::None
+    fn register_routes(
+        _values: &Self::Values,
+        _registry: &mut MatchitRouter<usize>,
+        _offset: usize,
+    ) {
     }
 
     fn dispatch_at<'f>(
@@ -336,28 +334,13 @@ where
     H::Err: 'static,
     T: TrPathRouterList<C>,
 {
-    fn match_route(routes: &Self::Values, location: &str) -> Option<(usize, usize)> {
-        let RouteValues::Cons { prefix_, tail_, .. } = routes else {
+    fn register_routes(values: &Self::Values, registry: &mut MatchitRouter<usize>, offset: usize) {
+        let RouteValues::Cons { prefix_, tail_, .. } = values else {
             unreachable!("Router 内部不变量：TCons 对应的运行期路由不是 Cons")
         };
 
-        let head_len = path_prefix_len_(prefix_, location);
-        let tail = T::match_route(tail_, location);
-
-        match (head_len, tail) {
-            (Option::Some(head_len), Option::Some((tail_index, tail_len))) => {
-                if head_len >= tail_len {
-                    Option::Some((0usize, head_len))
-                } else {
-                    Option::Some((tail_index + 1usize, tail_len))
-                }
-            }
-            (Option::Some(head_len), Option::None) => Option::Some((0usize, head_len)),
-            (Option::None, Option::Some((tail_index, tail_len))) => {
-                Option::Some((tail_index + 1usize, tail_len))
-            }
-            (Option::None, Option::None) => Option::None,
-        }
+        register_prefix_(registry, prefix_, offset);
+        T::register_routes(tail_, registry, offset + 1);
     }
 
     fn dispatch_at<'f>(
@@ -396,6 +379,57 @@ where
             ))
         }
     }
+}
+
+impl<C, R> Router<C, R>
+where
+    C: TrConfig,
+    R: TrPathRouterList<C>,
+{
+    /// 返回命中的路由索引；首次调用时构建索引表。
+    fn match_index_(&self, location: &str) -> Option<usize> {
+        let registry = self.matcher_.get_or_init(|| {
+            let mut registry = MatchitRouter::new();
+            R::register_routes(&self.routes_, &mut registry, 0);
+            registry
+        });
+
+        registry
+            .at(location.trim_matches('/'))
+            .ok()
+            .map(|matched| *matched.value)
+    }
+}
+
+/// 把一条静态前缀登记成“精确路径 + catch-all”两条规则。
+///
+/// 重复前缀由调用顺序决定：列表头（后登记）先注册，冲突时 matchit_route 返回
+/// `InsertError::Conflict`，这里直接忽略，于是后登记的那条生效。
+fn register_prefix_(registry: &mut MatchitRouter<usize>, prefix: &str, index: usize) {
+    let path = escape_static_(prefix);
+
+    if path.is_empty() {
+        let _ = registry.insert("", index);
+        let _ = registry.insert("{*rest}", index);
+    } else {
+        let _ = registry.insert(path.as_str(), index);
+        let _ = registry.insert(format!("{path}/{{*rest}}"), index);
+    }
+}
+
+/// 把前缀里的 `{` / `}` 转义成字面量，保持“前缀是静态路径”的旧语义。
+fn escape_static_(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+
+    for c in path.trim_matches('/').chars() {
+        match c {
+            '{' => escaped.push_str("{{"),
+            '}' => escaped.push_str("}}"),
+            _ => escaped.push(c),
+        }
+    }
+
+    escaped
 }
 
 impl<C, R> TrReqHandler<C> for Router<C, R>
@@ -439,7 +473,7 @@ where
     R: TrPathRouterList<C> + 'f,
     K: TrCancellationToken,
 {
-    let Option::Some((index, _)) = R::match_route(&router.routes_, location) else {
+    let Option::Some(index) = router.match_index_(location) else {
         return Result::Err(RouterError::NotFound(location.to_string()));
     };
 
@@ -452,31 +486,44 @@ where
 mod tests_ {
     use super::*;
 
-    /// 测试前缀匹配按完整路径段工作。
-    /// Test that prefix matching works on complete path segments.
+    /// 测试前缀索引表按完整路径段选择最长前缀。
+    /// Test that the prefix registry selects the longest prefix on segment boundaries.
     ///
-    /// - 手段：分别用 `api/v1` 匹配 `api/v1`、`/api/v1/`、`api/v10` 与 `api`。
-    /// - 判断：前两者得到前缀长度，后两者不命中。
+    /// - 手段：把 `api/v1`、`api` 与空前缀（回退）登记到 `matchit_route` 索引表。
+    /// - 判断：`api/v1/goods` 命中更长的 `api/v1`，`api/v10` 命中 `api`，其它路径命中回退。
     ///
-    /// - Means: match `api/v1` against an exact path, a slashed path, `api/v10` and `api`.
-    /// - Verdict: the first two hit; the last two do not.
+    /// - Means: register `api/v1`, `api` and the empty fallback prefix.
+    /// - Verdict: deeper paths hit the longer prefix, lookalikes hit `api`, and the rest
+    ///   fall back to the empty prefix.
     #[test]
-    fn matches_complete_segments_() {
-        assert_eq!(path_prefix_len_("api/v1", "api/v1"), Some(6usize));
-        assert_eq!(path_prefix_len_("/api/v1/", "/api/v1/goods"), Some(6usize));
-        assert_eq!(path_prefix_len_("api/v1", "api/v10"), None);
-        assert_eq!(path_prefix_len_("api/v1", "api"), None);
-        assert_eq!(path_prefix_len_("", "anything"), Some(0usize));
+    fn prefix_registry_matches_longest_() {
+        let mut registry = MatchitRouter::new();
+        register_prefix_(&mut registry, "api", 1usize);
+        register_prefix_(&mut registry, "api/v1", 2usize);
+        register_prefix_(&mut registry, "", 0usize);
+
+        let index = |path: &str| {
+            registry
+                .at(path.trim_matches('/'))
+                .ok()
+                .map(|matched| *matched.value)
+        };
+
+        assert_eq!(index("api/v1/goods"), Some(2));
+        assert_eq!(index("api/v1"), Some(2));
+        assert_eq!(index("api/v10"), Some(1));
+        assert_eq!(index("other"), Some(0));
+        assert_eq!(index(""), Some(0));
     }
 
-    /// 测试顶层 Router 按最长前缀分派并返回自身作为 handler。
-    /// Test that the top-level Router dispatches by longest prefix and returns itself.
+    /// 测试顶层 Router 能登记多条路由并返回自身作为 handler。
+    /// Test that the top-level Router registers routes and returns itself as handler.
     ///
     /// - 手段：构造一个带 `api` 与 `api/v1` 两条路由的 Router。
-    /// - 判断：`match_path` 返回自身；路径匹配辅助函数选择更长前缀。
+    /// - 判断：`match_path` 返回自身，`route` 的链式构造可用。
     ///
     /// - Means: build a Router with `api` and `api/v1` rules.
-    /// - Verdict: `match_path` returns itself and the helper picks the longer prefix.
+    /// - Verdict: `match_path` returns itself and chained construction works.
     #[test]
     fn builds_top_router_() {
         struct A;
@@ -492,10 +539,6 @@ mod tests_ {
 
         let router = Router::<(), _>::new().call(|_| A).call(|_| B);
         assert!(router.match_path("api/v1/goods").is_some());
-        assert!(
-            path_prefix_len_("api/v1", "api/v1/goods").unwrap()
-                > path_prefix_len_("api", "api/v1/goods").unwrap()
-        );
     }
 
     /// 测试 tlist 路由列表没有固定元组长度上限。

@@ -9,8 +9,8 @@
 //!
 //! - router 持有 service 实现本身，不生成队列，也不替使用者 spawn；
 //! - 一个请求在 router 的 `handle_async` 里直接解码、调用 service、写回复、收尾；
-//! - 需要队列 / 背压的使用者可以在外层包自己的 `TrReqHandler`，或继续使用
-//!   `rpc_router_trie` 的队列版本。
+//! - service 路径匹配统一交给 `matchit_route`；队列 / 背压需求由使用者在自己的
+//!   handler 或 target 内部实现，框架不再保留第二套 router。
 //!
 //! # 任意数量的 service
 //!
@@ -38,6 +38,7 @@
 //! and no downcast are involved.
 
 use core::marker::PhantomData;
+use std::sync::OnceLock;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
@@ -46,6 +47,7 @@ use abs_mptp::{
 };
 use abs_rpc_serv::service::TrRpcService;
 use gen_mcf2::gen_may_cancel_future;
+use matchit_route::Router as MatchitRouter;
 use mptp_smux::{
     messaging::Headers,
     serving::{
@@ -123,10 +125,10 @@ where
     I: TrRpcInterface,
     C: TrServingConfig,
 {
-    /// 返回命中的 `(索引, 命中路径长度)`；索引从列表头开始。
-    fn match_service(rest: &str) -> Option<(usize, usize)>;
+    /// 把本列表的 service 路径登记到 `matchit_route` 索引表。
+    fn register_routes(registry: &mut MatchitRouter<usize>, offset: usize);
 
-    /// 按索引分派；`index` 必须来自 [`Self::match_service`]。
+    /// 按索引分派；`index` 来自 `matchit_route` 登记表。
     fn dispatch_at<'a, 'f>(
         services: &'f Self::Values,
         index: usize,
@@ -142,9 +144,7 @@ where
     I: TrRpcInterface,
     C: TrServingConfig,
 {
-    fn match_service(_rest: &str) -> Option<(usize, usize)> {
-        Option::None
-    }
+    fn register_routes(_registry: &mut MatchitRouter<usize>, _offset: usize) {}
 
     fn dispatch_at<'a, 'f>(
         _services: &'f Self::Values,
@@ -166,24 +166,9 @@ where
     H: TrRpcService<I, C, Err = RpcError>,
     T: TrRpcServiceList<I, C>,
 {
-    fn match_service(rest: &str) -> Option<(usize, usize)> {
-        let head_len = path_prefix_len_(<H as TrRpcService<I, C>>::SERVICE_PATH, rest);
-        let tail = T::match_service(rest);
-
-        match (head_len, tail) {
-            (Option::Some(head_len), Option::Some((tail_index, tail_len))) => {
-                if head_len >= tail_len {
-                    Option::Some((0usize, head_len))
-                } else {
-                    Option::Some((tail_index + 1usize, tail_len))
-                }
-            }
-            (Option::Some(head_len), Option::None) => Option::Some((0usize, head_len)),
-            (Option::None, Option::Some((tail_index, tail_len))) => {
-                Option::Some((tail_index + 1usize, tail_len))
-            }
-            (Option::None, Option::None) => Option::None,
-        }
+    fn register_routes(registry: &mut MatchitRouter<usize>, offset: usize) {
+        register_service_(registry, <H as TrRpcService<I, C>>::SERVICE_PATH, offset);
+        T::register_routes(registry, offset + 1);
     }
 
     fn dispatch_at<'a, 'f>(
@@ -231,6 +216,9 @@ pub struct RpcRouter<I, S: TrRpcServiceValues = TNil> {
     /// 已装入的 service 运行期值；顺序与类型列表的头尾对应。
     services_: S::Values,
 
+    /// 第一次匹配时由类型列表构建的 `matchit_route` 索引表。
+    routes_: OnceLock<MatchitRouter<usize>>,
+
     /// `I` 只出现在路径与 trait 约束里。
     _interface_: PhantomData<fn() -> I>,
 }
@@ -242,6 +230,7 @@ impl<I> RpcRouter<I, TNil> {
     pub const fn new<C>(_ctx: &RouterCtx<C>) -> Self {
         RpcRouter {
             services_: ServiceValues::Nil,
+            routes_: OnceLock::new(),
             _interface_: PhantomData,
         }
     }
@@ -264,11 +253,13 @@ where
         let ctx = RpcServiceCtx::new();
         let RpcRouter {
             services_,
+            routes_: _,
             _interface_: _,
         } = self;
 
         RpcRouter {
             services_: ServiceValues::Cons(make_service(&ctx), services_),
+            routes_: OnceLock::new(),
             _interface_: PhantomData,
         }
     }
@@ -282,19 +273,27 @@ where
     const PATH: &'static str = I::PATH;
 }
 
-/// 返回 `prefix` 在 `path` 上的前缀长度；按完整路径段比较。
-fn path_prefix_len_(prefix: &str, path: &str) -> Option<usize> {
-    let prefix = prefix.trim_matches('/');
-    let path = path.trim_matches('/');
-    if prefix.is_empty() {
-        return Option::Some(0usize);
-    }
-    match path.strip_prefix(prefix) {
-        Option::Some(rest) if rest.is_empty() || rest.starts_with('/') => {
-            Option::Some(prefix.len())
+/// 把一条 service 路径登记到 `matchit_route` 索引表。
+///
+/// service 路径是静态路径，因此把 `{` / `}` 转义成字面量；重复路径由列表头
+/// （后登记）先注册，冲突时忽略，于是后登记的那条生效。
+fn register_service_(registry: &mut MatchitRouter<usize>, path: &str, index: usize) {
+    let _ = registry.insert(escape_static_(path), index);
+}
+
+/// 把静态路径里的 `{` / `}` 转义成字面量。
+fn escape_static_(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+
+    for c in path.trim_matches('/').chars() {
+        match c {
+            '{' => escaped.push_str("{{"),
+            '}' => escaped.push_str("}}"),
+            _ => escaped.push(c),
         }
-        _ => Option::None,
     }
+
+    escaped
 }
 
 /// 剥掉 interface 前缀，返回 service 相对路径。
@@ -405,7 +404,16 @@ where
         .await;
     };
 
-    let Option::Some((index, _)) = S::match_service(rest) else {
+    let registry = router.routes_.get_or_init(|| {
+        let mut registry = MatchitRouter::new();
+        S::register_routes(&mut registry, 0);
+        registry
+    });
+    let Option::Some(index) = registry
+        .at(rest.trim_matches('/'))
+        .ok()
+        .map(|matched| *matched.value)
+    else {
         return reject_async_::<C, K>(
             Status::NotFound,
             location.to_string(),
@@ -448,19 +456,30 @@ mod tests_ {
         assert_eq!(strip_interface_prefix_("api/v1", "/api/v1"), Some(""));
     }
 
-    /// 测试 service 前缀匹配按完整路径段工作。
-    /// Test that service-prefix matching works on complete segments.
+    /// 测试 service 索引表使用精确路径匹配。
+    /// Test that the service registry matches exact service paths.
     ///
-    /// - 手段：用 `goods` 匹配 `goods`、`goods/1`、`goods2`。
-    /// - 判断：前两者命中，最后一个不命中。
+    /// - 手段：登记 `goods` 与 `goods/special` 两条 service 路径。
+    /// - 判断：两条各自命中；`goods/1` 不属于任何 service，保持未命中。
     ///
-    /// - Means: match `goods` against `goods`, `goods/1` and `goods2`.
-    /// - Verdict: the first two hit and the last one does not.
+    /// - Means: register `goods` and `goods/special` service paths.
+    /// - Verdict: each exact path hits, while `goods/1` stays unmatched.
     #[test]
-    fn matches_service_prefix_() {
-        assert_eq!(path_prefix_len_("goods", "goods"), Some(5usize));
-        assert_eq!(path_prefix_len_("goods", "goods/1"), Some(5usize));
-        assert_eq!(path_prefix_len_("goods", "goods2"), None);
+    fn service_registry_matches_exact_() {
+        let mut registry = MatchitRouter::new();
+        register_service_(&mut registry, "goods", 0usize);
+        register_service_(&mut registry, "goods/special", 1usize);
+
+        let index = |path: &str| {
+            registry
+                .at(path.trim_matches('/'))
+                .ok()
+                .map(|matched| *matched.value)
+        };
+
+        assert_eq!(index("goods"), Some(0));
+        assert_eq!(index("goods/special"), Some(1));
+        assert_eq!(index("goods/1"), None);
     }
 
     /// 测试 tlist 列表没有固定元组长度上限，且运行期用枚举存放实体。

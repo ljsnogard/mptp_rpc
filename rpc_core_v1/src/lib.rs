@@ -13,9 +13,7 @@
 //! - interface 级内联 router [`crate::serving::RpcRouter`]：用户用 `add_service` 装具体
 //!   service 实现，命中后直接 dispatch；`#[rpc(service_of(...))]` 为 impl 类型补上
 //!   `abs_rpc_serv::service::TrRpcService`；
-//! - 队列版旧契约 [`crate::serving::RpcJob`] / [`crate::serving::ServiceRoute`] /
-//!   [`crate::serving::TrRpcServiceRoute`] / [`crate::serving::TrRpcRouter`] /
-//!   [`crate::serving::RpcRouterHandler`]：保留给需要背压或自定义 worker 的使用者；
+//! - service 路径匹配统一使用 `matchit_route`；队列版旧契约与 `rpc_router_trie` 已移除；
 //! - body 的 MessagePack 流式编解码：ring 边编码边发送，定长 / 分块帧都可解码。
 //!
 //! `#[rpc(service = "...")]` 只生成 trait 常量、body enum、客户端代理与服务端 dispatch；
@@ -48,8 +46,9 @@
 //! └───────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! 内联 [`crate::serving::RpcRouter`] 就在本 crate；队列版前缀树实现仍在
-//! `rpc_router_trie`，供需要 worker / 背压的使用者选用。
+//! [`crate::serving::RpcRouter`] 就在本 crate；它和 `mptp_smux::serving::Router` 都把
+//! 路径匹配委托给 `matchit_route`，项目里只有这一套路径匹配算法。需要 worker / 背压时，
+//! 在 handler 或 target 内部实现，不再拆出第二种 router。
 //!
 //! # 为什么两端在同一个库里
 //!
@@ -61,10 +60,9 @@
 //!
 //! Phase 1 provides the runtime behind `#[rpc]`: the unified error type, interface path
 //! composition, the minimal client proxy with unary calls, the per-call serving context,
-//! the inline interface-level [`crate::serving::RpcRouter`], the queued legacy router
-//! contracts, and MessagePack body IO. The concrete trie for the queued router lives in
-//! `rpc_router_trie`; the wire format belongs to [`mptp_smux`], and body framing belongs to
-//! `abs_mptp`.
+//! the interface-level [`crate::serving::RpcRouter`], and MessagePack body IO. Path matching
+//! is delegated to `matchit_route`; the wire format belongs to [`mptp_smux`], and body
+//! framing belongs to `abs_mptp`.
 
 #![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
