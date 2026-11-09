@@ -1,4 +1,4 @@
-//! 高性能、零拷贝 URL router 的 `no_std` 移植版（源自 `matchit` 0.8.6）。
+//! 高性能、零拷贝 URL router 的 `no_std` 移植版（源自 `matchit` 0.9.2）。
 //!
 //! 路由规则在构建完成后保持内存稳定：整棵基数树、节点前缀与参数名都放在 router
 //! 自有的 `bumpalo` arena 里；`Router` 被丢弃时，值先析构，arena 随后整体释放。
@@ -58,6 +58,13 @@
 //! assert_eq!(*router.at("/other").unwrap().value, "catch-all");
 //! ```
 //!
+//! # 冲突规则（0.9.2）
+//!
+//! 0.9.2 收紧了前缀参数与后缀参数的冲突规则：静态段可以任意重叠；同一段内，带后缀的
+//! 参数之间按最长后缀优先，带前缀的参数之间按最长前缀优先；但“前缀参数 + 后缀参数”
+//! 指向同一段时视为歧义，插入返回 [`InsertError::Conflict`]。catch-all 仍与带后缀参数
+//! 冲突。完整的规则见 crate 文档的英文说明与上游 `matchit` 0.9.2。
+//!
 //! # 内存模型
 //!
 //! - `Router<T>` 自己持有一个 `bumpalo::Bump`，节点用 `bumpalo::boxed::Box` 持有值，
@@ -69,7 +76,7 @@
 //!
 //! # `matchit_route`: a no_std port of matchit
 //!
-//! A zero-copy URL router with `matchit`'s API and matching algorithm. The routing
+//! A zero-copy URL router with `matchit` 0.9.2's API and matching algorithm. The routing
 //! tree lives in a router-owned bump arena; only transient data (parameter overflow,
 //! backtracking stack and error messages) uses the global allocator. Values are kept
 //! in `bumpalo::boxed::Box`, so dropping the router runs their destructors before the

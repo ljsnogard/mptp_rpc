@@ -91,7 +91,7 @@ impl InsertError {
             route.append(&current.prefix);
         }
 
-        // 继续拼上冲突子树的最左侧路径。
+        // 拼上第一个冲突子节点的前缀。
         let mut child = current.children.first();
         while let Some(node) = child {
             route.append(&node.prefix);
@@ -125,7 +125,7 @@ impl MergeError {
 impl fmt::Display for MergeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for error in self.0.iter() {
-            writeln!(f, "{}", error)?;
+            writeln!(f, "{error}")?;
         }
 
         Ok(())

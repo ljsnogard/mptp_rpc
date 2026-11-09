@@ -1,6 +1,6 @@
 # `matchit_route`
 
-`matchit_route` 是 [`matchit`](https://github.com/ibraheemdev/matchit) 0.8.6 的
+`matchit_route` 是 [`matchit`](https://github.com/ibraheemdev/matchit) 0.9.2 的
 `no_std` 移植版，保留上游的匹配算法与公开 API 形状：
 
 - 路由树、节点前缀与参数名表放在 router 自有的 `bumpalo` arena 里；
@@ -9,12 +9,10 @@
 - 参数表溢出、回溯栈与错误信息这类一次性数据使用全局分配器；
 - 因为值存放在 arena 里，`Router<T>` 要求 `T: 'static`。
 
-`matchit_route` is a `no_std` port of `matchit` 0.8.6. The routing tree lives in a
+`matchit_route` is a `no_std` port of `matchit` 0.9.2. The routing tree lives in a
 router-owned bump arena; values are kept in `bumpalo::boxed::Box` so dropping the
 router runs their destructors before the arena is released. Only transient data uses
 the global allocator, and `T: 'static` is required because values live in the arena.
-
-A high performance, zero-copy URL router.
 
 ```rust
 use matchit_route::Router;
@@ -39,61 +37,90 @@ The router supports dynamic route segments. These can either be named or catch-a
 Named parameters like `/{id}` match anything until the next static segment or the end of the path.
 
 ```rust,ignore
-let mut m = Router::new();
-m.insert("/users/{id}", true)?;
+let mut router = Router::new();
+router.insert("/users/{id}", 42)?;
 
-assert_eq!(m.at("/users/1")?.params.get("id"), Some("1"));
-assert_eq!(m.at("/users/23")?.params.get("id"), Some("23"));
-assert!(m.at("/users").is_err());
+let matched = router.at("/users/1")?;
+assert_eq!(matched.params.get("id"), Some("1"));
+
+let matched = router.at("/users/23")?;
+assert_eq!(matched.params.get("id"), Some("23"));
+
+assert!(router.at("/users").is_err());
 ```
 
 Prefixes and suffixes within a segment are also supported. However, there may only be a single named parameter per route segment.
 ```rust,ignore
-let mut m = Router::new();
-m.insert("/images/img{id}.png", true)?;
+let mut router = Router::new();
+router.insert("/images/img-{id}.png", true)?;
 
-assert_eq!(m.at("/images/img1.png")?.params.get("id"), Some("1"));
-assert!(m.at("/images/img1.jpg").is_err());
+let matched = router.at("/images/img-1.png")?;
+assert_eq!(matched.params.get("id"), Some("1"));
+
+assert!(router.at("/images/img-1.jpg").is_err());
 ```
 
-Catch-all parameters start with `*` and match anything until the end of the path. They must always be at the **end** of the route.
+Catch-all parameters start with a `*` and match anything until the end of the path. They must always be at the *end* of the route.
 
 ```rust,ignore
-let mut m = Router::new();
-m.insert("/{*p}", true)?;
+let mut router = Router::new();
+router.insert("/{*rest}", true)?;
 
-assert_eq!(m.at("/foo.js")?.params.get("p"), Some("foo.js"));
-assert_eq!(m.at("/c/bar.css")?.params.get("p"), Some("c/bar.css"));
+let matched = router.at("/foo.html")?;
+assert_eq!(matched.params.get("rest"), Some("foo.html"));
 
-// Note that this would lead to an empty parameter.
-assert!(m.at("/").is_err());
+let matched = router.at("/static/bar.css")?;
+assert_eq!(matched.params.get("rest"), Some("static/bar.css"));
+
+// Note that this would lead to an empty parameter value.
+assert!(router.at("/").is_err());
 ```
 
 The literal characters `{` and `}` may be included in a static route by escaping them with the same character.
-For example, the `{` character is escaped with `{{` and the `}` character is escaped with `}}`.
+For example, the `{` character is escaped with `{{`, and the `}` character is escaped with `}}`.
 
 ```rust,ignore
-let mut m = Router::new();
-m.insert("/{{hello}}", true)?;
-m.insert("/{hello}", true)?;
+let mut router = Router::new();
+router.insert("/{{hello}}", true)?;
+router.insert("/{hello}", true)?;
 
 // Match the static route.
-assert!(m.at("/{hello}")?.value);
+let matched = router.at("/{hello}")?;
+assert!(matched.params.is_empty());
 
 // Match the dynamic route.
-assert_eq!(m.at("/hello")?.params.get("hello"), Some("hello"));
+let matched = router.at("/hello")?;
+assert_eq!(matched.params.get("hello"), Some("hello"));
 ```
 
-## Routing Priority
+## Conflict Rules
 
 Static and dynamic route segments are allowed to overlap. If they do, static segments will be given higher priority:
 
 ```rust,ignore
-let mut m = Router::new();
-m.insert("/", "Welcome!").unwrap();      // Priority: 1
-m.insert("/about", "About Me").unwrap(); // Priority: 1
-m.insert("/{*filepath}", "...").unwrap();  // Priority: 2
+let mut router = Router::new();
+router.insert("/", "Welcome!").unwrap();       // Priority: 1
+router.insert("/about", "About Me").unwrap();  // Priority: 1
+router.insert("/{*filepath}", "...").unwrap();  // Priority: 2
 ```
+
+Formally, a route consists of a list of segments separated by `/`, with an optional leading and trailing slash: `(/)<segment_1>/.../<segment_n>(/)`.
+
+Given set of routes, their overlapping segments may include, in order of priority:
+
+- Any number of static segments (`/a`, `/b`, ...).
+- *One* of the following:
+  - Any number of route parameters with a suffix (`/{x}a`, `/{x}b`, ...), prioritizing the longest suffix.
+  - Any number of route parameters with a prefix (`/a{x}`, `/b{x}`, ...), prioritizing the longest prefix.
+  - A single route parameter with both a prefix and a suffix (`/a{x}b`).
+- *One* of the following;
+  - A single standalone parameter (`/{x}`).
+  - A single standalone catch-all parameter (`/{*rest}`). Note this only applies to the final route segment.
+
+Any other combination of route segments is considered ambiguous, and attempting to insert such a route will result in an error.
+
+The one exception to the above set of rules is that catch-all parameters are always considered to conflict with suffixed route parameters, i.e. that `/{*rest}`
+and `/{x}suffix` are overlapping. This is due to an implementation detail of the routing tree that may be relaxed in the future.
 
 ## How does it work?
 

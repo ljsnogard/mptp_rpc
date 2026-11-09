@@ -218,7 +218,7 @@ let server = MptpServer::<ServingCfg, _>::new(top);
 
 ## 实现现状（2026-11-10，matchit_route 已接管路径匹配）
 
-> 注意：`matchit_route`（matchit 0.8.6 的 no_std 移植）已经接管
+> 注意：`matchit_route`（matchit 0.9.2 的 no_std 移植）已经接管
 > `mptp_smux::serving::Router` 与 `rpc_core_v1::serving::RpcRouter` 的路径匹配，
 > `rpc_router_trie` 与队列版 router 契约已删除。分层 `RadixRouter` / 子 router / 方法糖
 > 仍按 [`dev-notes/router-20261106-0112.md`](dev-notes/router-20261106-0112.md) 设计，

@@ -13,6 +13,15 @@ pub(crate) struct Param<'k, 'v> {
     pub(crate) value: &'v [u8],
 }
 
+impl<'k, 'v> fmt::Debug for Param<'k, 'v> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Param")
+            .field("key", &self.key_str())
+            .field("value", &self.value_str())
+            .finish()
+    }
+}
+
 impl<'k, 'v> Param<'k, 'v> {
     const EMPTY: Param<'static, 'static> = Param {
         key: b"",
@@ -177,6 +186,7 @@ impl fmt::Debug for Params<'_, '_> {
 }
 
 /// [`Params`] 的迭代器。
+#[derive(Debug)]
 pub struct ParamsIter<'ps, 'k, 'v> {
     kind: ParamsIterKind<'ps, 'k, 'v>,
 }
@@ -193,6 +203,7 @@ impl<'ps, 'k, 'v> ParamsIter<'ps, 'k, 'v> {
 }
 
 /// 两种底层迭代器。
+#[derive(Debug)]
 enum ParamsIterKind<'ps, 'k, 'v> {
     /// 内联数组的 `take`。
     Small(iter::Take<slice::Iter<'ps, Param<'k, 'v>>>),
