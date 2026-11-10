@@ -1,7 +1,7 @@
 # `mptp_smux` 重构设计：七种 AccessMethod 标准实现 + `no_std` + feature 边界
 
 - 日期：2026-11-11 07:30（根据评审意见修订）
-- 状态：**设计草案 v2，待公开 API 破坏性变更清单确认后实施**
+- 状态：**设计草案（评审修订版），已确认实施**
 - 基线：分支 `feat/mptp_wire`，提交 `3a7beb8`；当前工作分支
   `feat/mptp-smux-refactor`
 - 范围：`mptp_smux` 的客户端 / 服务端标准 API、错误类型、`no_std` 边界、
