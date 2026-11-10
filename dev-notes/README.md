@@ -18,6 +18,9 @@
   以及「资源 = handle + 绑定、不抽 `TrResource` trait」的资源模型；含 trait 设计与示例
   用法。初稿的两层 router / 全局单表 / level+interface+scope / 静态动态双入口等方案已被
   取代。
+- [`mptp-smux-20261110-0730.md`](mptp-smux-20261110-0730.md)：`mptp_smux` 的职责
+  边界与 README 依据：MPTP over `smux_v1` 的定位、与未来 `mptp_quic` 的共通点、
+  当前各层使用方式、越界与缺口，以及 `client` / `server` feature 的目标划分。
 - [`matchit-no_std-20261110-0520.md`](matchit-no_std-20261110-0520.md)：`matchit_route`
   的 no_std / bumpalo 移植：router 自有 arena、`T: 'static`、`Send` / `Sync` 的安全
   论证，以及第 3 步删除 `rpc_router_trie`、统一为一套路径匹配算法的计划。
