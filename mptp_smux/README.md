@@ -9,7 +9,7 @@
 > README 中的 `client` / `server` feature 是**重构目标**，尚未落地；文中凡标「目标」的条目
 > 都不应当作已实现能力使用。
 >
-> 前缀线格式已经抽到 [`mptp_wire`](../mptp_wire/README.md)：`mptp_smux` 通过
+> 前缀与体格式已经抽到 [`mptp_wire`](../mptp_wire/README.md)：`mptp_smux` 通过
 > `mptp_smux::messaging` 兼容别名继续暴露原来的类型与读写入口。
 
 ## 它是什么
@@ -54,6 +54,37 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## `mptp_wire` 分离后，这一层还剩什么
+
+`mptp_wire` 已经负责「字节 ↔ MPTP 前缀 / 头表 / 限长体 / 分块体」。因此
+`mptp_smux`（以及未来的 `mptp_quic`）剩下的不是编码，而是：
+
+| 职责 | `mptp_wire` | `mptp_smux` | `mptp_quic`（未来） |
+| --- | --- | --- | --- |
+| 前缀 / 头表 / 体格式的字节编解码 | **负责** | 不负责 | 不负责 |
+| 一次请求的会话顺序（前缀 → 体 → 后缀 → 半关闭） | 不负责 | **当前负责**（`MptpSession`） | 应复用同一份会话逻辑 |
+| 子流 open / accept / reset | 不负责 | smux 绑定 | QUIC 绑定 |
+| 子流标识 | 不负责 | dock | stream ID |
+| 每子流内存 / 缓冲 | 不负责 | ring 注入 | QUIC buffer / flow control |
+| 半关闭 / reset 的传输映射 | 不负责 | smux FIN / RESET | QUIC FIN / RESET_STREAM |
+| 客户端 / 服务端角色包装 | 不负责 | `MptpClient` / `MptpServer` | 对应 QUIC 包装 |
+| 一次请求交给 handler | 不负责 | 服务端 accept 循环 | 对应 QUIC accept 循环 |
+| 取消传播 | 不负责 | 传输 await 点 | 传输 await 点 |
+| 应用路由 | 不负责 | **可选接缝，不是核心** | 同左 |
+
+换句话说：
+
+- **`mptp_wire` 决定「线上长什么样」；**
+- **`mptp_smux` / `mptp_quic` 决定「这条子流怎么建立、怎么交付、怎么收尾」；**
+- **客户端的 `MptpSession` 与服务端的 per-channel 驱动决定「一次请求内部的先后顺序」——
+  它们目前住在 `mptp_smux`，但逻辑本身不是 smux 特有的**。
+
+`MptpSession` 是当前最大的共享候选：如果 `mptp_quic` 复制一份会话状态机，两套实现会
+逐渐漂移；如果让 `mptp_quic` 依赖 `mptp_smux`，又会把 smux 的 dock / ring 带进 QUIC。
+目标形态是把它抽成传输无关的 `mptp_session`（或 `abs_mptp` 中的泛型会话），由各传输绑定
+提供「双向字节流 + 半关闭」；详见
+[`dev-notes/mptp-smux-20261110-0730.md`](../dev-notes/mptp-smux-20261110-0730.md) §14。
+
 ## MPTP 对传输层的要求
 
 MPTP 对传输层的要求：
@@ -78,7 +109,7 @@ MPTP 对传输层的要求：
 | --- | --- |
 | MPTP 线格式 | 请求 / 回复前缀的字节序列、头表编码 |
 | 报文语义 | access method、status、`Body_Size` / `Body_Transfer`、后缀流 |
-| 会话顺序 | 前缀 → 体 → 后缀 → 半关闭；回复方向同理 |
+| 会话顺序 | 前缀 → 体 → 后缀 → 半关闭；回复方向同理（当前在 `mptp_smux::MptpSession`，目标是共享） |
 | 角色模型 | 两端都既可发起也可响应；client / server 是「一次请求的方向」 |
 | handler 契约 | `abs_mptp::serving::TrReqHandler` |
 | 取消与错误分类 | 取消、传输错误、协议错误、应用拒绝 |
@@ -90,7 +121,7 @@ MPTP 对传输层的要求：
 | dock（本端 / 远端） | stream ID |
 | `bind_async` / `open_channel_async` / `accept_async` | QUIC stream open / accept |
 | `listen_async` / `income_async` | QUIC accept |
-| `TrPrepFactory` / `RingBuffs` | QUIC send / recv buffer 模型 |
+| `TrPrepFactory` / `RingBuffs` | QUIC send / recv buffer / flow control |
 | smux FIN / RESET | QUIC FIN / RESET_STREAM |
 
 因此：
@@ -98,6 +129,22 @@ MPTP 对传输层的要求：
 - `mptp_smux` 与 `mptp_quic` 是兄弟关系；
 - 共享的 MPTP 线格式与会话契约**不能依赖 `mptp_smux` 的具体类型**；
 - 不要为了「以后可能有 QUIC」在 `mptp_smux` 里造一个抹平所有传输差异的万能 trait。
+
+### `mptp_quic` 自己负责什么
+
+`mptp_quic` 不是 `mptp_smux` 的子类型；它自己负责 QUIC 特有的部分：
+
+- QUIC 连接建立、TLS / 0-RTT / 连接迁移；
+- 双向 stream 的 open / accept、stream ID、流控与拥塞控制；
+- QUIC send / recv buffer 模型，以及 FIN / RESET_STREAM 的映射；
+- QUIC 连接级错误、关闭与 drain；
+- 它自己的客户端 / 服务端配置与 feature。
+
+它应当复用：
+
+- `mptp_wire` 的前缀 / 头表 / 体格式；
+- `abs_mptp` 的协议 trait 与 `TrReqHandler`；
+- 目标中的共享 `mptp_session` 会话状态机（如果尚未抽出，则先不要复制）。
 
 ## 两端对等与 feature 划分（目标）
 
@@ -143,14 +190,15 @@ mptp_smux = { features = ["client", "server", "router"] }
    回复后缀 → 半关闭 → 收尾；
 3. **注入 ring 内存**：按配置声明的工厂，为每条子流现场生产新的 ring；不缓存、不复用
    已交给上一条子流的内存；
-4. **使用并转出前缀与体格式**：具体编解码由 `mptp_wire` 实现；本 crate 只负责把前缀读写、
-   体 / 后缀搬运接到子流上，读前缀时不越过体的第一个字节；
-5. **按头表搬运体与后缀**：定长 / 分块 / 无体由 `Body_Size` / `Body_Transfer` 唯一决定；
-   后缀是裸字节流；
-6. **实现客户端会话**：发请求、发体、发后缀、读回复前缀、读回复体 / 后缀；
-7. **实现服务端 accept 循环**：接子流、解码前缀、把请求交给 handler、由 handler 负责收尾；
-8. **传播取消、区分错误**：每个 await 点接受调用方令牌；区分取消、传输、协议、handler
-   错误；
+4. **把 `mptp_wire` 接到子流上**：调用它的前缀读写与体 / 后缀视图；本 crate 不重新实现
+   任何字节编解码，读前缀时不越过体的第一个字节；
+5. **驱动一次请求的会话**：请求前缀 → 请求体 → 请求后缀 → 回复前缀 → 回复体 → 回复后缀 →
+   半关闭；当前由 `MptpSession` 承担，目标是抽成传输无关的共享层；
+6. **实现客户端角色**：开子流、准备 ring、写请求前缀、返回会话；
+7. **实现服务端 accept 循环**：接子流、准备 ring、读请求前缀、把请求交给 handler、由
+   handler 负责收尾；
+8. **传播取消、映射错误**：每个传输 await 点接受调用方令牌；把传输错误、协议错误与
+   handler 错误分开；
 9. **保持两端配置分离**：客户端与服务端可以跑在两个进程、各自升级。
 
 ## 它绝对不应该做什么
@@ -194,6 +242,8 @@ mptp_smux = { features = ["client", "server", "router"] }
 - **线格式与 RPC 层耦合（已部分解除）**：`rpc_core_v1` 已直接使用 `mptp_wire`；
   `abs_rpc_serv` 仍通过 `mptp_smux` 的 serving 配置父 trait 间接依赖具体传输，
   尚未完全解除；
+- **会话状态机尚未共享**：`MptpSession` 仍在 `mptp_smux`，未来的 `mptp_quic` 不应复制它；
+  建议抽出 `mptp_session`；
 - **内置 Router 越界**：路由是应用策略，当前却无条件编译进本 crate。
 
 ## 最小使用形状
@@ -227,6 +277,7 @@ mptp_smux = { features = ["client", "server", "router"] }
 | `abs_buff` | ring / 段读写接口 |
 | `rpc_core_v1` / `abs_rpc_serv` | RPC 语义层与服务端抽象 |
 | `mptp_wire` | MPTP 前缀、头表、限长 / 分块体与 MessagePack 线格式；本 crate 的兼容别名指向它 |
+| `mptp_session`（计划） | 一次请求的传输无关会话状态机；当前仍在 `mptp_smux::MptpSession` |
 | `matchit_route` | 内置 `Router` 的路径匹配实现（目标上应可选） |
 
 ## 开发与验证

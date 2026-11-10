@@ -31,4 +31,12 @@ MPTP 的**传输无关线上格式**：前缀、头表、限长体与分块体�
 `rmp-serde` 只作为 dev-dependency 用于字节互操作 / 黄金测试，不进入运行时依赖；这与
 denco 项目自身的 `mp_denco/tests/interop_.rs` 做法一致。
 
+## 不负责
+
+- 子流 open / accept / reset；
+- dock / stream ID、ring / buffer 注入；
+- 一次请求内部的会话顺序与半关闭（当前由 `mptp_smux::MptpSession` 承担，目标共享为
+  `mptp_session`）；
+- 应用路由、RPC 语义与业务体序列化。
+
 详细职责边界见 [`dev-notes/mptp-smux-20261110-0730.md`](../dev-notes/mptp-smux-20261110-0730.md)。

@@ -4,6 +4,10 @@
 //! 一个多流连接上把它跑起来」在这里。它与**用户业务类型无关**：报文前缀的线上格式由
 //! [`mptp_wire`] 拥有，业务体与后缀流的序列化则仍由使用者决定。
 //!
+//! 换句话说，本 crate 剩下的是**传输绑定 + 一次请求的会话驱动 + 两端角色包装**：
+//! 打开 / 接受 smux 子流、注入 ring 内存、按 MPTP 顺序驱动一次请求、传播取消并把传输
+//! 错误映射成公开错误；具体的字节格式不属于这里。
+//!
 //! # 四块内容
 //!
 //! - [`client`]：建流 → 交出 ring → 发前缀 → 收回复
@@ -32,7 +36,8 @@
 //! This crate is the second half of the `mptp_core` split: `abs_mptp` holds the protocol
 //! shapes, and this crate runs them over a multiplexed connection. It knows nothing about the
 //! user's business types: the prefix wire format is owned by [`mptp_wire`], while body and
-//! suffix serialization stay with the application.
+//! suffix serialization stay with the application. What remains here is the transport
+//! binding, the per-request session driver and the client/server role wrappers.
 //!
 //! Ring memory is injected the way upstream demands it: a *factory* built from a per-channel
 //! *environment*, declared as a **type** in the configuration so that no instance ever has to
