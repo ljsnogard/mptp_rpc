@@ -239,7 +239,7 @@ where
     TyRx: TrBuffRead<u8> + TrConsumerState,
     TyTok: TrCancellationToken,
 {
-    use abs_mptp::messaging::limited::LimitedReader;
+    use mptp_wire::limited::LimitedReader;
 
     let mut limited = LimitedReader::new(rx, size);
     let mut read = AsStdRead::new(&mut limited, cancel);

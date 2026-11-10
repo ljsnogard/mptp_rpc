@@ -1,10 +1,12 @@
-//! MPTP 请求 / 回复前缀与头表的**传输无关线格式**。
+//! MPTP 的**传输无关线上格式**：前缀、头表、限长体与分块体。
 //!
-//! 本 crate 是从 `mptp_smux::messaging` 抽出的共享层：
+//! 本 crate 是从 `mptp_smux::messaging` 与 `abs_mptp::messaging` 抽出的共享层：
 //!
 //! - 具体前缀类型 [`RequestPrefix`] / [`ResponsePrefix`]；
 //! - 头表 [`Headers`] / [`HeaderKey`] / [`HeaderVal`] / [`U16OrStr`]；
-//! - 四个前缀读写入口与线格式错误 [`MessagingError`]。
+//! - 四个前缀读写入口与线格式错误 [`MessagingError`]；
+//! - 报文体传输格式：模块 [`limited`]（定长）与 [`chunked`]（2 字节大端块长）；
+//! - 报文 IO 的精确读取错误 [`ReadExactError`]。
 //!
 //! 它**不依赖** `smux_v1`、dock、ring 或任何客户端 / 服务端实现，因此 `mptp_smux`
 //! 与未来的 `mptp_quic` 可以共用同一份线格式。
@@ -22,10 +24,10 @@
 //!
 //! # `mptp_wire`: transport-independent MPTP prefix wire format
 //!
-//! This crate owns the concrete request/response prefix types, the header map and the
-//! MessagePack codec. It is deliberately independent of `smux_v1` and of any client or
-//! server binding, so `mptp_smux` and a future `mptp_quic` can share exactly one wire
-//! implementation.
+//! This crate owns the concrete request/response prefix types, the header map, the
+//! MessagePack prefix codec, and the sized/chunked body framing. It is deliberately
+//! independent of `smux_v1` and of any client or server binding, so `mptp_smux` and a
+//! future `mptp_quic` can share exactly one wire implementation.
 
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]
@@ -34,12 +36,18 @@ extern crate alloc;
 
 mod error_;
 mod headers_;
+mod io_;
 mod num_or_str_;
 mod prefix_;
 mod wire_;
 
+pub mod chunked;
+pub mod limited;
+pub mod read;
+
 pub use error_::MessagingError;
 pub use headers_::{HeaderEntry, HeaderKey, HeaderVal, Headers};
+pub use io_::ReadExactError;
 pub use num_or_str_::U16OrStr;
 pub use prefix_::{RequestPrefix, ResponsePrefix};
 pub use wire_::{

@@ -12,6 +12,7 @@ license.workspace = true
 [dependencies]
 # 被测对象：`mptp_smux` 只认 `abs_mptp` 的形状与 `abs_smux` 的契约，本 crate 是它的**使用者**。
 mptp_smux = { path = "../mptp_smux" }
+mptp_wire = { path = "../mptp_wire" }
 abs_mptp = { path = "../abs_mptp" }
 
 

@@ -21,16 +21,13 @@ use core::mem::MaybeUninit;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
-use abs_mptp::{
-    messaging::chunked::ChunkedEncode,
-    spec::{Status, StdHeaderKey, StdHeaderVal},
-};
+use abs_mptp::spec::{Status, StdHeaderKey, StdHeaderVal};
 use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::serving::{
     close_channel_async,
     config::{ChannelRx, ChannelTx},
 };
-use mptp_wire::{Headers, ResponsePrefix, write_response_prefix_async};
+use mptp_wire::{Headers, ResponsePrefix, chunked::ChunkedEncode, write_response_prefix_async};
 
 use crate::{
     messaging::body_::{

@@ -1,27 +1,27 @@
-//! `abs_mptp::messaging` 的集成测试：限长读写与分块帧。
+//! `mptp_wire` 的集成测试：限长读写与分块帧。
 //!
 //! 它放在 `tests/` 而不是 `src/`：用例只走**公开 API**，库源码里不该再有 `#[cfg(test)]`。
 //!
 //! # 为什么限长那几条用例要跑在后端运行时里
 //!
-//! `abs_mptp` 本体不依赖任何 io 适配 crate，也不替使用者选后端。本仓是**应用**：限长那几条
+//! `mptp_wire` 本体不依赖任何 io 适配 crate，也不替使用者选后端。本仓是**应用**：限长那几条
 //! 用例按应用的做法，用 `abs_buff_stdio_adapt` 的 `AsStdRead` / `AsStdWrite` 把段接口暴露成
 //! `std::io::Read` / `Write`，而它在数据没到时会同步等待——同步等待要问门面取**当前后端**的
 //! 运行时值。分块那几条用例不走 `io`：它们直接在段接口上搬运，因此与后端运行时无关。
 //!
 //! 「当前后端」是**编译期**决定的（入口是 `abs_art-facade`），而**选择它的地方是本仓的
-//! `Cargo.toml`**：`abs_mptp` 本体不带任何 `rt-*` feature，后端选择留在「应用」这一侧。
+//! `Cargo.toml`**：`mptp_wire` 本体不带任何 `rt-*` feature，后端选择留在「应用」这一侧。
 //! 本仓只点亮 `rt-tokio`，因此这里固定挂 `#[tokio::test]`。
 //!
 //! 收发半边在用例里用 `&[u8]` / `&mut [u8]` 充当：它们的段接口立即就绪，于是这些用例
 //! 只覆盖协议行为，不牵扯真实传输。
 //!
-//! # Integration tests for `abs_mptp::messaging`
+//! # Integration tests for `mptp_wire`
 //!
 //! These live under `tests/` rather than `src/`: they exercise the **public API** only, and
 //! the library source keeps no `#[cfg(test)]` module.
 //!
-//! `abs_mptp` itself depends on no io adapter crate and never picks a backend for its users.
+//! `mptp_wire` itself depends on no io adapter crate and never picks a backend for its users.
 //! This crate is the *application*: the limited-IO cases follow the application's route and
 //! expose the segment interface as `std::io::Read` / `Write` through `abs_buff_stdio_adapt`,
 //! whose synchronous waits ask the facade for the active backend's runtime. The chunked cases
@@ -40,11 +40,12 @@ use abs_buff::{
 };
 use abs_buff_stdio_adapt::{AsStdRead, AsStdWrite};
 use abs_cancel::{NonCancellableToken, ok_or::OkOr};
-use abs_mptp::messaging::{
-    chunked::{ChunkedReader, ChunkedReadError, ChunkedEncode, K_MAX_CHUNK_PAYLOAD},
+use anylr::SomeOf;
+use mptp_wire::{
+    ReadExactError,
+    chunked::{ChunkedEncode, ChunkedReadError, ChunkedReader, K_MAX_CHUNK_PAYLOAD},
     limited::{LimitedReader, LimitedReaderError, LimitedWriter, LimitedWriterError},
 };
-use anylr::SomeOf;
 
 /// 在当前后端对应的运行时上下文里定义一个用例。
 ///
@@ -673,6 +674,39 @@ backend_async_test! {
             Option::None => panic!("已经读到终止块，同步借段应当报 Ended"),
         };
         assert_eq!(err.err_tag(), ReadErrTag::Closing, "结束就是 EOF");
+    }
+}
+
+backend_async_test! {
+    /// 测试分块体长度前缀被截断时报具体的块头错误。
+    /// Test that a truncated chunk-length header reports the concrete header error.
+    ///
+    /// - 手段：只给 1 个字节（长度前缀需要 2 字节），用 `ChunkedReader` 读一次。
+    /// - 判断：错误是 `ChunkedReadError::Header`，内部是 `ReadExactError::Inner`，
+    ///   而不是旧的字符串 `Malformed`。
+    ///
+    /// - Means: feed only one byte where a two-byte length prefix is required, then read.
+    /// - Verdict: the error is `ChunkedReadError::Header` wrapping
+    ///   `ReadExactError::Inner`, not the old stringly `Malformed`.
+    fn chunked_read_reports_truncated_header_() {
+        let wire: &[u8] = b"\x00";
+        let mut src: &[u8] = wire;
+        let mut reader = ChunkedReader::new(&mut src);
+
+        let err = match reader
+            .read_async(&Demand::no_more_than(16usize))
+            .await
+            .pick_right()
+        {
+            Option::Some(err) => err,
+            Option::None => panic!("长度前缀不完整时应当报错"),
+        };
+
+        assert!(
+            matches!(err, ChunkedReadError::Header(ReadExactError::Inner(_))),
+            "截断的块头应当是 Header(ReadExactError::Inner)，实际是 {err:?}"
+        );
+        assert!(err.to_string().contains("块头"), "显示信息应当指出块头读取失败");
     }
 }
 

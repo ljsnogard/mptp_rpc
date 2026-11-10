@@ -42,7 +42,7 @@
 //! # Examples
 //!
 //! ```
-//! use abs_mptp::messaging::chunked::ChunkedEncode;
+//! use mptp_wire::chunked::ChunkedEncode;
 //!
 //! # async fn demo() {
 //! let mut src: &[u8] = b"abc";
@@ -57,18 +57,18 @@
 
 use core::error::Error;
 
+use abs_buff::x_deps::anylr::SomeOf;
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffWrite,
     buffer::{TrBuffSegmMut, TrBuffSegmRef, TrConsumerState, TrProducerState},
     error::{ReadErrTag, TrTaggedError},
     gen_may_cancel_future,
-    x_deps::{abs_cancel, anylr},
 };
 use abs_cancel::{TrCancellationToken, ok_or::XtOkOr};
-use anylr::SomeOf;
 
-use super::limited::{
-    LimitedRefSegm, narrow_demand_, read_exact_into_async_, split_some_of_, total_of_,
+use crate::{
+    io_::ReadExactError,
+    limited::{LimitedRefSegm, narrow_demand_, read_exact_into_async_, split_some_of_, total_of_},
 };
 
 /// 单个块能承载的最大字节数：`u16` 的上限。
@@ -139,7 +139,8 @@ impl<TySrcErr, TyDstErr> Error for ChunkedEncodeError<TySrcErr, TyDstErr>
 where
     TySrcErr: Error,
     TyDstErr: Error,
-{}
+{
+}
 
 /// 分块搬运器：把一个**读半边**的内容按块搬进一个**写半边**。
 ///
@@ -166,7 +167,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use abs_mptp::messaging::chunked::ChunkedEncode;
+/// use mptp_wire::chunked::ChunkedEncode;
 ///
 /// # async fn demo() {
 /// let mut src: &[u8] = b"abc";
@@ -348,8 +349,10 @@ pub enum ChunkedReadError<TyErr> {
     /// 错误标签是 `Closing`：对 `AsStdRead` 而言这就是 EOF。
     Ended,
 
-    /// 分块帧不完整或格式非法（例如长度前缀只到了一半，对端就结束了）。
-    Malformed(String),
+    /// 读取块头（2 字节长度前缀）失败。
+    ///
+    /// 具体原因由 [`ReadExactError`] 保留：取消、没有进展或底层缓冲错误。
+    Header(ReadExactError<TyErr>),
 
     /// 当前块装不下调用方给出的需求。
     Unsatisfied,
@@ -371,7 +374,7 @@ where
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ChunkedReadError::Ended => f.write_str("分块体：已读到终止块"),
-            ChunkedReadError::Malformed(detail) => write!(f, "分块体：帧不完整或非法（{detail}）"),
+            ChunkedReadError::Header(err) => write!(f, "分块体：块头读取失败（{err}）"),
             ChunkedReadError::Unsatisfied => f.write_str("分块体：当前块装不下所需数量"),
             ChunkedReadError::WouldBlock => f.write_str("分块体：跨块读取必须走异步路径"),
             ChunkedReadError::Cancelled => f.write_str("分块体：等待期间被取消"),
@@ -391,7 +394,7 @@ where
         match self {
             // 「读完终止块」就是这条体的 EOF。
             ChunkedReadError::Ended => ReadErrTag::Closing,
-            ChunkedReadError::Malformed(_) => ReadErrTag::Unknown,
+            ChunkedReadError::Header(err) => err.err_tag(),
             ChunkedReadError::Unsatisfied => ReadErrTag::Unsatisfied,
             ChunkedReadError::WouldBlock => ReadErrTag::Drained,
             ChunkedReadError::Cancelled => ReadErrTag::Cancelled,
@@ -493,7 +496,10 @@ impl<R> TrBuffTryRead<u8> for ChunkedReader<'_, R>
 where
     R: TrBuffRead<u8> + TrConsumerState,
 {
-    type SegmRef<'f> = LimitedRefSegm<'f, R::SegmRef<'f>> where Self: 'f;
+    type SegmRef<'f>
+        = LimitedRefSegm<'f, R::SegmRef<'f>>
+    where
+        Self: 'f;
     type Err = ChunkedReadError<R::Err>;
 
     fn try_read<'f>(
@@ -514,12 +520,12 @@ impl<R> TrBuffRead<u8> for ChunkedReader<'_, R>
 where
     R: TrBuffRead<u8> + TrConsumerState,
 {
-    type ReadAsync<'f> = ChunkedReadAsync<'f, 'f, R> where Self: 'f;
+    type ReadAsync<'f>
+        = ChunkedReadAsync<'f, 'f, R>
+    where
+        Self: 'f;
 
-    fn read_async<'f>(
-        &'f mut self,
-        demand: &'f Demand<usize>,
-    ) -> Self::ReadAsync<'f> {
+    fn read_async<'f>(&'f mut self, demand: &'f Demand<usize>) -> Self::ReadAsync<'f> {
         ChunkedReadAsync::new(
             &mut *self.chunked_src_,
             &mut self.chunk_left_,
@@ -584,7 +590,11 @@ where
         match head_fut.ok_or(cancel.child_token().cancellation()).await {
             Result::Err(_) => return SomeOf::new_right(ChunkedReadError::Cancelled),
             Result::Ok(Result::Err(err)) => {
-                return SomeOf::new_right(ChunkedReadError::Malformed(err.to_string()));
+                let err = match err {
+                    ReadExactError::Cancelled { .. } => ChunkedReadError::Cancelled,
+                    other => ChunkedReadError::Header(other),
+                };
+                return SomeOf::new_right(err);
             }
             Result::Ok(Result::Ok(())) => {}
         }

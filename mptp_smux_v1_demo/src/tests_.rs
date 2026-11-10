@@ -244,12 +244,12 @@ fn headers_report_tr_headers_mut_on_empty_() {
 ///
 /// - 手段：把 `0x7f`（不在 7 个方法位里）作为方法位，后跟一个空位置与 `nil` 头，喂给
 ///   `mptp_smux::messaging` 的请求前缀解码。
-/// - 判断：返回 `Err(MessagingError::Unknown)`。线上契约不认识就不能猜——把 `0x7f` 折成
+/// - 判断：返回 `Err(MessagingError::UnknownMethod)`。线上契约不认识就不能猜——把 `0x7f` 折成
 ///   `Head` 会让服务端把一次未知访问当成元信息查询。
 ///
 /// - Means: feed `0x7f` (not one of the seven method bits), followed by an empty location
 ///   and nil headers, to `mptp_smux::messaging`'s request-prefix decoder.
-/// - Verdict: `Err(MessagingError::Unknown)`. An unrecognised wire contract is never guessed:
+/// - Verdict: `Err(MessagingError::UnknownMethod)`. An unrecognised wire contract is never guessed:
 ///   folding `0x7f` into `Head` would turn an unknown access into a metadata read.
 #[test]
 fn unknown_method_fails_loudly_() {
@@ -260,7 +260,7 @@ fn unknown_method_fails_loudly_() {
     );
 
     assert!(
-        matches!(result, Result::Err(MessagingError::Unknown(_))),
+        matches!(result, Result::Err(MessagingError::UnknownMethod { .. })),
         "未知方法位应当报 Unknown，实际是 {result:?}"
     );
 }

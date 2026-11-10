@@ -15,7 +15,7 @@
 ## 它是什么
 
 - MPTP 的 **smux_v1 传输绑定**：dock 寻址、开子流 / 接子流、ring 内存注入、半关闭与收尾；
-- MPTP 请求 / 回复前缀的线格式由 [`mptp_wire`](../mptp_wire/README.md) 拥有；本 crate 通过
+- MPTP 前缀与限长 / 分块体格式由 [`mptp_wire`](../mptp_wire/README.md) 拥有；本 crate 通过
   `mptp_smux::messaging` 别名继续导出这些类型与读写入口；
 - 按头表搬运**请求体 / 回复体 / 后缀流**的会话对象；
 - 客户端与服务端两套角色实现；
@@ -28,7 +28,8 @@
 
 `mptp_smux` **不是**：
 
-- MPTP 协议本身——协议形状、访问方法、状态码、标准头与体帧语义属于 `abs_mptp`；
+- MPTP 协议本身——协议形状、访问方法、状态码、标准头与体声明属于 `abs_mptp`；
+  体帧格式由 `mptp_wire` 实现；
 - RPC 框架——service trait、`#[rpc]` 宏、方法派发、RPC 错误体属于 `abs_rpc_serv` /
   `rpc_core_v1`；
 - 业务 body 编解码器——MessagePack / JSON / 自定义类型由应用自己决定；
@@ -114,7 +115,7 @@ MPTP 是 P2P 协议：一条连接的两端都可以是对方的客户端和服�
 | `router`（第二阶段） | 把内置 `serving::Router` 从 `server` 中拆出，携带 `matchit_route` / `tlist` | 需要默认前缀路由的应用 |
 
 重构分两阶段：**先**拆 `client` / `server`，保持 `Router` 仍在 `server` 下以免破坏现有使用者；
-**再**把内置 `Router` 拆成独立的 `router` feature（或独立 crate）。`messaging`（前缀线格式与
+**再**把内置 `Router` 拆成独立的 `router` feature（或独立 crate）。`messaging`（前缀 / 体格式与
 头表）是两端共享面，不设 feature，始终编译。
 
 下游目标声明方式：
@@ -142,8 +143,8 @@ mptp_smux = { features = ["client", "server", "router"] }
    回复后缀 → 半关闭 → 收尾；
 3. **注入 ring 内存**：按配置声明的工厂，为每条子流现场生产新的 ring；不缓存、不复用
    已交给上一条子流的内存；
-4. **使用并转出前缀线格式**：具体编解码由 `mptp_wire` 实现；本 crate 只负责把前缀读写接到
-   子流上，读前缀时不越过体的第一个字节；
+4. **使用并转出前缀与体格式**：具体编解码由 `mptp_wire` 实现；本 crate 只负责把前缀读写、
+   体 / 后缀搬运接到子流上，读前缀时不越过体的第一个字节；
 5. **按头表搬运体与后缀**：定长 / 分块 / 无体由 `Body_Size` / `Body_Transfer` 唯一决定；
    后缀是裸字节流；
 6. **实现客户端会话**：发请求、发体、发后缀、读回复前缀、读回复体 / 后缀；
@@ -220,12 +221,12 @@ mptp_smux = { features = ["client", "server", "router"] }
 
 | crate | 关系 |
 | --- | --- |
-| `abs_mptp` | MPTP 协议形状、访问方法 / 状态码 / 标准头、体帧、会话与 handler trait |
+| `abs_mptp` | MPTP 协议形状、访问方法 / 状态码 / 标准头、体声明、会话与 handler trait |
 | `abs_mptp_smux` | 名义上的 MPTP-over-SMUX 抽象；当前无使用者，与 `mptp_smux` 有重复，归属待定 |
 | `abs_smux` / `smux_v1` | 多流传输与连接实现 |
 | `abs_buff` | ring / 段读写接口 |
 | `rpc_core_v1` / `abs_rpc_serv` | RPC 语义层与服务端抽象 |
-| `mptp_wire` | MPTP 前缀、头表与 MessagePack 线格式；本 crate 的兼容别名指向它 |
+| `mptp_wire` | MPTP 前缀、头表、限长 / 分块体与 MessagePack 线格式；本 crate 的兼容别名指向它 |
 | `matchit_route` | 内置 `Router` 的路径匹配实现（目标上应可选） |
 
 ## 开发与验证

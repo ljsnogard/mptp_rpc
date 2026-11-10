@@ -3,7 +3,7 @@ name = "mptp_wire"
 version = "0.1.0"
 edition = "2024"
 
-description = "MPTP prefix and header wire format, independent of the transport binding."
+description = "MPTP wire format: prefixes, headers, sized bodies and chunked bodies."
 repository.workspace = true
 keywords = ["mptp", "messagepack", "wire"]
 license.workspace = true

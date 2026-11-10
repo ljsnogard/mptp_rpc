@@ -21,7 +21,7 @@
 //! # Examples
 //!
 //! ```
-//! use abs_mptp::messaging::limited::LimitedReader;
+//! use mptp_wire::limited::LimitedReader;
 //!
 //! # async fn demo() {
 //! let mut src: &[u8] = b"hello world";
@@ -33,6 +33,7 @@
 
 use core::{error::Error, fmt};
 
+use abs_buff::x_deps::anylr::SomeOf;
 use abs_buff::{
     Demand, TrBuffRead, TrBuffTryRead, TrBuffTryWrite, TrBuffWrite,
     buffer::{
@@ -41,12 +42,10 @@ use abs_buff::{
     },
     error::{ReadErrTag, TrTaggedError, WriteErrTag},
     gen_may_cancel_future,
-    x_deps::{abs_cancel, anylr},
 };
 use abs_cancel::{TrCancellationToken, ok_or::XtOkOr};
-use anylr::SomeOf;
 
-use super::io_::MessageIoError;
+use crate::io_::ReadExactError;
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // 错误类型
@@ -142,7 +141,9 @@ where
 ///
 /// `SomeOf` 不是枚举：它只提供 `pick_left()` / `pick_right()` / `contains_left()`。
 /// 底层缓冲的契约是「要么借出段、要么报错」，因此这里按左值优先拆分。
-pub(super) fn split_some_of_<TyLeft, TyRight>(value: SomeOf<TyLeft, TyRight>) -> Result<TyLeft, TyRight> {
+pub(super) fn split_some_of_<TyLeft, TyRight>(
+    value: SomeOf<TyLeft, TyRight>,
+) -> Result<TyLeft, TyRight> {
     if value.contains_left() {
         return Result::Ok(value.pick_left().expect("刚刚确认过含左值"));
     }
@@ -160,7 +161,10 @@ pub(super) fn total_of_<TySegm>(segm: &TySegm) -> usize
 where
     TySegm: TrBuffSegmView,
 {
-    segm.iter_slices().into_iter().map(<[TySegm::Item]>::len).sum()
+    segm.iter_slices()
+        .into_iter()
+        .map(<[TySegm::Item]>::len)
+        .sum()
 }
 
 /// 读段的透明包装：被回收时把「消费掉的字节数」结算回额度。
@@ -205,7 +209,8 @@ impl<S> TrBuffSegmView for LimitedRefSegm<'_, S>
 where
     S: TrBuffSegmView,
 {
-    type SlicesIter<'f> = S::SlicesIter<'f>
+    type SlicesIter<'f>
+        = S::SlicesIter<'f>
     where
         Self: 'f,
         S: 'f;
@@ -232,12 +237,14 @@ impl<'a, S> TrBuffSegmRef<'a, u8> for LimitedRefSegm<'a, S>
 where
     S: TrBuffSegmRef<'a, u8>,
 {
-    type Reclaimer<'f> = S::Reclaimer<'f>
+    type Reclaimer<'f>
+        = S::Reclaimer<'f>
     where
         Self: 'f,
         S: 'f;
 
-    type TakeSegmRef<'f> = S::TakeSegmRef<'f>
+    type TakeSegmRef<'f>
+        = S::TakeSegmRef<'f>
     where
         Self: 'f,
         S: 'f;
@@ -294,7 +301,8 @@ impl<S> TrBuffSegmView for LimitedMutSegm<'_, S>
 where
     S: TrBuffSegmView,
 {
-    type SlicesIter<'f> = S::SlicesIter<'f>
+    type SlicesIter<'f>
+        = S::SlicesIter<'f>
     where
         Self: 'f,
         S: 'f;
@@ -321,12 +329,14 @@ impl<'a, S> TrBuffSegmMut<'a, u8> for LimitedMutSegm<'a, S>
 where
     S: TrBuffSegmMut<'a, u8>,
 {
-    type Reclaimer<'f> = S::Reclaimer<'f>
+    type Reclaimer<'f>
+        = S::Reclaimer<'f>
     where
         Self: 'f,
         S: 'f;
 
-    type TakeSegmMut<'f> = S::TakeSegmMut<'f>
+    type TakeSegmMut<'f>
+        = S::TakeSegmMut<'f>
     where
         Self: 'f,
         S: 'f;
@@ -377,7 +387,7 @@ pub(super) fn narrow_demand_(demand: &Demand<usize>, remaining: usize) -> Option
 /// # Examples
 ///
 /// ```
-/// use abs_mptp::messaging::limited::LimitedReader;
+/// use mptp_wire::limited::LimitedReader;
 ///
 /// # async fn demo() {
 /// let mut src: &[u8] = b"hello world";
@@ -456,7 +466,8 @@ impl<R> TrBuffTryRead<u8> for LimitedReader<'_, R>
 where
     R: TrBuffRead<u8> + TrConsumerState,
 {
-    type SegmRef<'f> = LimitedRefSegm<'f, R::SegmRef<'f>>
+    type SegmRef<'f>
+        = LimitedRefSegm<'f, R::SegmRef<'f>>
     where
         Self: 'f;
 
@@ -479,12 +490,12 @@ impl<R> TrBuffRead<u8> for LimitedReader<'_, R>
 where
     R: TrBuffRead<u8> + TrConsumerState,
 {
-    type ReadAsync<'f> = LimitedReaderAsync<'f, 'f, R> where Self: 'f;
+    type ReadAsync<'f>
+        = LimitedReaderAsync<'f, 'f, R>
+    where
+        Self: 'f;
 
-    fn read_async<'f>(
-        &'f mut self,
-        demand: &'f Demand<usize>,
-    ) -> Self::ReadAsync<'f> {
+    fn read_async<'f>(&'f mut self, demand: &'f Demand<usize>) -> Self::ReadAsync<'f> {
         LimitedReaderAsync::new(
             &mut *self.inner_,
             &mut self.remaining_,
@@ -590,7 +601,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use abs_mptp::messaging::limited::LimitedWriter;
+/// use mptp_wire::limited::LimitedWriter;
 ///
 /// # async fn demo() {
 /// let mut storage = [0u8; 8];
@@ -645,7 +656,8 @@ impl<W> TrBuffTryWrite<u8> for LimitedWriter<'_, W>
 where
     W: TrBuffWrite<u8> + TrProducerState,
 {
-    type SegmMut<'f> = LimitedMutSegm<'f, W::SegmMut<'f>>
+    type SegmMut<'f>
+        = LimitedMutSegm<'f, W::SegmMut<'f>>
     where
         Self: 'f;
 
@@ -680,19 +692,15 @@ impl<W> TrBuffWrite<u8> for LimitedWriter<'_, W>
 where
     W: TrBuffWrite<u8> + TrProducerState,
 {
-    type WriteAsync<'f> = LimitedWriterAsync<'f, 'f, W> where Self: 'f;
+    type WriteAsync<'f>
+        = LimitedWriterAsync<'f, 'f, W>
+    where
+        Self: 'f;
 
-    fn write_async<'f>(
-        &'f mut self,
-        demand: &'f Demand<usize>,
-    ) -> Self::WriteAsync<'f> {
-        self.demand_ = narrow_demand_(demand, self.remaining_)
-            .unwrap_or_else(|| Demand::less_than(0));
-        LimitedWriterAsync::new(
-            self.inner_,
-            &mut self.remaining_,
-            &self.demand_,
-        )
+    fn write_async<'f>(&'f mut self, demand: &'f Demand<usize>) -> Self::WriteAsync<'f> {
+        self.demand_ =
+            narrow_demand_(demand, self.remaining_).unwrap_or_else(|| Demand::less_than(0));
+        LimitedWriterAsync::new(self.inner_, &mut self.remaining_, &self.demand_)
     }
 }
 
@@ -703,7 +711,10 @@ where
     fn producer_state(&self) -> Option<(usize, bool)> {
         let (free, closed) = self.inner_.producer_state()?;
         // 额度用尽等价于「没有可用空间」，底层关闭也照样如实上报。
-        Option::Some((free.min(self.remaining_), closed || self.remaining_ == 0usize))
+        Option::Some((
+            free.min(self.remaining_),
+            closed || self.remaining_ == 0usize,
+        ))
     }
 }
 
@@ -752,12 +763,12 @@ where
 /// # Errors
 ///
 /// 在读满之前对端关闭、底层报错，或让出的段一个字节都搬不动（防死循环）时返回
-/// [`MessageIoError::Truncated`]。
+/// [`ReadExactError`]。
 pub(crate) async fn read_exact_into_async_<R, K>(
     rx: &mut R,
     dst: &mut [u8],
     tok: K,
-) -> Result<(), MessageIoError>
+) -> Result<(), ReadExactError<R::Err>>
 where
     R: TrBuffRead<u8>,
     K: TrCancellationToken,
@@ -769,17 +780,19 @@ where
         let read_fut = rx.read_async(&demand).into_future();
         // 与取消令牌竞速：令牌先就绪就落到 `Err`，底层 future 随语句结束被丢弃。
         let Result::Ok(mut res) = read_fut.ok_or(tok.child_token().cancellation()).await else {
-            return Result::Err(MessageIoError::Truncated(format!(
-                "读满 {total} 字节期间被取消（已读 {filled} 字节）"
-            )));
+            return Result::Err(ReadExactError::Cancelled {
+                expected: total,
+                filled,
+            });
         };
         let Option::Some(segm) = res.as_mut().pick_left() else {
-            let detail = res
-                .pick_right()
-                .map_or_else(|| "底层没有给出错误详情".to_string(), |err| err.to_string());
-            return Result::Err(MessageIoError::Truncated(format!(
-                "读满 {total} 字节之前读端已经结束（已读 {filled} 字节）：{detail}"
-            )));
+            let Some(err) = res.pick_right() else {
+                return Result::Err(ReadExactError::Stalled {
+                    expected: total,
+                    filled,
+                });
+            };
+            return Result::Err(ReadExactError::Inner(err));
         };
 
         // 与 `AsStdRead` 同一条路径：段的缓冲就是源自己的内存，`u8` 没有 drop 需求，
@@ -797,9 +810,10 @@ where
         debug_assert!(moved <= total - filled);
         filled += moved;
         if moved == 0usize {
-            return Result::Err(MessageIoError::Truncated(format!(
-                "读满 {total} 字节的过程中段让不出任何字节（已读 {filled} 字节）"
-            )));
+            return Result::Err(ReadExactError::Stalled {
+                expected: total,
+                filled,
+            });
         }
     }
     Result::Ok(())

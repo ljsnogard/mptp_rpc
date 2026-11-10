@@ -28,10 +28,7 @@
 //! prefix and leaves the first body byte in the ring; encoding writes through the ring
 //! directly, with no gather buffer and no fixed scratch cap.
 
-use alloc::{
-    format,
-    string::{String, ToString},
-};
+use alloc::string::String;
 
 use abs_buff::{TrBuffRead, TrBuffWrite};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
@@ -54,7 +51,7 @@ use super::{
 ///
 /// [`AccessMethod`] 是 `#[repr(u8)]`，但没有「从数值构造」的公开入口，因此这里列一遍位值
 /// ——它本来就是**线上契约**的一部分。未知位返回 `None`，由调用者报成
-/// [`MessagingError::Unknown`]。
+/// [`MessagingError::UnknownMethod`]。
 const fn method_from_u8_(code: u8) -> Option<AccessMethod> {
     let method = match code {
         0 => AccessMethod::Head,
@@ -121,27 +118,27 @@ where
         .encode_async(MpEncoder::new(&mut *tx))
         .may_cancel_with(cancel.child_token())
         .await
-        .map_err(|err| MessagingError::Encode(err.to_string()))?;
+        .map_err(MessagingError::Encode)?;
     prefix
         .location_
         .as_str()
         .encode_async(MpEncoder::new(&mut *tx))
         .may_cancel_with(cancel.child_token())
         .await
-        .map_err(|err| MessagingError::Encode(err.to_string()))?;
+        .map_err(MessagingError::Encode)?;
     prefix
         .headers_
         .encode_async(MpEncoder::new(&mut *tx))
         .may_cancel_with(cancel)
         .await
-        .map_err(|err| MessagingError::Encode(err.to_string()))?;
+        .map_err(MessagingError::Encode)?;
     Result::Ok(())
 }
 
 /// 从接收半边解出一个请求前缀。
 ///
 /// 只读前缀所需的字节：报文体的第一个字节仍在环里。未知方法位报
-/// [`MessagingError::Unknown`]，不猜一个近似值。
+/// [`MessagingError::UnknownMethod`]，不猜一个近似值。
 ///
 /// # Errors
 ///
@@ -178,17 +175,16 @@ where
     let code = u8::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel.child_token())
         .await
-        .map_err(|err| MessagingError::Decode(err.to_string()))?;
-    let method_ = method_from_u8_(code)
-        .ok_or_else(|| MessagingError::Unknown(format!("不认识的方法位 {code:#04x}")))?;
+        .map_err(MessagingError::Decode)?;
+    let method_ = method_from_u8_(code).ok_or(MessagingError::UnknownMethod { code })?;
     let location_ = String::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel.child_token())
         .await
-        .map_err(|err| MessagingError::Decode(err.to_string()))?;
+        .map_err(MessagingError::Decode)?;
     let headers_ = Option::<Headers>::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await
-        .map_err(|err| MessagingError::Decode(err.to_string()))?;
+        .map_err(MessagingError::Decode)?;
     Result::Ok(RequestPrefix {
         method_,
         location_,
@@ -248,13 +244,13 @@ where
         .encode_async(MpEncoder::new(&mut *tx))
         .may_cancel_with(cancel.child_token())
         .await
-        .map_err(|err| MessagingError::Encode(err.to_string()))?;
+        .map_err(MessagingError::Encode)?;
     prefix
         .headers_
         .encode_async(MpEncoder::new(&mut *tx))
         .may_cancel_with(cancel)
         .await
-        .map_err(|err| MessagingError::Encode(err.to_string()))?;
+        .map_err(MessagingError::Encode)?;
     Result::Ok(())
 }
 
@@ -298,12 +294,12 @@ where
     let code = u16::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel.child_token())
         .await
-        .map_err(|err| MessagingError::Decode(err.to_string()))?;
+        .map_err(MessagingError::Decode)?;
     let status_ = Status::new(code);
     let headers_ = Option::<Headers>::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await
-        .map_err(|err| MessagingError::Decode(err.to_string()))?;
+        .map_err(MessagingError::Decode)?;
     Result::Ok(ResponsePrefix { status_, headers_ })
 }
 
@@ -677,12 +673,12 @@ mod tests_ {
     /// Test that an unknown method bit fails loudly instead of folding into a known method.
     ///
     /// - 手段：把 `0x7f` 作为方法位（后面跟一个空位置与 `nil` 头）喂给请求前缀解码。
-    /// - 判断：返回 `Err(MessagingError::Unknown)`。线上契约不认识就不能猜——把 `0x7f`
+    /// - 判断：返回 `Err(MessagingError::UnknownMethod)`。线上契约不认识就不能猜——把 `0x7f`
     ///   折成 `Head` 会让服务端把一次未知访问当成元信息查询。
     ///
     /// - Means: feed `0x7f` as the method bit (followed by an empty location and nil headers)
     ///   to the request-prefix decoder.
-    /// - Verdict: `Err(MessagingError::Unknown)`. An unrecognised wire contract is never
+    /// - Verdict: `Err(MessagingError::UnknownMethod)`. An unrecognised wire contract is never
     ///   guessed: folding `0x7f` into `Head` would turn an unknown access into a metadata read.
     #[test]
     fn unknown_method_fails_loudly_() {
@@ -693,7 +689,7 @@ mod tests_ {
         );
 
         assert!(
-            matches!(result, Result::Err(MessagingError::Unknown(_))),
+            matches!(result, Result::Err(MessagingError::UnknownMethod { .. })),
             "未知方法位应当报 Unknown，实际是 {result:?}"
         );
     }

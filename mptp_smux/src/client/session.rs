@@ -64,18 +64,17 @@ use abs_buff::{
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mptp::{
     client::{SessionState, TrMptpSession},
-    messaging::{
-        BodySize, TrMsgPrefix,
-        chunked::{
-            ChunkedEncode, ChunkedReadAsync, ChunkedReadError, ChunkedReadFuture, ChunkedReader,
-        },
-        limited::{
-            LimitedReader, LimitedReaderAsync, LimitedReaderError, LimitedReaderFuture,
-            LimitedRefSegm, LimitedWriter,
-        },
-        read::TrMptpBuffRead,
-    },
+    messaging::{BodySize, TrMsgPrefix, read::TrMptpBuffRead},
     spec::{NumOrStr, access_method::AccessMethod},
+};
+use mptp_wire::{
+    chunked::{
+        ChunkedEncode, ChunkedReadAsync, ChunkedReadError, ChunkedReadFuture, ChunkedReader,
+    },
+    limited::{
+        LimitedReader, LimitedReaderAsync, LimitedReaderError, LimitedReaderFuture,
+        LimitedRefSegm, LimitedWriter,
+    },
 };
 use anylr::SomeOf;
 use gen_mcf2::gen_may_cancel_future;
