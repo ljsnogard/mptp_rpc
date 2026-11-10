@@ -28,6 +28,11 @@
 //! prefix and leaves the first body byte in the ring; encoding writes through the ring
 //! directly, with no gather buffer and no fixed scratch cap.
 
+use alloc::{
+    format,
+    string::{String, ToString},
+};
+
 use abs_buff::{TrBuffRead, TrBuffWrite};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodable, ser::TrEncodable};
@@ -82,7 +87,7 @@ const fn method_from_u8_(code: u8) -> Option<AccessMethod> {
 /// ```ignore
 /// use abs_cancel::NonCancellableToken;
 /// use abs_mptp::spec::access_method::AccessMethod;
-/// use mptp_smux::messaging::{write_request_prefix_async, RequestPrefix};
+/// use mptp_wire::{write_request_prefix_async, RequestPrefix};
 ///
 /// let prefix = RequestPrefix::new(AccessMethod::Call, "/rpc/echo");
 /// write_request_prefix_async(&prefix, &mut tx)
@@ -146,7 +151,7 @@ where
 ///
 /// ```ignore
 /// use abs_cancel::NonCancellableToken;
-/// use mptp_smux::messaging::read_request_prefix_async;
+/// use mptp_wire::read_request_prefix_async;
 ///
 /// let prefix = read_request_prefix_async(&mut rx)
 ///     .may_cancel_with(NonCancellableToken::new())
@@ -208,7 +213,7 @@ where
 /// ```ignore
 /// use abs_cancel::NonCancellableToken;
 /// use abs_mptp::spec::Status;
-/// use mptp_smux::messaging::{write_response_prefix_async, ResponsePrefix};
+/// use mptp_wire::{write_response_prefix_async, ResponsePrefix};
 ///
 /// let prefix = ResponsePrefix::new(Status::Ok);
 /// write_response_prefix_async(&prefix, &mut tx)
@@ -266,7 +271,7 @@ where
 ///
 /// ```ignore
 /// use abs_cancel::NonCancellableToken;
-/// use mptp_smux::messaging::read_response_prefix_async;
+/// use mptp_wire::read_response_prefix_async;
 ///
 /// let prefix = read_response_prefix_async(&mut rx)
 ///     .may_cancel_with(NonCancellableToken::new())
@@ -323,7 +328,7 @@ mod tests_ {
     use abs_mptp::spec::{StdHeaderKey, StdHeaderVal};
 
     use super::*;
-    use crate::messaging::{HeaderKey, HeaderVal};
+    use crate::{HeaderKey, HeaderVal};
 
     /// 立即完成的测试执行器：所有操作都是纯内存的，会一直 `Ready`。
     fn block_on_<TyFut>(future: TyFut) -> TyFut::Output

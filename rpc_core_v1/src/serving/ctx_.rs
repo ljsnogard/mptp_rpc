@@ -26,13 +26,11 @@ use abs_mptp::{
     spec::{Status, StdHeaderKey, StdHeaderVal},
 };
 use gen_mcf2::gen_may_cancel_future;
-use mptp_smux::{
-    messaging::{Headers, ResponsePrefix, write_response_prefix_async},
-    serving::{
-        close_channel_async,
-        config::{ChannelRx, ChannelTx},
-    },
+use mptp_smux::serving::{
+    close_channel_async,
+    config::{ChannelRx, ChannelTx},
 };
+use mptp_wire::{Headers, ResponsePrefix, write_response_prefix_async};
 
 use crate::{
     messaging::body_::{

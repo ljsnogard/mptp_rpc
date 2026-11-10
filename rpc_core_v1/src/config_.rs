@@ -52,6 +52,7 @@ use crate::{
         },
         mm_ptr::Shared,
         mptp_smux::{self, client::config as mptp_cli_cfg, serving::config as mptp_srv_cfg},
+        mptp_wire,
     },
 };
 
@@ -192,9 +193,9 @@ where
     /// 共享连接对象的分配器来自分配约定，而不是本 crate 的固定选择。
     type SharedConn = Shared<TyConn, TyAllocCfg::SharedConnAlloc>;
 
-    type ReqPrefix = mptp_smux::messaging::RequestPrefix;
+    type ReqPrefix = mptp_wire::RequestPrefix;
 
-    type RespPrefix = mptp_smux::messaging::ResponsePrefix;
+    type RespPrefix = mptp_wire::ResponsePrefix;
 }
 
 impl<TyConn, TyDock, TyAllocCfg> mptp_cli_cfg::TrConfig for ClientConfig<TyConn, TyDock, TyAllocCfg>
@@ -260,13 +261,13 @@ where
 {
     type MuxConn = TyConn;
 
-    type ReqHeaders = mptp_smux::messaging::Headers;
+    type ReqHeaders = mptp_wire::Headers;
 
-    type RespHeaders = mptp_smux::messaging::Headers;
+    type RespHeaders = mptp_wire::Headers;
 
-    type ReqPrefix = mptp_smux::messaging::RequestPrefix;
+    type ReqPrefix = mptp_wire::RequestPrefix;
 
-    type RespPrefix = mptp_smux::messaging::ResponsePrefix;
+    type RespPrefix = mptp_wire::ResponsePrefix;
 }
 
 impl<TyConn, TyDock, TyAllocCfg> mptp_srv_cfg::TrConfig

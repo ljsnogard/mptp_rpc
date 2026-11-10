@@ -8,11 +8,15 @@
 > **当前状态**：本 crate 仍是 `0.1.0` 的单体实现，客户端与服务端总是同时编译。
 > README 中的 `client` / `server` feature 是**重构目标**，尚未落地；文中凡标「目标」的条目
 > 都不应当作已实现能力使用。
+>
+> 前缀线格式已经抽到 [`mptp_wire`](../mptp_wire/README.md)：`mptp_smux` 通过
+> `mptp_smux::messaging` 兼容别名继续暴露原来的类型与读写入口。
 
 ## 它是什么
 
 - MPTP 的 **smux_v1 传输绑定**：dock 寻址、开子流 / 接子流、ring 内存注入、半关闭与收尾；
-- MPTP 请求 / 回复前缀的**参考线格式实现**：方法、位置、状态、头表；
+- MPTP 请求 / 回复前缀的线格式由 [`mptp_wire`](../mptp_wire/README.md) 拥有；本 crate 通过
+  `mptp_smux::messaging` 别名继续导出这些类型与读写入口；
 - 按头表搬运**请求体 / 回复体 / 后缀流**的会话对象；
 - 客户端与服务端两套角色实现；
 - 两端对等：同一条 `smux_v1` 连接的两端都可以同时发请求和接请求。
@@ -40,7 +44,7 @@
 │   rpc_core_v1 / abs_rpc_serv / 应用代码                      │
 ├─────────────────────────────────────────────────────────────┤
 │ MPTP：前缀、头表、体边界、后缀流、一次请求的会话顺序          │
-│   abs_mptp（形状） + MPTP 线格式（当前由 mptp_smux 提供）     │
+│   abs_mptp（形状） + mptp_wire（具体线格式）                  │
 ├─────────────────────────────────────────────────────────────┤
 │ 多流传输：open / accept / read / write / half-close / reset   │
 │   smux_v1（当前） / QUIC（候选）                              │
@@ -138,7 +142,8 @@ mptp_smux = { features = ["client", "server", "router"] }
    回复后缀 → 半关闭 → 收尾；
 3. **注入 ring 内存**：按配置声明的工厂，为每条子流现场生产新的 ring；不缓存、不复用
    已交给上一条子流的内存；
-4. **提供前缀线格式的参考实现**：严格按 MPTP 编码 / 解码，读前缀时不越过体的第一个字节；
+4. **使用并转出前缀线格式**：具体编解码由 `mptp_wire` 实现；本 crate 只负责把前缀读写接到
+   子流上，读前缀时不越过体的第一个字节；
 5. **按头表搬运体与后缀**：定长 / 分块 / 无体由 `Body_Size` / `Body_Transfer` 唯一决定；
    后缀是裸字节流；
 6. **实现客户端会话**：发请求、发体、发后缀、读回复前缀、读回复体 / 后缀；
@@ -166,7 +171,7 @@ mptp_smux = { features = ["client", "server", "router"] }
 
 | 使用者 | 用到的部分 | 用途 |
 | --- | --- | --- |
-| `rpc_core_v1` | `MptpClient` / `MptpSession`、`MptpServer`、`Router`、`messaging`、两端配置、ring 工厂 | RPC 客户端代理、服务端 `RpcCallCtx`、interface 分派 |
+| `rpc_core_v1` | `MptpClient` / `MptpSession`、`MptpServer`、`Router`、`mptp_wire`、两端配置、ring 工厂 | RPC 客户端代理、服务端 `RpcCallCtx`、interface 分派 |
 | `abs_rpc_serv` | `serving::config::TrConfig` 与协议类型转出 | RPC service 的抽象契约 |
 | `rpc_svc_macro` | 经 `rpc_core_v1` 间接使用；文档示例使用 `Router` / `RouterCtx` | 生成代码的装配说明 |
 | `mptp_smux_v1_demo` | `MptpClient`、`MptpServer`、`messaging`、`TrPrepFactory`、`TrPathRouter` | 真实 TCP 上的一问一答验证；自带 Router |
@@ -185,8 +190,9 @@ mptp_smux = { features = ["client", "server", "router"] }
 - **错误源**：多数错误被转成 `String`，丢失底层 source；
 - **std 事实**：Cargo `categories` 写着 `no-std`，但本 crate 目前是 std 实现；
   `abs_mptp_smux` 才是 no_std 抽象层；
-- **线格式与 RPC 层耦合**：`abs_rpc_serv` / `rpc_core_v1` 直接依赖具体 `mptp_smux`，
-  未来 `mptp_quic` 无法复用；
+- **线格式与 RPC 层耦合（已部分解除）**：`rpc_core_v1` 已直接使用 `mptp_wire`；
+  `abs_rpc_serv` 仍通过 `mptp_smux` 的 serving 配置父 trait 间接依赖具体传输，
+  尚未完全解除；
 - **内置 Router 越界**：路由是应用策略，当前却无条件编译进本 crate。
 
 ## 最小使用形状
@@ -219,6 +225,7 @@ mptp_smux = { features = ["client", "server", "router"] }
 | `abs_smux` / `smux_v1` | 多流传输与连接实现 |
 | `abs_buff` | ring / 段读写接口 |
 | `rpc_core_v1` / `abs_rpc_serv` | RPC 语义层与服务端抽象 |
+| `mptp_wire` | MPTP 前缀、头表与 MessagePack 线格式；本 crate 的兼容别名指向它 |
 | `matchit_route` | 内置 `Router` 的路径匹配实现（目标上应可选） |
 
 ## 开发与验证

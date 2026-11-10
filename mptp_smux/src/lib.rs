@@ -2,7 +2,7 @@
 //!
 //! 本 crate 是 `mptp_core` 拆分出来的第二块：协议本身的抽象与形状在 [`abs_mptp`]，而「怎么在
 //! 一个多流连接上把它跑起来」在这里。它与**用户业务类型无关**：报文前缀的线上格式由
-//! [`messaging`] 自己拥有（基于 `mp_denco`），业务体与后缀流的序列化则仍由使用者决定。
+//! [`mptp_wire`] 拥有，业务体与后缀流的序列化则仍由使用者决定。
 //!
 //! # 四块内容
 //!
@@ -10,7 +10,7 @@
 //!   （[`MptpClient`](client::MptpClient) / [`MptpSession`](client::MptpSession)）；
 //! - [`serving`]：监听 → 收建流 → 交出 ring → 解码 → 路由 → 交给 handler
 //!   （[`MptpServer`](serving::MptpServer)）；
-//! - [`messaging`]：请求 / 回复前缀的**自有线格式**；
+//! - [`messaging`]：指向 [`mptp_wire`] 的兼容别名；具体线格式由该 crate 拥有；
 //! - [`TrPrepFactory`] 一族：**ring 内存怎么准备**的注入契约，两端各一个环境类型；
 //! - [`x_deps`]：本 crate 依赖的对外重导出，供下游不必逐条声明版本。
 //!
@@ -31,8 +31,8 @@
 //!
 //! This crate is the second half of the `mptp_core` split: `abs_mptp` holds the protocol
 //! shapes, and this crate runs them over a multiplexed connection. It knows nothing about the
-//! user's business types: the prefix wire format is owned here by [`messaging`] (on top of
-//! `mp_denco`), while body and suffix serialization stay with the application.
+//! user's business types: the prefix wire format is owned by [`mptp_wire`], while body and
+//! suffix serialization stay with the application.
 //!
 //! Ring memory is injected the way upstream demands it: a *factory* built from a per-channel
 //! *environment*, declared as a **type** in the configuration so that no instance ever has to
@@ -43,12 +43,13 @@
 #![feature(unboxed_closures)]
 
 pub mod client;
-pub mod messaging;
 pub mod serving;
 
 mod ring_prepare_;
 
-pub use messaging::{
+// 兼容旧路径：`mptp_smux::messaging::*` 仍然可用，但类型由 `mptp_wire` 拥有。
+pub use mptp_wire as messaging;
+pub use mptp_wire::{
     HeaderEntry, HeaderKey, HeaderVal, Headers, RequestPrefix, ResponsePrefix, U16OrStr,
 };
 pub use ring_prepare_::{PeerRole, RingBuffs, TrPrepFactory, TrPrepareCtx};
@@ -67,12 +68,43 @@ pub const K_DEFAULT_SERVING_DOCK: u8 = 0x80;
 pub mod x_deps {
     pub use abs_buff;
     pub use abs_buff::x_deps::{abs_cancel, anylr, funty, gen_mcf2};
-    pub use abs_denco;
     pub use abs_mptp;
     pub use abs_mptp::x_deps::abs_smux;
     pub use abs_smux::x_deps::abs_mm;
-    pub use denco_macro;
     pub use mm_ptr;
-    pub use mp_denco;
+    pub use mptp_wire;
+    // 兼容旧的 `mptp_smux::x_deps::{abs_denco, denco_macro, mp_denco}` 路径；
+    // 实际依赖由 `mptp_wire` 持有，本 crate 不直接依赖 denco。
+    pub use mptp_wire::x_deps::{abs_denco, denco_macro, mp_denco};
     pub use tlist;
+}
+
+#[cfg(test)]
+mod tests_ {
+    use abs_mptp::spec::access_method::AccessMethod;
+
+    /// 测试 `mptp_smux::messaging` 兼容别名仍导出 `mptp_wire` 的同一批类型。
+    /// Test that the `mptp_smux::messaging` compatibility alias still exposes the same
+    /// `mptp_wire` types.
+    ///
+    /// - 手段：用别名路径构造 `RequestPrefix`，再交给要求 `mptp_wire::RequestPrefix`
+    ///   的函数。
+    /// - 判断：编译通过，说明两条路径指向同一个类型；运行期只检查构造成功。
+    ///
+    /// - Means: build a `RequestPrefix` through the alias path and pass it to a function
+    ///   requiring `mptp_wire::RequestPrefix`.
+    /// - Verdict: it compiles, proving both paths name the same type; at runtime it only
+    ///   checks construction.
+    #[test]
+    fn messaging_alias_exposes_wire_types_() {
+        fn assert_same(_: mptp_wire::RequestPrefix) {}
+
+        let prefix: crate::messaging::RequestPrefix =
+            crate::messaging::RequestPrefix::new(AccessMethod::Call, "/alias");
+        assert_same(prefix);
+
+        let root_prefix: crate::RequestPrefix =
+            mptp_wire::RequestPrefix::new(AccessMethod::Call, "/root");
+        assert_same(root_prefix);
+    }
 }

@@ -6,6 +6,7 @@ members = [
     "abs_rpc_serv",
     "matchit_route",
     "mptp_smux",
+    "mptp_wire",
     "rpc_core_v1",
     "rpc_svc_macro",
 

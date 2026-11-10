@@ -1,7 +1,7 @@
 //! 报文前缀的两个具体类型：请求是 `access_method + location + headers`，回复是
 //! `status + headers`。
 //!
-//! 这两个类型就是 MPTP 的**线格式载体**：`mptp_smux` 不再要求使用者的配置提供 codec，而是
+//! 这两个类型就是 MPTP 的**线格式载体**：`mptp_wire` 不再要求使用者的配置提供 codec，而是
 //! 直接把这两个类型交给 [`wire_`](super::wire_) 编解码。业务类型（例如 RPC 的参数与返回值）
 //! 不在这里出现——它们仍然由使用者自己的序列化格式负责。
 //!
@@ -14,7 +14,9 @@
 //! # `prefix_`: the two concrete prefix types
 //!
 //! Requests are `method + location + headers`; responses are `status + headers`. These are
-//! the wire-format carriers owned by `mptp_smux`; business payload types stay outside.
+//! the wire-format carriers owned by `mptp_wire`; business payload types stay outside.
+
+use alloc::string::String;
 
 use abs_mptp::{
     messaging::{TrMsgPrefix, TrRequestPrefix, TrResponsePrefix},
@@ -32,7 +34,7 @@ use super::headers_::Headers;
 ///
 /// ```
 /// use abs_mptp::spec::access_method::AccessMethod;
-/// use mptp_smux::messaging::RequestPrefix;
+/// use mptp_wire::RequestPrefix;
 ///
 /// let mut prefix = RequestPrefix::new(AccessMethod::Call, "/api/v1/customer/goods");
 /// prefix
@@ -142,7 +144,7 @@ impl TrRequestPrefix for RequestPrefix {
 ///
 /// ```
 /// use abs_mptp::spec::Status;
-/// use mptp_smux::messaging::ResponsePrefix;
+/// use mptp_wire::ResponsePrefix;
 ///
 /// let mut prefix = ResponsePrefix::new(Status::Ok);
 /// prefix

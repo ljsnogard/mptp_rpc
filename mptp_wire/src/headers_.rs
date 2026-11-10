@@ -35,8 +35,8 @@
 //! to `String`; both [`HeaderKey`] and [`HeaderVal`] are transparent wrappers around
 //! `U16OrStr<S>`.
 
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::{borrow::Borrow, fmt, marker::PhantomData};
-use std::{collections::BTreeMap, sync::Arc};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{
@@ -66,7 +66,7 @@ use super::num_or_str_::U16OrStr;
 /// # Examples
 ///
 /// ```
-/// use mptp_smux::messaging::HeaderVal;
+/// use mptp_wire::HeaderVal;
 ///
 /// let num = HeaderVal::<String>::from_num(7u16);
 /// let text = HeaderVal::<String>::from_text("0xabc");
@@ -92,7 +92,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use mptp_smux::messaging::{HeaderKey, U16OrStr};
+/// use mptp_wire::{HeaderKey, U16OrStr};
 ///
 /// let key = HeaderKey::<String>::from_num(0xA1);
 /// assert_eq!(key.into_inner(), U16OrStr::U16(0xA1));
@@ -153,7 +153,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use mptp_smux::messaging::HeaderVal;
+    /// use mptp_wire::HeaderVal;
     ///
     /// assert_eq!(HeaderVal::<String>::from_text("42").as_num(), Some(42u16));
     /// assert_eq!(HeaderVal::<String>::from_text("not a number").as_num(), None);
@@ -174,7 +174,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use mptp_smux::messaging::HeaderVal;
+    /// use mptp_wire::HeaderVal;
     ///
     /// assert_eq!(HeaderVal::<String>::from_text("0x10").as_u64(), Some(16u64));
     /// assert_eq!(HeaderVal::<String>::from_text("16").as_u64(), Some(16u64));
@@ -200,7 +200,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use mptp_smux::messaging::HeaderVal;
+    /// use mptp_wire::HeaderVal;
     ///
     /// assert_eq!(HeaderVal::<String>::from_text("abc").as_text(), Some("abc"));
     /// assert_eq!(HeaderVal::<String>::from_num(1u16).as_text(), None);
@@ -420,7 +420,7 @@ where
 /// use core::borrow::Borrow;
 ///
 /// use abs_mptp::spec::StdHeaderKey;
-/// use mptp_smux::messaging::{HeaderEntry, HeaderKey, HeaderVal};
+/// use mptp_wire::{HeaderEntry, HeaderKey, HeaderVal};
 ///
 /// let entry = HeaderEntry::new(StdHeaderKey::Body_Type, HeaderVal::from_num(1u16));
 /// let key: &HeaderKey<String> = entry.borrow();
@@ -522,7 +522,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use mptp_smux::messaging::{HeaderKey, HeaderVal, Headers};
+/// use mptp_wire::{HeaderKey, HeaderVal, Headers};
 ///
 /// let mut headers = Headers::new();
 /// headers.set_text(abs_mptp::spec::StdHeaderKey::Body_Size, "12");
@@ -680,7 +680,7 @@ where
 
     type Entry = HeaderEntry<S>;
 
-    type EntriesIter = std::vec::IntoIter<HeaderEntry<S>>;
+    type EntriesIter = alloc::vec::IntoIter<HeaderEntry<S>>;
 
     fn try_get_std_header(&self, key: StdHeaderKey) -> Option<&Self::Val> {
         self.try_get_val(key)

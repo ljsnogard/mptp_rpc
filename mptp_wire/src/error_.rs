@@ -1,5 +1,7 @@
 //! MPTP 前缀线格式的错误类型。
 //!
+//! 本模块不依赖任何传输层类型。
+//!
 //! 本模块的错误只覆盖**前缀**的编码、解码与线上取值识别；报文体的解码失败属于使用者
 //! 自己的序列化格式，不会出现在这里。
 //!
@@ -8,6 +10,8 @@
 //! These errors cover **prefix** encoding, decoding and wire-value recognition only. Body
 //! decoding belongs to the user's own serialization format and never appears here.
 
+use alloc::string::String;
+
 use thiserror::Error;
 
 /// 编码或解码 MPTP 报文前缀时出现的错误。
@@ -15,7 +19,7 @@ use thiserror::Error;
 /// # Examples
 ///
 /// ```
-/// use mptp_smux::messaging::MessagingError;
+/// use mptp_wire::MessagingError;
 ///
 /// let err = MessagingError::Unknown("不认识的方法位 0x7f".to_string());
 /// assert!(err.to_string().contains("线上取值不可识别"));

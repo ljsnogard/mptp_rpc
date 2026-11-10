@@ -11,6 +11,7 @@
 //! `abs_mptp::spec::TrNumOrStr` directly, so it can serve as `TrHeaders::Key`; denco's encode
 //! and decode traits are implemented manually because the header map owns its own wire format.
 
+use alloc::string::{String, ToString};
 use core::{borrow::Borrow, fmt, future, marker::PhantomData};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
@@ -21,8 +22,6 @@ use abs_denco::{
 use abs_mptp::spec::{NumOrStr as AbsNumOrStr, StdHeaderKey, TrNumOrStr as AbsTrNumOrStr};
 use gen_mcf2::gen_may_cancel_future;
 
-use crate::x_deps::{abs_cancel, abs_denco, abs_mptp, gen_mcf2};
-
 /// 一个头键：要么是协议规定的 `u16` 数字，要么是使用者选择的字符串。
 ///
 /// 这是 `abs_mptp::spec::NumOrStr` 的 u16 特化复刻：数字形态固定为 `u16`，字符串形态
@@ -31,7 +30,7 @@ use crate::x_deps::{abs_cancel, abs_denco, abs_mptp, gen_mcf2};
 /// # Examples
 ///
 /// ```
-/// use mptp_smux::messaging::U16OrStr;
+/// use mptp_wire::U16OrStr;
 ///
 /// let numeric: U16OrStr<String> = U16OrStr::U16(0xA1);
 /// let textual: U16OrStr<String> = U16OrStr::Str("x-custom".to_string());

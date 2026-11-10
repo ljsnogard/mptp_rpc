@@ -93,5 +93,6 @@ pub mod x_deps {
     pub use mp_denco;
     pub use mptp_smux;
     pub use mptp_smux::x_deps::{abs_mm, abs_mptp, abs_smux};
+    pub use mptp_wire;
     pub use tlist;
 }

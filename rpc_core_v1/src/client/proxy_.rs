@@ -27,20 +27,15 @@ use abs_mptp::{
     },
 };
 use gen_mcf2::gen_may_cancel_future;
-use mptp_smux::{
-    client::MptpClient,
-    messaging::{Headers, RequestPrefix},
-};
+use mptp_smux::client::MptpClient;
+use mptp_wire::{Headers, RequestPrefix};
 
 use crate::{
     client as rpc_client,
-    messaging::{RpcError, RpcResult, TrRpcInterface, concat_location},
     messaging::body_::{
-        BodyRing_, K_BODY_RING_CAP_,
-        decode_from_async_,
-        encode_into_async_,
-        read_body_async_,
+        BodyRing_, K_BODY_RING_CAP_, decode_from_async_, encode_into_async_, read_body_async_,
     },
+    messaging::{RpcError, RpcResult, TrRpcInterface, concat_location},
     x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };
 

@@ -1,0 +1,21 @@
+[package]
+name = "mptp_wire"
+version = "0.1.0"
+edition = "2024"
+
+description = "MPTP prefix and header wire format, independent of the transport binding."
+repository.workspace = true
+keywords = ["mptp", "messagepack", "wire"]
+license.workspace = true
+readme = "README.md"
+
+[dependencies]
+abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+abs_mptp = { path = "../abs_mptp" }
+denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+# 错误只要求 `core::error::Error`；本 crate 是 no_std + alloc。
+thiserror = { version = "2.0.20", default-features = false }

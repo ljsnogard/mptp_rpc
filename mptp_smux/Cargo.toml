@@ -17,19 +17,12 @@ abs_mptp = { path = "../abs_mptp" }
 # 顶层 interface 前缀匹配统一交给 matchit_route；项目里不再保留第二套前缀 trie。
 matchit_route = { path = "../matchit_route" }
 
-# **MPTP 前缀的线上格式由本 crate 自己拥有**：`mp_denco` 直接面向 `abs_buff` 的段接口，
-# 编解码器按值推进，不把整个前缀预攒进 `Vec`。`abs_denco` 是格式抽象；头表已改为手写
-# `TrEncodable` / `TrDecodable`（键是 `U16OrStr<S>`），`denco_macro` 仍经 `x_deps`
-# 转出给下游派生业务类型，`alloc-collections` 保留给其它集合实现。
-# 三个 `denco` crate 一律取默认分支：squash 后的 `main`（9550d95）已包含
-# `feat/bump-alloc` 的全部内容，不必再钉在特性分支上。下游 manifest 也都不写
-# `branch`，否则 Cargo 会把同一份代码解析成两个 `abs_denco` source。
-abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git", features = ["alloc-collections"] }
-denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
-mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+# MPTP 前缀的线上格式已抽到 `mptp_wire`；本 crate 只保留 smux 绑定与会话驱动。
+# 下游仍可通过 `mptp_smux::messaging`（指向 `mptp_wire` 的别名）使用原有路径。
+mptp_wire = { path = "../mptp_wire" }
 
 # 派生代码会直接引用 `abs_cancel` 与 `gen_mcf2`；两者都取 `cancel_rs` 这一份，
-# 与 `abs_buff` / `mp_denco` 的依赖来源一致，避免同名不同源的 trait 实例。
+# 与 `mptp_wire` / `abs_buff` 的依赖来源一致，避免同名不同源的 trait 实例。
 abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 

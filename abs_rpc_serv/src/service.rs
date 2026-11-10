@@ -26,7 +26,6 @@ use core::error::Error;
 use abs_cancel::TrMayCancel;
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use abs_mptp::spec::Status;
-use mptp_smux::x_deps::{abs_cancel, abs_denco, abs_mptp};
 
 /// 一次服务端 RPC 调用的最小上下文契约。
 ///
