@@ -1,7 +1,7 @@
 # `mptp_smux` 重构设计：七种 AccessMethod 标准实现 + `no_std` + feature 边界
 
 - 日期：2026-11-11 07:30（根据评审意见修订）
-- 状态：**设计草案（评审修订版），已确认实施**
+- 状态：**已实施并验证**（分支 `feat/mptp-smux-refactor`；设计、核心实现、Router 迁移、文档分开提交）
 - 基线：分支 `feat/mptp_wire`，提交 `3a7beb8`；当前工作分支
   `feat/mptp-smux-refactor`
 - 范围：`mptp_smux` 的客户端 / 服务端标准 API、错误类型、`no_std` 边界、
@@ -17,6 +17,26 @@
 - [`../DESIGN_BLUEPRINT.md`](../DESIGN_BLUEPRINT.md)
 - [`../mptp_smux/README.md`](../mptp_smux/README.md)
 - [`../mptp_wire/README.md`](../mptp_wire/README.md)
+
+> **实施备注（2026-11-11）**
+>
+> 本设计已落地，实施中确认的偏差如下：
+>
+> 1. `Call` 的方法糖命名为 `invoke()`，避免与 RPC 层 `TrRpcClientExt::call::<I>()` 的
+>    固有方法同名遮蔽；
+> 2. `MptpServlet::new(handler)` 不直接持有连接对象；一个 servlet 只服务一条连接，
+>    连接通过 `listen_async` / `accept_async` 的 listener 交给它；
+> 3. `RequestBuilder::suffix` 对所有方法可用（通用 escape hatch），后缀方向由文档与
+>    handler 的方法判断表达；
+> 4. 新增 `ResponseBodyWriter`：`no_body_async` / `sized_async` / `chunked_async` 返回它，
+>    可在回复体之后继续 `.suffix_async`，因此 `Pull` / `Call` 可以「体 + 后缀」；
+> 5. 两个 demo 已改为新的 `TrServeHandler` 路径；`rpc_demo` 使用 32 个 dock 轮换，
+>    避开 `smux_v1` 拆流宽限期导致的间歇性重开失败。
+>
+> 已验证：`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+> `cargo doc --workspace --no-deps`、feature 矩阵、`just e2e-smux`、`just e2e-rpc`。
+> 尚未补的用例：`Push` / `Pull` 后缀与 `405` / `404` 的端到端矩阵（当前为 helper
+> 单元测试 + `Call` 端到端）。
 
 ## 0. 评审后的结论摘要
 
