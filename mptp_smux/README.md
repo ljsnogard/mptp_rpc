@@ -143,6 +143,13 @@ loop {
   `ResponseBodyWriter`，可以在体之后继续 `.suffix_async` 追加回复后缀流；
   `ResponseBuilder::suffix_async` 用于「没有体、只有后缀」。
   `Head` / `Drop` 的体方法会被拒绝；`no_body_async` 也会拒绝已经声明了体的前缀。
+- **无限后缀流**：`ResponseBuilder::suffix_stream_async()` 写出「没有回复体」的前缀，
+  `await` 后得到 `SuffixStream`。它的 `write_chunk_async(&[u8])` 可以调用任意多次，
+  每次追加一段裸字节，**不关闭写端**；对象边界、长度前缀与序列化全部属于应用层
+  （例如 denco 的自描述值序列）。`write_chunks_async(&mut R)` 把一个有限源整体追加；
+  `finish_async()` 半关闭写端、读尽对端并结束会话。这些 future 都实现
+  `TrMayCancel`，可用 `.may_cancel_with(token)` 施加取消令牌。线上格式仍是裸字节，
+  `mptp_wire` 不参与。
 - handler 未写回复就返回：框架写 `500` 无体并收尾；handler 返回错误：同样兜底
   `500`，错误经 `ServeError::Target` 上报，不泄漏到线上。
 - handler 未消费的请求体 / 后缀由框架收尾时代读丢弃（drain），不主动 reset。

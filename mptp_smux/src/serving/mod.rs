@@ -24,4 +24,5 @@ pub use servlet_::{
 };
 pub use session_::{
     RequestBodyRead, RequestSuffixRead, ResponseBodyWriter, ResponseBuilder, ServingSession,
+    SuffixStream,
 };

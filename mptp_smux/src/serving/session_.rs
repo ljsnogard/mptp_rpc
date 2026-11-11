@@ -29,7 +29,7 @@ use mptp_wire::{
 
 use crate::{
     body_::{BodyPlan, BodyRead, BodyState, SuffixRead},
-    copy_::{CopyError, copy_all_async_, copy_sized_async_},
+    copy_::{CopyError, copy_all_async_, copy_sized_async_, drain_to_eof_async_},
     error_::{ProtocolError, ServeError, StateError},
     session_core_::SessionCore,
     session_state_::ServingState,
@@ -377,6 +377,28 @@ where
     {
         ResponseSuffixAsync::new(self, suffix)
     }
+
+    /// 写回复前缀（无回复体），返回**可无限追加 chunk** 的后缀流句柄。
+    ///
+    /// 与 [`ResponseBuilder::suffix_async`] 的区别只在源：这里没有「源」，调用者拿到
+    /// [`SuffixStream`] 之后用 [`SuffixStream::write_chunk_async`] 一次一次地追加字节。
+    /// 写端在句柄存活期间**不会**被半关闭，因此同一个流可以持续数小时。
+    ///
+    /// 返回的 future 可经 [`TrMayCancel::may_cancel_with`] 施加取消令牌；`await` 成功后
+    /// 得到 [`SuffixStream`]。
+    ///
+    /// # Errors
+    ///
+    /// - `Head` / `Drop`：这两个方法按协议没有回复体，也没有后缀流，返回
+    ///   [`ProtocolError::ResponseBodyOnHeadOrDrop`]；
+    /// - 前缀已声明了体：返回 [`ProtocolError::BodyDeclaredButNotWritten`]；
+    /// - 写回复前缀失败：返回 [`ServeError::Protocol`]。
+    pub fn suffix_stream_async(self) -> ResponseSuffixStreamAsync<'a, 'a, C>
+    where
+        C: 'a,
+    {
+        ResponseSuffixStreamAsync::new(self)
+    }
 }
 
 /// 已经写完回复体的会话句柄；可以在它之后追加回复后缀流。
@@ -608,6 +630,214 @@ where
     Result::Ok(())
 }
 
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// 无限后缀流
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// **可无限追加 chunk** 的回复后缀流句柄。
+///
+/// 它由 [`ResponseBuilder::suffix_stream_async`] 打开：打开时写出「没有回复体」的回复
+/// 前缀，之后写端一直保持打开，直到调用者显式 [`finish_async`](Self::finish_async)
+/// 或会话被丢弃。因此同一个句柄既可以用三五条事件，也可以持续数小时。
+///
+/// # 这里没有帧格式
+///
+/// chunk 只是 `mptp_smux` 的**写入单位**：本类型不定义对象边界、不写长度前缀、不做
+/// 序列化，也不改 `mptp_wire` 的线上格式。后缀流在线上仍然是裸字节，接收端要按自己
+/// 的应用协议（例如 denco 的自描述值序列）逐值解码。一个对象可以拆成任意多个 chunk
+/// 写入，接收端看到的字节序列与一次写完完全相同。
+///
+/// # 取消与收尾
+///
+/// [`write_chunk_async`](Self::write_chunk_async) /
+/// [`write_chunks_async`](Self::write_chunks_async) /
+/// [`finish_async`](Self::finish_async) 返回的 future 都实现
+/// [`TrMayCancel`]，调用方用 `.may_cancel_with(token)` 施加取消令牌。`finish_async`
+/// 复用标准收尾顺序：先半关闭写端，再读尽对端，最后把会话置为终止。
+pub struct SuffixStream<'a, C>
+where
+    C: TrConfig,
+{
+    /// 所属会话；句柄存活期间独占它。
+    session_: &'a mut ServingSession<C>,
+}
+
+impl<'a, C> SuffixStream<'a, C>
+where
+    C: TrConfig,
+{
+    /// 追加一个 chunk；**不**关闭写端。
+    ///
+    /// `chunk` 的字节被原样写进子流，既不封帧也不加长度。空 chunk 是合法的空操作。
+    ///
+    /// # Errors
+    ///
+    /// - `Head` / `Drop`：按协议没有后缀流，返回
+    ///   [`ProtocolError::ResponseBodyOnHeadOrDrop`]；
+    /// - 写端已被取走（已经 `finish`）：返回 [`ServeError::State`]；
+    /// - 写失败或等待期间被取消：返回 [`ServeError::Protocol`] / [`ServeError::Cancelled`]。
+    pub fn write_chunk_async<'f>(
+        &'f mut self,
+        chunk: &'f [u8],
+    ) -> SuffixWriteChunkAsync<'f, 'a, 'f, C>
+    where
+        C: 'a,
+        'a: 'f,
+    {
+        SuffixWriteChunkAsync::new(self, chunk)
+    }
+
+    /// 把一个有限读源的内容连续写成 chunks，直到源结束；**不**关闭写端。
+    ///
+    /// 这是 [`Self::write_chunk_async`] 的便捷包装：源里有多少字节就追加多少字节，
+    /// 不改变「后缀流是裸字节」的语义。调用方仍然可以在它返回后继续
+    /// [`write_chunk_async`](Self::write_chunk_async)。
+    ///
+    /// # Errors
+    ///
+    /// 与 [`Self::write_chunk_async`] 相同；源读取失败映射成
+    /// [`ProtocolError::SuffixRead`]。
+    pub fn write_chunks_async<'f, R>(
+        &'f mut self,
+        src: &'f mut R,
+    ) -> SuffixWriteChunksAsync<'f, 'a, 'f, C, R>
+    where
+        C: 'a,
+        'a: 'f,
+        R: TrBuffRead<u8> + TrConsumerState,
+    {
+        SuffixWriteChunksAsync::new(self, src)
+    }
+
+    /// 半关闭写端、读尽对端并结束会话。
+    ///
+    /// 返回后这个句柄不能再写；框架也不会再替它兜底回复或收尾。
+    ///
+    /// # Errors
+    ///
+    /// 收尾阶段的读错误**不**上报（它已经不影响写出的响应）；本方法目前只在底层
+    /// 状态不成立（两个半边都已被取走）时返回 [`ServeError::State`]。
+    pub fn finish_async(self) -> SuffixFinishAsync<'a, 'a, C>
+    where
+        C: 'a,
+    {
+        SuffixFinishAsync::new(self)
+    }
+}
+
+/// 把后缀写失败映射成服务端错误。
+///
+/// 与 [`resp_copy_error_`] 分开：后缀流没有「声明长度」，因此截断不会被报告成
+/// `ResponseBodyTruncated`，而是回落到 `SuffixWrite`。
+fn suffix_copy_error_(err: CopyError) -> ServeError {
+    match err {
+        CopyError::Cancelled => ServeError::Cancelled,
+        CopyError::Truncated { declared, read } => {
+            ServeError::Protocol(ProtocolError::SuffixTruncated { declared, read })
+        }
+        CopyError::Read { detail } => ServeError::Protocol(ProtocolError::SuffixRead { detail }),
+        CopyError::Write { detail } => ServeError::Protocol(ProtocolError::SuffixWrite { detail }),
+        CopyError::EmptySegment => ServeError::Protocol(ProtocolError::SuffixWrite {
+            detail: String::from("源或目标让出的段是空的，无法推进"),
+        }),
+    }
+}
+
+/// [`ResponseBuilder::suffix_stream_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(ResponseSuffixStream, pub, new(pub(crate)))]
+async fn response_suffix_stream_async_<'f, C, K>(
+    builder: ResponseBuilder<'f, C>,
+    cancel: K,
+) -> Result<SuffixStream<'f, C>, ServeError>
+where
+    C: TrConfig + 'f,
+    K: TrCancellationToken,
+{
+    let ResponseBuilder {
+        session_,
+        prefix_,
+    } = builder;
+
+    ensure_body_allowed_(session_.method_)?;
+    ensure_no_body_(&prefix_)?;
+
+    write_response_prefix_inner_(session_, prefix_, cancel).await?;
+    Result::Ok(SuffixStream { session_ })
+}
+
+/// [`SuffixStream::write_chunk_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(SuffixWriteChunk, pub, new(pub(crate)))]
+async fn suffix_write_chunk_async_<'f, 'a, C, K>(
+    stream: &'f mut SuffixStream<'a, C>,
+    chunk: &'f [u8],
+    cancel: K,
+) -> Result<(), ServeError>
+where
+    C: TrConfig + 'a,
+    'a: 'f,
+    K: TrCancellationToken,
+{
+    let session_ = &mut *stream.session_;
+    ensure_body_allowed_(session_.method_)?;
+    let size = chunk.len();
+    if size == 0usize {
+        return Result::Ok(());
+    }
+    let mut src = chunk;
+    let tx = session_.core_.tx_mut_()?;
+    copy_sized_async_(&mut src, tx, size, cancel)
+        .await
+        .map_err(suffix_copy_error_)?;
+    Result::Ok(())
+}
+
+/// [`SuffixStream::write_chunks_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(SuffixWriteChunks, pub, new(pub(crate)))]
+async fn suffix_write_chunks_async_<'f, 'a, C, R, K>(
+    stream: &'f mut SuffixStream<'a, C>,
+    src: &'f mut R,
+    cancel: K,
+) -> Result<(), ServeError>
+where
+    C: TrConfig + 'a,
+    'a: 'f,
+    R: TrBuffRead<u8> + TrConsumerState,
+    K: TrCancellationToken,
+{
+    let session_ = &mut *stream.session_;
+    ensure_body_allowed_(session_.method_)?;
+    let tx = session_.core_.tx_mut_()?;
+    copy_all_async_(src, tx, cancel)
+        .await
+        .map_err(suffix_copy_error_)?;
+    Result::Ok(())
+}
+
+/// [`SuffixStream::finish_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(SuffixFinish, pub, new(pub(crate)))]
+async fn suffix_finish_async_<'a, C, K>(
+    stream: SuffixStream<'a, C>,
+    cancel: K,
+) -> Result<(), ServeError>
+where
+    C: TrConfig + 'a,
+    K: TrCancellationToken,
+{
+    let session_ = stream.session_;
+    // 先半关闭写端（丢弃 tx），再读尽对端；顺序不能反。
+    let _ = session_.core_.take_tx_();
+    if let Result::Ok(rx) = session_.core_.rx_mut_() {
+        let _ = drain_to_eof_async_(rx, cancel).await;
+    }
+    let _ = session_.core_.take_rx_();
+    session_.state_ = ServingState::Terminated;
+    Result::Ok(())
+}
+
 #[cfg(test)]
 mod tests_ {
     use super::*;
@@ -688,5 +918,60 @@ mod tests_ {
     fn no_body_accepts_plain_prefix_() {
         let prefix = ResponsePrefix::new(Status::Ok);
         assert!(ensure_no_body_(&prefix).is_ok());
+    }
+
+    /// 测试无限后缀流与有限后缀流共用同一道方法校验：`Head` / `Drop` 一律拒绝。
+    /// Test that the infinite suffix stream shares the method gate: `Head` / `Drop` are
+    /// rejected.
+    ///
+    /// - 手段：对七种方法逐个调用 `ensure_body_allowed_`，模拟打开后缀流前的校验。
+    /// - 判断：`Head` / `Drop` 返回 `ResponseBodyOnHeadOrDrop`，其余五种返回 `Ok`。
+    ///
+    /// - Means: call `ensure_body_allowed_` for all seven methods, mirroring the gate that
+    ///   runs before a suffix stream is opened.
+    /// - Verdict: `Head` / `Drop` return `ResponseBodyOnHeadOrDrop`; the other five return
+    ///   `Ok`.
+    #[test]
+    fn suffix_stream_rejects_head_and_drop_() {
+        for method in [AccessMethod::Head, AccessMethod::Drop] {
+            assert!(matches!(
+                ensure_body_allowed_(method),
+                Result::Err(ProtocolError::ResponseBodyOnHeadOrDrop { .. })
+            ));
+        }
+        for method in [
+            AccessMethod::View,
+            AccessMethod::Post,
+            AccessMethod::Push,
+            AccessMethod::Pull,
+            AccessMethod::Call,
+        ] {
+            assert!(ensure_body_allowed_(method).is_ok(), "{method:?}");
+        }
+    }
+
+    /// 测试后缀写错误被映射成后缀专用的协议错误，而不是回复体错误。
+    /// Test that suffix write failures map to suffix-specific protocol errors.
+    ///
+    /// - 手段：构造 `CopyError::Write` 与 `CopyError::EmptySegment` 两种失败，调用
+    ///   `suffix_copy_error_`。
+    /// - 判断：两者都落到 `ProtocolError::SuffixWrite`，不会冒充 `ResponseBodyWrite`。
+    ///
+    /// - Means: feed `CopyError::Write` and `CopyError::EmptySegment` to
+    ///   `suffix_copy_error_`.
+    /// - Verdict: both become `ProtocolError::SuffixWrite`, never `ResponseBodyWrite`.
+    #[test]
+    fn suffix_errors_are_classified_as_suffix_() {
+        for err in [
+            CopyError::Write {
+                detail: String::from("x"),
+            },
+            CopyError::EmptySegment,
+        ] {
+            assert!(matches!(
+                suffix_copy_error_(err),
+                ServeError::Protocol(ProtocolError::SuffixWrite { .. })
+            ));
+        }
     }
 }
