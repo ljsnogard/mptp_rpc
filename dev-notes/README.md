@@ -26,12 +26,13 @@
   `SessionCore` 共享会话、`no_std` + `client` / `server` feature，以及 Router 迁出本 crate
   的设计与验收清单。
 - [`mptp-smux-demo-20261111-1934.md`](mptp-smux-demo-20261111-1934.md)：
-  `mptp_smux_v1_demo` 重写为 Bevy 太阳系场景的规划（test-first 修订版）：客户端 /
-  服务端直接 MPTP，`abs_art-facade` + compio，每进程最多两个业务线程，Bevy 客户端
-  feature-gated，`bevy_egui` 滑杆，denco 编解码，每客户端一条 MPTP 连接；订阅模型为
-  `View` 目录发现 + 每行星 `Pull` 数据流，支持选择性订阅 / 退订 / 重新订阅；后缀流按
-  chunk 无限写入。实施前先用无 Bevy 的集成测试预演目录、订阅、退订、chunk 拆分等需求，
-  并记录需要补的 `SuffixStream` 缺口。
+  `mptp_smux_v1_demo` 重写为 Bevy 太阳系场景的规划与实施记录：客户端 / 服务端直接
+  MPTP，`abs_art-facade` + compio，每进程最多两个业务线程，Bevy 客户端 feature-gated，
+  `bevy_egui` 滑杆，denco 编解码，每客户端一条 MPTP 连接；订阅模型为 `View` 目录发现 +
+  每行星 `Pull` 数据流，支持选择性订阅 / 退订 / 重新订阅；后缀流按 chunk 无限写入。
+  阶段 A 的 `SuffixStream` 与 15 项无 Bevy 集成测试已实施；记录了两条 smux 行为缺口
+  （丢弃 `Response` 不可观察、对端消失时 `income_async` 不一定报错）及 demo 的业务层
+  对策。
 - [`matchit-no_std-20261110-0520.md`](matchit-no_std-20261110-0520.md)：`matchit_route`
   的 no_std / bumpalo 移植：router 自有 arena、`T: 'static`、`Send` / `Sync` 的安全
   论证，以及第 3 步删除 `rpc_router_trie`、统一为一套路径匹配算法的计划。
