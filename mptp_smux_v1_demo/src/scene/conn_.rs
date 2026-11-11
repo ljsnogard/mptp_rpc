@@ -16,13 +16,14 @@ use compio::net::TcpStream;
 use smux_v1::{
     connection::{DefaultConnCfg, MuxConnection},
     flow_ctrl::DefaultPolicy,
+    metrics::NoMetrics,
     handshake::{
         agent::{AcceptAllEntries, HandshakeAgent},
         opts::BasicOpts,
     },
 };
 
-use crate::scene::cfg_::{Conn, K_CHANNEL_CAP, Rx, SharedConn, Tx};
+use crate::scene::cfg_::{Conn, K_CHANNEL_CAP, Rx, SceneRt, SharedConn, Tx, compio_rt_};
 
 use abs_mm::CoreAlloc;
 use mm_ptr::Shared;
@@ -67,8 +68,7 @@ pub async fn dial_async_(addr: SocketAddr) -> Result<Conn> {
         .invite_async(&scene_opts_(), AcceptAllEntries)
         .await
         .map_err(|err| anyhow!("客户端握手失败：{err:?}"))?;
-    let (delivery, config) = DefaultConnCfg::new(delivery, DefaultPolicy);
-    Ok(MuxConnection::new(delivery, config))
+    build_conn_(delivery)
 }
 
 /// 服务端：在一条已接受的 TCP 流上完成握手并建出复用连接。
@@ -85,8 +85,26 @@ pub async fn accept_conn_async_(stream: TcpStream) -> Result<Conn> {
         .listen_async(&scene_opts_(), AcceptAllEntries)
         .await
         .map_err(|err| anyhow!("服务端握手失败：{err:?}"))?;
-    let (delivery, config) = DefaultConnCfg::new(delivery, DefaultPolicy);
-    Ok(MuxConnection::new(delivery, config))
+    build_conn_(delivery)
+}
+
+/// 用显式 compio 运行时值与作用域建连。
+///
+/// 不走 `MuxConnection::new`：那要求配置的运行时值实现门面的 `ScopeHost`，而门面的
+/// `ScopeHost` 只对**裸名** `Runtime` 实现——工作区 feature 并集把它切到 tokio 时，
+/// `CompioRuntime` 拿不到它。`new_with_rt` 只要求一个 `TrLocalScope`，正好绕开这条
+/// 全局选择。
+fn build_conn_(delivery: smux_v1::handshake::agent::HandshakeDelivery<Tx, Rx>) -> Result<Conn> {
+    let rt = compio_rt_();
+    let scope = rt.local_scope();
+    let (delivery, config) = DefaultConnCfg::<
+        Tx,
+        Rx,
+        NoMetrics,
+        DefaultPolicy,
+        SceneRt,
+    >::new_with_rt(delivery, DefaultPolicy, rt.clone());
+    Ok(MuxConnection::new_with_rt(&rt, &scope, delivery, config))
 }
 
 /// 把连接交给 `MptpClient` 需要的共享智能指针。

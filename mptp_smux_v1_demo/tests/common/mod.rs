@@ -107,7 +107,7 @@ impl SceneFixture {
             .map_err(|err| anyhow!("取测试监听地址失败：{err}"))?;
         let registry = Rc::new(RefCell::new(PlanetRegistry::new_()));
         let hub = Rc::new(RefCell::new(SceneHub::new_()));
-        let scope = abs_art_facade::default_rt_().local_scope();
+        let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
 
         let registry_for_server = registry.clone();
         let hub_for_server = hub.clone();
@@ -176,7 +176,7 @@ async fn serve_connection_(
     shared: mptp_smux_v1_demo::scene::cfg_::SharedConn,
     servlet: Rc<MptpServlet<ServingCfg, FixtureHandler>>,
     ctx: Rc<ConnectionCtx>,
-    scope: abs_art_facade::LocalScope,
+    scope: mptp_smux_v1_demo::scene::cfg_::SceneScope,
 ) -> Result<()> {
     let mut binding = abs_smux::conn::TrConnection::bind_async(
         &*shared,
@@ -476,7 +476,7 @@ impl SceneTestClient {
         .await?;
         ensure_ok_(&resp, uri)?;
         let (tx, rx) = flume::bounded::<PlanetEvent>(capacity);
-        let scope = abs_art_facade::default_rt_().local_scope();
+        let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
         let handle = scope.spawn_local(async move {
             let Ok(mut suffix) = resp.suffix_async().await else {
                 return;
@@ -574,8 +574,8 @@ fn ensure_ok_(resp: &Response<ClientCfg>, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// 本地投递任务的句柄类型（由当前后端决定，不写死具体后端）。
-type PullHandle = <abs_art_facade::LocalScope as TrLocalScope>::Handle<()>;
+/// 本地投递任务的句柄类型（固定 compio）。
+type PullHandle = mptp_smux_v1_demo::scene::cfg_::SceneJoinHandle<()>;
 
 /// 一条已订阅的行星流：后台任务把事件送进本地队列。
 pub struct ScenePull {

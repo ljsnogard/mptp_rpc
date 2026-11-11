@@ -35,8 +35,7 @@ fn main() -> ExitCode {
 
     let outcome = runtime.block_on(async {
         // compio 运行时上下文内：取运行时值与本线程队列。
-        let art = abs_art_facade::default_rt_();
-        let scope = art.local_scope();
+        let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
         scope.run_until(serve_async_(addr)).await
     });
 

@@ -37,8 +37,7 @@ fn main() -> ExitCode {
         }
     };
     let outcome = runtime.block_on(async {
-        let art = abs_art_facade::default_rt_();
-        let scope = art.local_scope();
+        let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
         scope.run_until(smoke_async_()).await
     });
     match outcome {
@@ -62,7 +61,7 @@ async fn smoke_async_() -> Result<()> {
         .local_addr()
         .map_err(|err| anyhow!("取 smoke 服务器地址失败：{err}"))?;
     {
-        let scope = abs_art_facade::default_rt_().local_scope();
+        let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
         let task = scope.spawn_local(async move {
             if let Err(err) = serve_on_listener_async_(listener).await {
                 eprintln!("smoke 服务器退出：{err:#}");

@@ -97,7 +97,7 @@ pub struct PlanetDescriptor {
 }
 
 /// 目录：当前所有行星数据流，不建立订阅。
-#[derive(Clone, Debug, PartialEq, denco_macro::TrDecodable, denco_macro::TrEncodable)]
+#[derive(Clone, Debug, Default, PartialEq, denco_macro::TrDecodable, denco_macro::TrEncodable)]
 pub struct PlanetDirectory {
     /// 目录版本，加入 / 离开时递增。
     pub directory_version: u64,

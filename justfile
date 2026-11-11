@@ -13,7 +13,7 @@ export MPTP_CARGO_OFFLINE := offline
 default: test
 
 # 跑完所有配方：单元测试 → 协议层集成测试 → 静态检查 → 两个端到端 demo
-test: unit abs-mptp clippy e2e-smux e2e-rpc
+test: unit abs-mptp clippy e2e-scene e2e-rpc
 
 # 单元测试 + doctest（60 秒上限）
 unit:
@@ -32,17 +32,20 @@ abs-mptp:
 clippy:
     cargo clippy --manifest-path {{repo}}/Cargo.toml {{offline}} --workspace --all-targets
 
-# `mptp_smux` 的下游 demo：真实 TCP 端到端 + 跨进程核对类型标识。
-e2e-smux:
-    timeout 120 python3 {{repo}}/mptp_smux_v1_demo/scripts/e2e_socket.py
+# 场景 demo：进程内起真实服务端 + 两个真实客户端（headless）。
+e2e-scene:
+    timeout 120 cargo run --manifest-path {{repo}}/Cargo.toml {{offline}} -p mptp_smux_v1_demo --bin scene-smoke
 
-# 同上，但复用已经编好的二进制
-e2e-smux-fast:
-    timeout 120 python3 {{repo}}/mptp_smux_v1_demo/scripts/e2e_socket.py --skip-build
+# 兼容旧名字：指向场景 smoke。
+e2e-smux: e2e-scene
 
-# 多跑几轮：`just e2e-smux-rounds 5`
-e2e-smux-rounds rounds:
-    timeout 300 python3 {{repo}}/mptp_smux_v1_demo/scripts/e2e_socket.py --rounds {{rounds}}
+# 手动起服务端（另一个终端再跑 `scene-client`）
+scene-server:
+    cargo run --manifest-path {{repo}}/Cargo.toml {{offline}} -p mptp_smux_v1_demo --bin scene-server
+
+# 编译检查 Bevy 客户端（不启动窗口）
+bevy-check:
+    cargo check --manifest-path {{repo}}/Cargo.toml {{offline}} -p mptp_smux_v1_demo --features bevy-client --bin scene-client
 
 # `rpc_demo`：UDS 上的 MPTP RPC 手动实现（两级 Trie + 队列 worker）。
 e2e-rpc:

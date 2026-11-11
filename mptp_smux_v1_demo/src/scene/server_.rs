@@ -56,7 +56,7 @@ pub async fn serve_async_(addr: SocketAddr) -> Result<()> {
 pub async fn serve_on_listener_async_(listener: TcpListener) -> Result<()> {
     let registry = Rc::new(RefCell::new(PlanetRegistry::new_()));
     let hub = Rc::new(RefCell::new(SceneHub::new_()));
-    let scope = abs_art_facade::default_rt_().local_scope();
+    let scope = crate::scene::cfg_::compio_rt_().local_scope();
     let mut next_connection: ClientId = 1u64;
 
     loop {
@@ -124,7 +124,7 @@ async fn serve_connection_async_(
         .await
         .map_err(|err| anyhow!("监听子流失败：{err}"))?;
 
-    let scope = abs_art_facade::default_rt_().local_scope();
+    let scope = crate::scene::cfg_::compio_rt_().local_scope();
     // 连接级保活：客户端每 500ms 发一次 `Head`，这里用 1 秒的接受超时检查「最近是否
     // 还有请求」。超过 3 秒没有任何请求就判定连接已死；`smux_v1` 在对端断开时不一定
     // 会让 `income_async` 报错，因此需要这条业务级判据。

@@ -41,9 +41,35 @@ anyhow = "1"
 futures = "0.3"
 thiserror = "2.0.20"
 
+# Bevy 客户端：只做 3D 基础渲染 + 窗口 + egui，不启用多线程 task pool。
+# `bevy_egui` 只启用渲染与默认字体，避免剪贴板 / 打开链接等系统依赖。
+bevy = { version = "0.20", default-features = false, features = [
+    "std",
+    "default_app",
+    "3d_api",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_winit",
+    "x11",
+    "wayland",
+    "default_font",
+], optional = true }
+bevy_egui = { version = "0.43", default-features = false, features = [
+    "render",
+    "default_fonts",
+], optional = true }
+
 [features]
 # 默认不编译 Bevy：`cargo test -p mptp_smux_v1_demo` 必须是无图形依赖的。
 default = []
+# 只有这个 feature 才把 Bevy / bevy_egui 拉进依赖图。
+bevy-client = ["dep:bevy", "dep:bevy_egui"]
+
+[[bin]]
+name = "scene-client"
+path = "src/bin/scene-client.rs"
+required-features = ["bevy-client"]
 
 [dev-dependencies]
 # 集成测试直接使用 compio 的 `#[compio::test]` 宏；它已在正式依赖里。

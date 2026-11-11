@@ -29,7 +29,11 @@ use mptp_smux::{
     x_deps::abs_smux,
 };
 
-use smux_v1::connection::{DefaultConnCfg, MuxConnection};
+use smux_v1::{
+    connection::{DefaultConnCfg, MuxConnection},
+    flow_ctrl::DefaultPolicy,
+    metrics::NoMetrics,
+};
 
 /// 一条子流向一个方向的 ring 容量（字节）。
 ///
@@ -56,8 +60,33 @@ pub type Tx = BuffWrite<
     SharedRingOf<DefaultAllocConfig>,
 >;
 
-/// 本 demo 的复用连接。
-pub type Conn = MuxConnection<DefaultConnCfg<Tx, Rx>>;
+/// 本 demo 显式固定的运行时值类型。
+///
+/// 不写门面的裸名 `Runtime`：它由全图 feature 并集决定。工作区里已有 tokio 后端的
+/// crate 时，`cargo test --workspace` 会把裸名切到 tokio；demo 必须仍然跑在自己的
+/// compio 运行时上，因此这里用**具名** `CompioRuntime`。
+pub type SceneRt = abs_art_facade::CompioRuntime;
+
+/// 本 demo 显式固定的本地作用域类型（compio）。
+pub type SceneScope = abs_art_facade::CompioLocalScope;
+
+/// 本 demo 显式固定的本地投递句柄类型（compio）。
+pub type SceneJoinHandle<T> = abs_art_facade::CompioJoinHandle<T>;
+
+/// 本 demo 的复用连接（运行时值固定为 compio）。
+pub type Conn =
+    MuxConnection<DefaultConnCfg<Tx, Rx, NoMetrics, DefaultPolicy, SceneRt>>;
+
+/// 取当前 compio 上下文里的运行时值。
+///
+/// # Panics
+///
+/// 调用点不在 compio runtime 上下文内时 panic；demo 的所有调用点都在
+/// `compio::runtime::Runtime::block_on` 或 `#[compio::test]` 内。
+pub fn compio_rt_() -> SceneRt {
+    let runtime: SceneRt = SceneRt::current();
+    runtime
+}
 
 /// 共享连接：客户端把它交给 `MptpClient`。
 pub type SharedConn = Shared<Conn, CoreAlloc>;

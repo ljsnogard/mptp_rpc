@@ -34,8 +34,8 @@ use crate::scene::{
     },
 };
 
-/// 本地投递任务的句柄类型。
-pub type PullHandle = <abs_art_facade::LocalScope as TrLocalScope>::Handle<()>;
+/// 本地投递任务的句柄类型（固定 compio，不随门面裸名变化）。
+pub type PullHandle = crate::scene::cfg_::SceneJoinHandle<()>;
 
 /// 场景客户端。
 pub struct SceneClient {
@@ -177,7 +177,7 @@ impl SceneClient {
     ) -> Result<PullHandle> {
         let mut resp = self.client_.pull(uri).send_async().await?;
         ensure_ok_(&resp, uri)?;
-        let scope = abs_art_facade::default_rt_().local_scope();
+        let scope = crate::scene::cfg_::compio_rt_().local_scope();
         let handle = scope.spawn_local(async move {
             let Ok(mut suffix) = resp.suffix_async().await else {
                 return;
@@ -197,6 +197,11 @@ impl SceneClient {
         Ok(handle)
     }
 
+    /// 底层 `MptpClient`（网络线程做 Pull 时使用）。
+    pub fn client_(&self) -> &Rc<MptpClient<ClientCfg>> {
+        &self.client_
+    }
+
     /// 共享连接（保活）。
     pub fn shared_(&self) -> &SharedConn {
         &self.shared_
@@ -211,7 +216,7 @@ fn start_keepalive_(
     client: Rc<MptpClient<ClientCfg>>,
     token: SceneCancelToken,
 ) -> PullHandle {
-    let scope = abs_art_facade::default_rt_().local_scope();
+    let scope = crate::scene::cfg_::compio_rt_().local_scope();
     scope.spawn_local(async move {
         loop {
             // 取消信号先到：退出，释放 `Rc<MptpClient>`。
