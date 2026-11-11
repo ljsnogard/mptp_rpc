@@ -8,7 +8,7 @@
 //! The adapters must be built inside a running compio runtime and are `!Send`; everything
 //! in this module therefore stays on the compio thread.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::{Result, anyhow};
 use buffex_compio_adapt::{BuffRead, BuffWrite, DefaultAllocConfig};
@@ -26,6 +26,19 @@ use crate::scene::cfg_::{Conn, K_CHANNEL_CAP, Rx, SharedConn, Tx};
 
 use abs_mm::CoreAlloc;
 use mm_ptr::Shared;
+
+/// 本 demo 的握手条件。
+///
+/// `max_channel_timeout` 取 2 秒：对端进程消失后，连接级保活会在两秒左右把连接判死，
+/// 服务端据此删除行星并广播 `Removed`。活跃的 `Pull` 由服务端每 300ms 心跳续命，
+/// 因此 2 秒足够宽松。真实部署应把这两个数按网络 RTT 调大。
+fn scene_opts_() -> BasicOpts {
+    BasicOpts {
+        max_channel_timeout: Duration::from_secs(2u64),
+        max_channel_wait_close: Duration::from_secs(1u64),
+        ..BasicOpts::DEFAULT
+    }
+}
 
 /// 把一条 compio TCP 流接成两条 ring 适配器。
 fn halves_(stream: TcpStream) -> Result<(Tx, Rx)> {
@@ -51,7 +64,7 @@ pub async fn dial_async_(addr: SocketAddr) -> Result<Conn> {
         .map_err(|err| anyhow!("设置 TCP_NODELAY 失败：{err}"))?;
     let (tx, rx) = halves_(stream)?;
     let delivery = HandshakeAgent::new(tx, rx)
-        .invite_async(&BasicOpts::default(), AcceptAllEntries)
+        .invite_async(&scene_opts_(), AcceptAllEntries)
         .await
         .map_err(|err| anyhow!("客户端握手失败：{err:?}"))?;
     let (delivery, config) = DefaultConnCfg::new(delivery, DefaultPolicy);
@@ -69,7 +82,7 @@ pub async fn accept_conn_async_(stream: TcpStream) -> Result<Conn> {
         .map_err(|err| anyhow!("设置 TCP_NODELAY 失败：{err}"))?;
     let (tx, rx) = halves_(stream)?;
     let delivery = HandshakeAgent::new(tx, rx)
-        .listen_async(&BasicOpts::default(), AcceptAllEntries)
+        .listen_async(&scene_opts_(), AcceptAllEntries)
         .await
         .map_err(|err| anyhow!("服务端握手失败：{err:?}"))?;
     let (delivery, config) = DefaultConnCfg::new(delivery, DefaultPolicy);

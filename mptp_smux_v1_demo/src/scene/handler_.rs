@@ -94,6 +94,7 @@ async fn scene_handle_async_<'f, K>(
 where
     K: TrCancellationToken,
 {
+    handler.ctx_.touch_();
     let location = session.location().to_string();
     match (method, location.as_str()) {
         (AccessMethod::Call, K_SCENE_JOIN) => {
@@ -318,7 +319,7 @@ impl Drop for SubGuard_ {
 }
 
 /// 空闲多久写一次心跳。它只用于让服务端发现「客户端已经丢弃 Pull」。
-const K_PULL_IDLE_HEARTBEAT: core::time::Duration = core::time::Duration::from_secs(1u64);
+const K_PULL_IDLE_HEARTBEAT: core::time::Duration = core::time::Duration::from_millis(300u64);
 
 /// `Pull /scene/planets/{id}`：先发 `Snapshot`，再持续写更新。
 async fn pull_async_<K>(

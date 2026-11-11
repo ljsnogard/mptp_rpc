@@ -295,6 +295,9 @@ pub struct ConnectionCtx {
 
     /// 本连接所有 session 的取消令牌。
     token_: SceneCancelToken,
+
+    /// 最近一次收到请求的时刻；连接级保活判据。
+    last_seen_: std::cell::Cell<std::time::Instant>,
 }
 
 impl ConnectionCtx {
@@ -312,6 +315,7 @@ impl ConnectionCtx {
             hub_: hub,
             cancel_,
             token_,
+            last_seen_: std::cell::Cell::new(std::time::Instant::now()),
         }
     }
 
@@ -353,6 +357,16 @@ impl ConnectionCtx {
     /// 取消本连接所有 session（连接断开时调用）。
     pub fn cancel_(&self) {
         self.cancel_.cancel_();
+    }
+
+    /// 记下「刚刚收到过请求」。
+    pub fn touch_(&self) {
+        self.last_seen_.set(std::time::Instant::now());
+    }
+
+    /// 距离上一次请求过去了多久。
+    pub fn idle_for_(&self) -> std::time::Duration {
+        self.last_seen_.get().elapsed()
     }
 
     /// 连接离开：删除自己的行星、向订阅者广播 `Removed` 并清空该行星的订阅。
