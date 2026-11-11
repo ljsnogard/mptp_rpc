@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 authors.workspace = true
 
-description = "mptp_smux 的下游实现：在 smux_v1 + denco 上跑通一问一答，用来验证 mptp_smux 的实现符合实际。"
+description = "mptp_smux 的场景压测 demo：目录发现 + 每行星 Pull 后缀流 + Bevy 太阳系客户端。"
 readme = "README.md"
 publish = false
 license.workspace = true
@@ -15,16 +15,9 @@ mptp_smux = { path = "../mptp_smux" }
 mptp_wire = { path = "../mptp_wire" }
 abs_mptp = { path = "../abs_mptp" }
 
-
-# 连接侧的读写适配器（环 ↔ socket）。
-buffex_tokio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
-
 abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
-# 读体时把段接口临时暴露成 `Read`（只搬原始字节，不参与序列化）。
-abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 
 # 业务体序列化：`abs_denco` 是抽象层，`mp_denco` 是 MessagePack 实现，`denco_macro` 提供派生。
-# 前缀头表由 `mptp_smux::messaging` 拥有，本 crate 只派生自己的业务类型。
 # 派生代码还会直接引用 `abs_cancel` 与 `gen_mcf2`，因此两者也必须是本 crate 的直接依赖。
 abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
@@ -36,16 +29,25 @@ abs_mm = { git = "https://gitee.com/lino_snsalias/abs_mm.git", branch = "dev/0.3
 smux_v1 = { git = "https://gitee.com/lino_snsalias/smux_v1.rs.git", default-features = false }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+# 运行时固定为 compio（`abs_art-facade` 的默认后端）。
+# `BuffRead` / `BuffWrite` 必须在正在运行的 compio runtime 内构造，且类型 `!Send`，
+# 因此整个 MPTP 栈固定在一条 compio 线程上。
+buffex_compio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+abs_art-facade = { git = "https://gitee.com/lino_snsalias/abs_art.git" }
+compio = { version = "0.19.*", features = ["macros", "net", "runtime", "time"] }
+flume = "0.12"
+
 anyhow = "1"
 futures = "0.3"
 thiserror = "2.0.20"
 
 [features]
-# 只跑 tokio：`smux_v1` 的 socket 装配只在 tokio 下验证过。
-default = ["rt-tokio"]
-rt-tokio = ["smux_v1/test-tokio-runtime"]
+# 默认不编译 Bevy：`cargo test -p mptp_smux_v1_demo` 必须是无图形依赖的。
+default = []
 
-# crate 名与 bin 名都是下划线形式，nightly cargo 的 kebab-case 命名 lint 在这里纯属噪音。
+[dev-dependencies]
+# 集成测试直接使用 compio 的 `#[compio::test]` 宏；它已在正式依赖里。
+
+# crate 名与 bin 名是 kebab-case / 下划线混合；nightly cargo 的命名 lint 在这里是噪音。
 [lints.cargo]
 non_kebab_case_bins = "allow"
