@@ -12,8 +12,8 @@
 //!
 //! - [`client`]：建流 → 交出 ring → 发前缀 → 收回复
 //!   （[`MptpClient`](client::MptpClient) / [`MptpSession`](client::MptpSession)）；
-//! - [`serving`]：监听 → 收建流 → 交出 ring → 解码 → 路由 → 交给 handler
-//!   （[`MptpServer`](serving::MptpServer)）；
+//! - [`serving`]：监听 → 收建流 → 交出 ring → 解码 → 交给单一 handler
+//!   （[`MptpServlet`](serving::MptpServlet) / [`ServingSession`](serving::ServingSession)）；
 //! - [`messaging`]：指向 [`mptp_wire`] 的兼容别名；具体线格式由该 crate 拥有；
 //! - [`TrPrepFactory`] 一族：**ring 内存怎么准备**的注入契约，两端各一个环境类型；
 //! - [`x_deps`]：本 crate 依赖的对外重导出，供下游不必逐条声明版本。
@@ -43,21 +43,38 @@
 //! *environment*, declared as a **type** in the configuration so that no instance ever has to
 //! be handed to a constructor.
 
+#![no_std]
 #![feature(allocator_ext)]
-#![feature(impl_trait_in_assoc_type)]
+#![cfg_attr(any(feature = "client", feature = "server"), feature(impl_trait_in_assoc_type))]
 #![feature(unboxed_closures)]
 
+extern crate alloc;
+
+#[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "server")]
 pub mod serving;
 
+#[cfg(any(feature = "client", feature = "server"))]
+mod body_;
+#[cfg(any(feature = "client", feature = "server"))]
+mod copy_;
+mod error_;
+mod method_set_;
 mod ring_prepare_;
+#[cfg(any(feature = "client", feature = "server"))]
+mod session_core_;
+mod session_state_;
 
 // 兼容旧路径：`mptp_smux::messaging::*` 仍然可用，但类型由 `mptp_wire` 拥有。
 pub use mptp_wire as messaging;
 pub use mptp_wire::{
     HeaderEntry, HeaderKey, HeaderVal, Headers, RequestPrefix, ResponsePrefix, U16OrStr,
 };
+pub use error_::{ClientError, ProtocolError, ServeError, StateError, TransportError};
+pub use method_set_::MethodSet;
 pub use ring_prepare_::{PeerRole, RingBuffs, TrPrepFactory, TrPrepareCtx};
+pub use session_state_::ServingState;
 
 /// 协议约定的**默认服务垛口**：`0x80`。
 ///
@@ -81,7 +98,6 @@ pub mod x_deps {
     // 兼容旧的 `mptp_smux::x_deps::{abs_denco, denco_macro, mp_denco}` 路径；
     // 实际依赖由 `mptp_wire` 持有，本 crate 不直接依赖 denco。
     pub use mptp_wire::x_deps::{abs_denco, denco_macro, mp_denco};
-    pub use tlist;
 }
 
 #[cfg(test)]

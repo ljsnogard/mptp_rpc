@@ -1,27 +1,27 @@
-//! 服务端侧：配置契约、准备环境、路由，以及负责「解码 → 路由 → 处理」的服务器。
+//! 服务端侧：单连接入口、会话、单一 handler 与回复 helper。
 //!
-//! 这一侧的配置（[`config`]）**只属于服务端**：它规定监听从哪来、每条入向子流的 ring 内存
-//! 从哪来。报文前缀的线上格式由 [`crate::messaging`] 统一拥有。客户端那份契约在
-//! [`crate::client`]，两者刻意不共享——它们可能由两份代码各自编译、各自升级。
+//! 这里**没有 router**：路由、鉴权、方法分派都由单一 handler 自己决定。本模块只提供
+//! 一条连接上的 `MptpServlet`、一次请求的 `ServingSession`，以及写回复的 helper。
 //!
 //! # `serving`: the server side
 //!
-//! The configuration here belongs to the server alone: where the listener comes from and
-//! where the ring memory of every incoming channel comes from. The prefix wire format is
-//! owned once by [`crate::messaging`]. The client's contract lives in [`crate::client`] and
-//! is deliberately separate.
+//! There is no router here. Routing and dispatch live inside the single handler. This
+//! module provides `MptpServlet` for one connection, `ServingSession` for one request,
+//! and the response helpers.
 
-mod cancel_future_;
+mod handler_;
 mod prep_ctx_;
-mod router_;
-mod server_;
+mod servlet_;
+mod session_;
 
 pub mod config;
 
-#[doc(hidden)]
-pub use cancel_future_::{EitherMayCancel, MapErrMayCancel, ReadyMayCancel};
+pub use handler_::{LegacyHandler, TrServeHandler};
 pub use prep_ctx_::ServingPrepCtx;
-#[doc(hidden)]
-pub use router_::{RouteValues, TrPathRouterList, TrRouteValues};
-pub use router_::{Router, RouterCtx, RouterError, TrPathHandler, TrPathRouter, TrPathRouterMut};
-pub use server_::{MptpServer, ServeError, close_channel_async};
+pub use servlet_::{
+    K_TMP_ALLOW_HEADER_KEY, K_TMP_ALLOW_HEADER_NAME, MptpServlet, ServeOutcome,
+    close_channel_async,
+};
+pub use session_::{
+    RequestBodyRead, RequestSuffixRead, ResponseBuilder, ServingSession,
+};
