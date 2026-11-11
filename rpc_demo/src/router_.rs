@@ -1,20 +1,36 @@
 //! 路径前缀路由：把请求的 `location` 映射到一个 handler。
 //!
 //! 这是原先 `mptp_smux::serving::Router` 的实现，现已下放到 demo：`mptp_smux` 只保留
-//! [`TrPathRouter`] 契约，具体匹配策略由使用者提供。本实现按**最长前缀**匹配。
+//! [`TrReqHandler`] 契约，具体匹配策略由使用者提供。本实现按**最长前缀**匹配。
 //!
-//! `rpc_demo` 只用它做顶层分派：空前缀命中唯一的目标 [`RpcRouter`](crate::server_::RpcRouter)，
+//! `rpc_demo` 只用它做顶层分派：空前缀命中唯一的目标 `RpcRouter`，
 //! interface → service 两级匹配仍在 `RpcRouter` 内部完成。
 //!
 //! # `router_`: the demo's longest-prefix path router
 //!
 //! This is the former built-in `mptp_smux::serving::Router`, moved into the demo. Here it only
-//! performs top-level dispatch to the single [`RpcRouter`](crate::server_::RpcRouter); the
+//! performs top-level dispatch to the single `RpcRouter`; the
 //! interface → service matching stays inside that router.
 
 use std::collections::BTreeMap;
 
-use mptp_smux::serving::TrPathRouter;
+use abs_cancel::TrMayCancel;
+use abs_mptp::{
+    serving::TrReqHandler,
+    spec::{Status, access_method::AccessMethod},
+};
+use gen_mcf2::gen_may_cancel_future;
+use mptp_smux::{
+    ServeError, StateError,
+    messaging::Headers,
+    serving::{
+        ServingSession, TrServeHandler,
+        config::{ChannelRx, ChannelTx},
+    },
+    x_deps::{abs_cancel, abs_mptp, gen_mcf2},
+};
+
+use crate::server_::{RpcRouter, RouterError, SrvCfg};
 
 /// 按**最长前缀**匹配的路由表。
 pub struct Router<T> {
@@ -73,12 +89,98 @@ impl<T> Router<T> {
     }
 }
 
-impl<T> TrPathRouter for Router<T> {
-    type Handler = T;
+impl TrServeHandler<SrvCfg> for Router<RpcRouter> {
+    type Err = ServeError;
 
-    fn match_path<'f>(&'f self, path: &'f str) -> Option<&'f Self::Handler> {
-        self.try_match(path)
+    type HandleAsync<'f>
+        = RouterServeAsync<'f, 'f>
+    where
+        Self: 'f,
+        SrvCfg: 'f;
+
+    fn handle_async<'f>(
+        &'f self,
+        method: AccessMethod,
+        session: &'f mut ServingSession<SrvCfg>,
+    ) -> Self::HandleAsync<'f> {
+        RouterServeAsync::new(self, method, session)
     }
+}
+
+/// [`Router`] 作为单一 `TrServeHandler` 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(RouterServe, pub, new(pub(crate)))]
+async fn router_serve_async_<'f, K>(
+    router: &'f Router<RpcRouter>,
+    method: AccessMethod,
+    session: &'f mut ServingSession<SrvCfg>,
+    cancel: K,
+) -> Result<(), ServeError>
+where
+    K: abs_cancel::TrCancellationToken,
+{
+    let Option::Some(target) = router.try_match(session.location()) else {
+        session
+            .response(Status::NotFound)
+            .no_body_async()
+            .may_cancel_with(cancel.child_token())
+            .await?;
+        return Result::Ok(());
+    };
+    let Option::Some((tx, rx, mut headers, location)) = session.take_parts() else {
+        return Result::Err(ServeError::State(StateError::ChannelTaken));
+    };
+    target
+        .handle_async(method, &location, &mut headers, tx, rx)
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| ServeError::Target {
+            detail: err.to_string(),
+        })
+}
+
+impl TrReqHandler<SrvCfg> for Router<RpcRouter> {
+    type HandleAsync<'f>
+        = RouterHandleAsync<'f, 'f>
+    where
+        Self: 'f;
+
+    type Err = RouterError;
+
+    fn handle_async<'f>(
+        &'f self,
+        method: AccessMethod,
+        location: &'f str,
+        headers: &'f mut Headers,
+        tx: ChannelTx<SrvCfg>,
+        rx: ChannelRx<SrvCfg>,
+    ) -> Self::HandleAsync<'f> {
+        RouterHandleAsync::new(self, method, location, headers, tx, rx)
+    }
+}
+
+/// [`Router::handle_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes, clippy::too_many_arguments)]
+#[gen_may_cancel_future(RouterHandle, pub, new(pub(crate)))]
+async fn router_handle_async_<'f, K>(
+    router: &'f Router<RpcRouter>,
+    method: AccessMethod,
+    location: &'f str,
+    headers: &'f mut Headers,
+    tx: ChannelTx<SrvCfg>,
+    rx: ChannelRx<SrvCfg>,
+    cancel: K,
+) -> Result<(), RouterError>
+where
+    K: abs_cancel::TrCancellationToken,
+{
+    let Some(target) = router.try_match(location) else {
+        return Result::Err(RouterError::NotFound(location.to_string()));
+    };
+    target
+        .handle_async(method, location, headers, tx, rx)
+        .may_cancel_with(cancel.child_token())
+        .await
 }
 
 impl<T> Default for Router<T> {
@@ -180,21 +282,22 @@ mod tests_ {
         assert_eq!(router.len(), 3usize);
     }
 
-    /// 测试 `TrPathRouter` 适配与 `try_match` 使用同一套最长前缀规则。
-    /// Test that the `TrPathRouter` adapter shares the same longest-prefix rule.
+    /// 测试 `try_match` 是路由表唯一的匹配入口。
+    /// Test that `try_match` is the router's single matching entry.
     ///
-    /// - 手段：对同一张表分别调用 `try_match` 与 `match_path`。
-    /// - 判断：两者对 `/topic/chat/42` 返回同一个目标。
+    /// - 手段：对同一张表调用 `try_match`。
+    /// - 判断：命中的目标与登记的一致，不再有第二条需要同步的入口。
     ///
-    /// - Means: call both `try_match` and `match_path` on the same table.
-    /// - Verdict: both return the same target for `/topic/chat/42`.
+    /// - Means: call `try_match` on the table.
+    /// - Verdict: the matched target equals the registered one; there is no second entry
+    ///   that has to stay in sync.
     #[test]
-    fn match_path_delegates_() {
+    fn try_match_is_the_entry_() {
         let router = sample_router_();
 
         assert_eq!(
-            router.match_path("/topic/chat/42"),
-            router.try_match("/topic/chat/42")
+            router.try_match("/topic/chat/42"),
+            Option::Some(&2u32)
         );
     }
 }

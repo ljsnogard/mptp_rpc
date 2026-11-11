@@ -13,16 +13,16 @@
 //!
 //! # 服务端这一侧由 `mptp_smux` 提供什么
 //!
-//! 建流、**ring 内存的准备**与请求前缀解码由 [`MptpServer`] 负责；路由表由本 demo 的
-//! [`Router`] 提供，`MptpServer` 经
-//! [`TrPathRouter`](mptp_smux::serving::TrPathRouter) 契约调用它。本文件只做业务：读体、
+//! 建流、**ring 内存的准备**与请求前缀解码由 [`MptpServlet`] 负责；路由表由本 demo 的
+//! [`Router`] 提供，`MptpServlet` 经
+//! [`TrReqHandler`] 契约调用它。本文件只做业务：读体、
 //! 校验标识、解码、装配回复、写回复。前缀的读 / 写入口都来自 `mptp_smux::messaging`，
 //! demo 不再自己实现线格式。
 //!
 //! # `server_`: routing plus type-directed dispatch
 //!
 //! Channel setup, ring preparation and request-prefix decoding belong to `mptp_smux`; the
-//! demo provides the router via the `TrPathRouter` contract. This file only does business:
+//! demo provides the router via the `TrReqHandler` contract. This file only does business:
 //! read the body, check the declared identifier, decode, build and write the reply.
 
 use std::{
@@ -47,7 +47,7 @@ use mm_ptr::Shared;
 use mptp_smux::{
     messaging::{Headers, ResponsePrefix, write_response_prefix_async},
     serving::{
-        MptpServer, close_channel_async,
+        MptpServlet, close_channel_async,
         config::{ChannelRx, ChannelTx},
     },
     x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2, mm_ptr},
@@ -94,6 +94,10 @@ pub enum HandlerError {
     /// 写回复失败。
     #[error("写回复失败：{0}")]
     Write(String),
+
+    /// 路由表里没有匹配该路径的目标。
+    #[error("找不到资源：{0}")]
+    NotFound(String),
 }
 
 /// 处理计数：服务端用它判断「客户端要的这几条都办完了」。
@@ -436,7 +440,7 @@ pub fn build_router_(metrics: Arc<Metrics>) -> Router<DemoHandler> {
 ///
 /// # ring 内存在哪里准备
 ///
-/// 就在 [`MptpServer::serve_listener_async`] 内部：每条入向子流裁决之前，它用本条子流的环境
+/// 就在 [`MptpServlet::serve_listener_async`] 内部：每条入向子流裁决之前，它用本条子流的环境
 /// （两个 dock + 响应方角色）现场构造 [`ServingCfg`] 的 `DefaultPrepFactory`，再让它生产
 /// 一份新的准备器。本函数因此**看不到**任何 ring 相关的代码。
 ///
@@ -451,7 +455,7 @@ pub fn build_router_(metrics: Arc<Metrics>) -> Router<DemoHandler> {
 pub async fn serve_(conn: Conn, base_dock: u32, count: usize) -> Result<()> {
     let shared = Shared::new(conn, CoreAlloc);
     let metrics = Arc::new(Metrics::new());
-    let server = MptpServer::<ServingCfg, Router<DemoHandler>>::new(build_router_(metrics.clone()));
+    let server = MptpServlet::<ServingCfg, _>::new(build_router_(metrics.clone()));
 
     // 先把所有 dock 的 binding 都拿到手，再去等入向——否则对端可能在我们还没绑定的 dock 上
     // 发起建流。

@@ -9,7 +9,7 @@
 //! - 在 `with_ctx` 里读到**这一条子流**的身份（本端 / 远端 dock、本端是发起方还是响应方）；
 //! - 每次 `prepare_async` 交出**新的**两块内存——上游 `accept_async` 会拿走所有权。
 //!
-//! `MptpClient::new` / `MptpServer::new` 的签名里没有任何策略参数：默认工厂是一个**类型**。
+//! `MptpClient::new` / `MptpServlet::new` 的签名里没有任何策略参数：默认工厂是一个**类型**。
 //!
 //! # `cfg_`: the two sides' configuration and the ring-preparation factories
 //!

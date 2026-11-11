@@ -2,7 +2,7 @@
 //!
 //! 这是蓝图骨架的手动实现：
 //!
-//! - `MptpServer` 经本地 `Router`（实现 `TrPathRouter`）把 `ChannelTx` / `ChannelRx` 按值
+//! - `MptpServlet` 经本地 `Router`（实现 `TrReqHandler`）把 `ChannelTx` / `ChannelRx` 按值
 //!   交给 `RpcRouter`；
 //! - `RpcRouter` 先按 interface 前缀、再按 service 路径在运行期 `PathTrie` 中匹配；
 //! - 命中的 service 有自己的有界队列，worker 线程只持有该 service 的具体实现；
@@ -10,7 +10,7 @@
 //!
 //! # `server_`: two-level trie, per-service queues, worker threads
 //!
-//! `MptpServer` dispatches through the demo's local `Router` (a `TrPathRouter` implementation)
+//! `MptpServlet` dispatches through the demo's local `Router` (a `TrReqHandler` implementation)
 //! to `RpcRouter`. No macro-generated match participates in routing. The two dispatch levels
 //! are runtime tries; only method dispatch inside a service uses the hand-written body enum.
 
@@ -40,7 +40,7 @@ use mm_ptr::Shared;
 use mptp_smux::{
     messaging::{Headers, ResponsePrefix, write_response_prefix_async},
     serving::{
-        MptpServer, close_channel_async,
+        MptpServlet, close_channel_async,
         config::{ChannelRx, ChannelTx},
     },
     x_deps::{abs_cancel, abs_smux, gen_mcf2, mm_ptr},
@@ -61,10 +61,16 @@ use crate::{
 };
 
 /// 服务端的完整配置类型。
-type SrvCfg = ServingConfig<Conn>;
+pub(crate) type SrvCfg = ServingConfig<Conn>;
 
-/// 监听 dock：协议约定的默认服务垛口。
+/// 监听 dock 的起点：协议约定的默认服务垛口。
 const K_DOCK: u32 = 0x80u32;
+
+/// 监听 dock 的数量。
+///
+/// 每条请求都会拆掉一条子流；`smux_v1` 会把拆掉的 dock 对放进宽限期，因此 demo 让每条
+/// 请求轮换使用不同 dock，避免连续重开同一对 dock。
+const K_DOCK_COUNT: u32 = 32u32;
 
 /// 每条 service 队列的容量。
 const K_QUEUE_CAP: usize = 32usize;
@@ -551,6 +557,10 @@ pub enum RouterError {
     /// 写拒绝响应失败。
     #[error("写拒绝响应失败：{0}")]
     Reject(String),
+
+    /// 路由表里没有匹配该路径的目标。
+    #[error("找不到资源：{0}")]
+    NotFound(String),
 }
 
 impl TrReqHandler<SrvCfg> for RpcRouter {
@@ -1032,10 +1042,15 @@ async fn wait_for_count_(metrics: Arc<AtomicUsize>, target: usize) {
 /// 服务端：注册两个 interface、三条 service 队列，并等待客户端完成脚本。
 pub async fn serve_(conn: Conn) -> Result<()> {
     let shared = Shared::new(conn, CoreAlloc);
-    let mut binding = shared
-        .bind_async(Dock::new(K_DOCK))
-        .await
-        .map_err(|err| anyhow!("绑定 dock {K_DOCK} 失败：{err}"))?;
+    let mut bindings = Vec::with_capacity(K_DOCK_COUNT as usize);
+    for offset in 0..K_DOCK_COUNT {
+        let dock = Dock::new(K_DOCK + offset);
+        let binding = shared
+            .bind_async(dock)
+            .await
+            .map_err(|err| anyhow!("绑定 dock {dock:?} 失败：{err}"))?;
+        bindings.push(binding);
+    }
 
     let store = Arc::new(Mutex::new(Store::new_()));
     let metrics = Arc::new(AtomicUsize::new(0usize));
@@ -1063,17 +1078,20 @@ pub async fn serve_(conn: Conn) -> Result<()> {
     let mut mptp_router = Router::new();
     // 顶层只有 RpcRouter 一个 handler；空前缀匹配所有路径，两级分派在 RpcRouter 内部完成。
     mptp_router.add_target("", router);
-    let server = MptpServer::<SrvCfg, Router<RpcRouter>>::new(mptp_router);
+    let server = MptpServlet::<SrvCfg, _>::new(mptp_router);
 
-    let listener = server
-        .serve_listener_async(&mut binding, K_LISTEN_RESERVE)
-        .may_cancel_with(NonCancellableToken::new());
-    tokio::pin!(listener);
+    let listeners = bindings.iter_mut().map(|binding| {
+        server
+            .serve_listener_async(binding, K_LISTEN_RESERVE)
+            .may_cancel_with(NonCancellableToken::new())
+    });
 
     tokio::select! {
-        result = &mut listener => {
-            if let Result::Err(err) = result {
-                println!("服务端：监听循环结束（{err}）");
+        results = futures::future::join_all(listeners) => {
+            for (index, result) in results.into_iter().enumerate() {
+                if let Result::Err(err) = result {
+                    println!("服务端：第 {} 条监听循环结束（{err}）", index + 1);
+                }
             }
         }
         () = wait_for_count_(metrics.clone(), K_EXPECTED_JOBS) => {

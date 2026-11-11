@@ -18,9 +18,8 @@
 //!
 //! `#[rpc(service = "...")]` 只生成 trait 常量、body enum、客户端代理与服务端 dispatch；
 //! 它不再生成 worker 或 interface worker 组。服务端的组织由使用者显式调用
-//! `RpcRouter::add_service` 与顶层 `mptp_smux::serving::Router` 完成。
-//! 线上格式已由 [`mptp_smux`] 拥有，body 的定长 / 分块帧由 `abs_mptp` 拥有，本 crate
-//! 都不再重复实现。
+//! `RpcRouter::add_service` 与顶层 `crate::serving::Router` 完成。
+//! 线上格式由 `mptp_wire` 拥有，本 crate 不再重复实现。
 //!
 //! # 已实现的契约
 //!
@@ -38,7 +37,7 @@
 //! ┌───────────────────────────────────────────────────────────────┐
 //! │ 本 crate（Phase 1）：RPC 语义 + 配置 + 分配约定               │
 //! ├───────────────────────────────────────────────────────────────┤
-//! │ mptp_smux：开流 → 交出 ring → 收发前缀；MptpServer            │
+//! │ mptp_smux：开流 → 交出 ring → 收发前缀；MptpServlet            │
 //! ├───────────────────────────────────────────────────────────────┤
 //! │ abs_mptp：协议形状（前缀 trait、访问方法、标准头、状态码、体）│
 //! ├───────────────────────────────────────────────────────────────┤
@@ -46,7 +45,7 @@
 //! └───────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! [`crate::serving::RpcRouter`] 就在本 crate；它和 `mptp_smux::serving::Router` 都把
+//! [`crate::serving::RpcRouter`] 就在本 crate；它和 `crate::serving::Router` 都把
 //! 路径匹配委托给 `matchit_route`，项目里只有这一套路径匹配算法。需要 worker / 背压时，
 //! 在 handler 或 target 内部实现，不再拆出第二种 router。
 //!

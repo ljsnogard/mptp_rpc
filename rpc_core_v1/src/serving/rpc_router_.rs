@@ -48,17 +48,17 @@ use abs_mptp::{
 use abs_rpc_serv::service::TrRpcService;
 use gen_mcf2::gen_may_cancel_future;
 use matchit_route::Router as MatchitRouter;
-use mptp_smux::serving::{
-    EitherMayCancel, ReadyMayCancel, RouterCtx,
-    config::{ChannelRx, ChannelTx},
-};
+use mptp_smux::serving::config::{ChannelRx, ChannelTx};
 use mptp_wire::Headers;
 use tlist::{TCons, TList, TNil};
 
 use crate::{
     messaging::{RpcError, RpcResult, TrRpcInterface},
     serving::{config::TrServingConfig, ctx_::RpcCallCtx},
-    x_deps::{abs_cancel, abs_mptp, abs_rpc_serv, gen_mcf2, mptp_smux},
+    serving::{
+        EitherMayCancel, ReadyMayCancel, RouterCtx, TrPathHandler,
+    },
+    x_deps::{abs_cancel, abs_mptp, abs_rpc_serv, gen_mcf2},
 };
 
 /// service 构造闭包收到的上下文。
@@ -263,7 +263,7 @@ where
     }
 }
 
-impl<I, S> mptp_smux::serving::TrPathHandler for RpcRouter<I, S>
+impl<I, S> TrPathHandler for RpcRouter<I, S>
 where
     I: TrRpcInterface,
     S: TrRpcServiceValues,

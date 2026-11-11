@@ -7,12 +7,13 @@
 //! 生成类似的具名 future 与方法体，本文件是那一层的手写等价物。
 
 use core::marker::PhantomData;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use abs_mm::CoreAlloc;
 use abs_mptp::{
-    client::{TrMptpClient, TrMptpSession},
+    client::TrMptpSession,
     spec::{Status, StdHeaderKey, StdHeaderVal, access_method::AccessMethod},
 };
 use anyhow::{Result as AnyResult, ensure};
@@ -21,7 +22,7 @@ use mm_ptr::Shared;
 use mptp_smux::{
     client::MptpClient,
     messaging::{Headers, RequestPrefix},
-    x_deps::gen_mcf2,
+    x_deps::{abs_smux::dock::Dock, gen_mcf2},
 };
 use rpc_core_v1::ClientConfig;
 
@@ -36,6 +37,21 @@ use crate::{
 
 /// 客户端的完整配置类型。
 type CliCfg = ClientConfig<Conn>;
+
+/// 服务端监听的 dock 起点（与 `server_` 一致）。
+const K_DOCK: u32 = 0x80u32;
+
+/// 服务端监听的 dock 数量（与 `server_` 一致）。
+const K_DOCK_COUNT: u32 = 32u32;
+
+/// 下一条请求使用的 dock 序号。
+static NEXT_DOCK: AtomicU32 = AtomicU32::new(0u32);
+
+/// 取下一个 dock：轮换使用，避免连续重开同一对 dock 撞上 `smux_v1` 的宽限期。
+fn next_dock_() -> Dock<u32> {
+    let index = NEXT_DOCK.fetch_add(1u32, Ordering::Relaxed) % K_DOCK_COUNT;
+    Dock::new(K_DOCK + index)
+}
 
 /// 手动版本的客户端代理。
 ///
@@ -223,7 +239,7 @@ where
         RequestPrefix::with_headers(AccessMethod::Call, location.clone(), Option::Some(headers));
 
     let mut session = client
-        .request_async(prefix)
+        .request_to_dock_async(next_dock_(), prefix)
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(|err| ServiceError::Transport(format!("发起 {location} 失败：{err}")))?;

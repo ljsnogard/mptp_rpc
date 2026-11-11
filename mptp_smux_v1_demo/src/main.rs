@@ -17,10 +17,10 @@
 //! | 被验证的东西 | 落在哪 |
 //! | --- | --- |
 //! | 客户端 ring 注入：`DefaultPrepFactory` + 环境 + `accept_async` | `MptpClient::request_to_dock_async` |
-//! | 服务端 ring 注入：每条入向子流现场生产一份新内存 | `MptpServer::serve_listener_async` |
+//! | 服务端 ring 注入：每条入向子流现场生产一份新内存 | `MptpServlet::serve_listener_async` |
 //! | 前缀线格式（由框架统一拥有） | `mptp_smux::messaging` 的四个读写入口 |
 //! | 会话状态机：前缀 → 体（边界由前缀决定） | `MptpSession::recv_resp_prefix_async` / `recv_resp_body_async` |
-//! | 服务端收尾次序（先半关闭写端，再等对端关闭） | `MptpServer` 内部，本 demo 只管业务 |
+//! | 服务端收尾次序（先半关闭写端，再等对端关闭） | `MptpServlet` 内部，本 demo 只管业务 |
 //!
 //! # 怎么跑
 //!

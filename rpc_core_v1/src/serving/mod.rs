@@ -10,7 +10,7 @@
 //!   `RpcRouter::<ApiV1>::new(ctx).add_service::<Impl>(...)` 自己组织 service；service
 //!   路径匹配统一交给 [`matchit_route`]，命中后直接解码、调用 service、写回复、收尾。
 //!
-//! 顶层 interface 分派由 `mptp_smux::serving::Router` 完成，它同样使用
+//! 顶层 interface 分派由本模块的 `Router` 完成，它同样使用
 //! [`matchit_route`]。项目里不再保留队列版 router 契约与 `rpc_router_trie`：需要背压时，
 //! 在 handler / target 内部实现自己的队列，而不是再引入第二套路径匹配算法。
 //!
@@ -21,13 +21,20 @@
 //! `rpc_router_trie` crate were removed; backpressure belongs inside a handler or target,
 //! not in a second routing algorithm.
 
+mod cancel_future_;
 mod ctx_;
 mod rpc_router_;
+mod router_;
 
 pub mod config;
 
 pub use config::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfig};
 pub use ctx_::RpcCallCtx;
+pub use router_::{Router, RouterCtx, RouterError, TrPathHandler, TrPathRouter, TrPathRouterMut};
 pub use rpc_router_::{RpcRouter, RpcServiceCtx};
+#[doc(hidden)]
+pub use cancel_future_::{EitherMayCancel, MapErrMayCancel, ReadyMayCancel};
+#[doc(hidden)]
+pub use router_::{RouteValues, TrPathRouterList};
 #[doc(hidden)]
 pub use rpc_router_::{ServiceValues, TrRpcServiceList, TrRpcServiceValues};

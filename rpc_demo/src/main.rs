@@ -3,7 +3,7 @@
 //! 这个 demo **不使用** `#[rpc]` 宏，手动实现蓝图里的骨架：
 //!
 //! - 客户端代理只持有 `MptpClient`，interface 由零大小 marker 提供；
-//! - 服务端 `MptpServer` 按值交付 `ChannelTx` / `ChannelRx`；
+//! - 服务端 `MptpServlet` 按值交付 `ChannelTx` / `ChannelRx`；
 //! - 服务端在运行期用两级 `PathTrie` 分派 interface → service；
 //! - 每个 service 有独立队列与 worker 线程，worker 内按 body enum 分派方法；
 //! - 传输是 UDS 上的 `smux_v1`，MPTP 负责前缀与会话。

@@ -24,14 +24,11 @@ use mp_denco::{MpDecoder, MpEncoder};
 use rpc_core_v1::{
     client::{ClientProxy, ServiceSelector, TrRpcClientConfig},
     messaging::{RpcError, RpcResult, TrRpcInterface},
-    serving::{RpcCallCtx, RpcRouter, TrServingConfig},
+    serving::{RpcCallCtx, RpcRouter, Router, RouterCtx, TrPathRouter, TrServingConfig},
     x_deps::{
         abs_mptp::{serving::TrReqHandler, spec::Status},
         abs_rpc_serv::service::{TrRpcCallCtx, TrRpcService},
-        mptp_smux::{
-            client::MptpClient,
-            serving::{Router, RouterCtx, TrPathRouter},
-        },
+        mptp_smux::client::MptpClient,
     },
 };
 use rpc_svc_macro::rpc;

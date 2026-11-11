@@ -89,7 +89,7 @@
 //!
 //! fn build<C: rpc_core_v1::serving::TrServingConfig + 'static>() {
 //!     use rpc_core_v1::serving::RpcRouter;
-//!     use rpc_core_v1::x_deps::mptp_smux::serving::RouterCtx;
+//!     use rpc_core_v1::serving::RouterCtx;
 //!
 //!     let ctx = RouterCtx::<C>::new();
 //!     let _router = RpcRouter::<ApiV1>::new(&ctx)
@@ -99,8 +99,8 @@
 //! fn main() {}
 //! ```
 //!
-//! 顶层用 `mptp_smux::serving::Router` 按 interface 前缀登记 `RpcRouter`，再交给
-//! `MptpServer`。`RpcRouter::add_service` 只接受实现了 `abs_rpc_serv::service::TrRpcService`
+//! 顶层用 `rpc_core_v1::serving::Router` 按 interface 前缀登记 `RpcRouter`，再交给
+//! `MptpServlet`。`RpcRouter::add_service` 只接受实现了 `abs_rpc_serv::service::TrRpcService`
 //! 的类型；`#[rpc(service_of(...))]` 正是为用户的 impl 类型补上这条实现。
 //!
 //! # 使用约束

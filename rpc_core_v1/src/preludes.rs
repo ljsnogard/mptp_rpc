@@ -16,7 +16,7 @@
 //! - 配置：`ClientConfig` / `ServingConfig` / `TrRpcClientConfig` / `TrServingConfig` /
 //!   缺省分配约定；
 //! - 客户端：`MptpClient` / `ClientProxy` / `ServiceSelector` / `TrRpcClientExt`；
-//! - 服务端：`MptpServer` / `Router` / `RouterCtx` / `RpcRouter` / `RpcCallCtx` /
+//! - 服务端：`MptpServlet` / `Router` / `RouterCtx` / `RpcRouter` / `RpcCallCtx` /
 //!   `RpcServiceCtx`；
 //! - 协议与错误：`RpcError` / `RpcResult` / `TrRpcInterface` / `Status`；
 //! - 取消：`TrMayCancel` / `TrCancellationToken` / `NonCancellableToken`；
@@ -36,8 +36,8 @@ pub use crate::{
     },
     messaging::{RpcError, RpcResult, TrRpcInterface},
     serving::{
-        DefaultServingAllocConfig, RpcCallCtx, RpcRouter, RpcServiceCtx, TrServingAllocConfig,
-        TrServingConfig,
+        DefaultServingAllocConfig, RpcCallCtx, RpcRouter, RpcServiceCtx, Router, RouterCtx,
+        RouterError, TrPathHandler, TrServingAllocConfig, TrServingConfig,
     },
     x_deps::{
         abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel},
@@ -48,9 +48,6 @@ pub use crate::{
         denco_macro::{TrDecodable, TrEncodable},
         gen_mcf2::gen_may_cancel_future,
         mm_ptr::Shared,
-        mptp_smux::{
-            client::MptpClient,
-            serving::{MptpServer, Router, RouterCtx, RouterError, TrPathHandler},
-        },
+        mptp_smux::{client::MptpClient, serving::MptpServlet},
     },
 };
