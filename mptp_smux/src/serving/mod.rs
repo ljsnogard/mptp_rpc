@@ -23,5 +23,5 @@ pub use servlet_::{
     close_channel_async,
 };
 pub use session_::{
-    RequestBodyRead, RequestSuffixRead, ResponseBuilder, ServingSession,
+    RequestBodyRead, RequestSuffixRead, ResponseBodyWriter, ResponseBuilder, ServingSession,
 };

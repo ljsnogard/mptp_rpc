@@ -139,7 +139,9 @@ loop {
   handler。
 - **没有 404 框架路径**：404 是 handler 的业务响应，用
   `session.response(Status::NotFound).no_body_async()` 写。
-- 回复 helper：`no_body_async` / `sized_async` / `chunked_async` / `suffix_async`。
+- 回复 helper：`no_body_async` / `sized_async` / `chunked_async` 返回
+  `ResponseBodyWriter`，可以在体之后继续 `.suffix_async` 追加回复后缀流；
+  `ResponseBuilder::suffix_async` 用于「没有体、只有后缀」。
   `Head` / `Drop` 的体方法会被拒绝；`no_body_async` 也会拒绝已经声明了体的前缀。
 - handler 未写回复就返回：框架写 `500` 无体并收尾；handler 返回错误：同样兜底
   `500`，错误经 `ServeError::Target` 上报，不泄漏到线上。

@@ -379,6 +379,59 @@ where
     }
 }
 
+/// 已经写完回复体的会话句柄；可以在它之后追加回复后缀流。
+///
+/// [`ResponseBuilder::no_body_async`] / [`ResponseBuilder::sized_async`] /
+/// [`ResponseBuilder::chunked_async`] 返回本类型，因此 `Pull` / `Call` 可以先写回复体
+/// 再写回复后缀流。
+pub struct ResponseBodyWriter<'a, C>
+where
+    C: TrConfig,
+{
+    /// 所属会话。
+    session_: &'a mut ServingSession<C>,
+}
+
+impl<'a, C> ResponseBodyWriter<'a, C>
+where
+    C: TrConfig,
+{
+    /// 在已经写出的回复体之后追加裸后缀流。
+    ///
+    /// `Head` / `Drop` 会被拒绝：这两个方法按协议没有后缀流。
+    pub fn suffix_async<R>(self, suffix: &'a mut R) -> ResponseWriterSuffixAsync<'a, 'a, C, R>
+    where
+        C: 'a,
+        R: TrBuffRead<u8> + TrConsumerState,
+    {
+        ResponseWriterSuffixAsync::new(self, suffix)
+    }
+}
+
+/// [`ResponseBodyWriter::suffix_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(ResponseWriterSuffix, pub, new(pub(crate)))]
+async fn response_writer_suffix_async_<'f, C, R, K>(
+    writer: ResponseBodyWriter<'f, C>,
+    suffix: &'f mut R,
+    cancel: K,
+) -> Result<(), ServeError>
+where
+    C: TrConfig + 'f,
+    R: TrBuffRead<u8> + TrConsumerState,
+    K: TrCancellationToken,
+{
+    let session_ = writer.session_;
+    ensure_body_allowed_(session_.method_)?;
+    {
+        let tx = session_.core_.tx_mut_()?;
+        copy_all_async_(suffix, tx, cancel.child_token())
+            .await
+            .map_err(resp_copy_error_)?;
+    }
+    Result::Ok(())
+}
+
 /// `Head` / `Drop` 的回复不允许写体；其余方法允许。
 fn ensure_body_allowed_(method: AccessMethod) -> Result<(), ProtocolError> {
     if matches!(method, AccessMethod::Head | AccessMethod::Drop) {
@@ -424,9 +477,9 @@ where
 async fn response_no_body_async_<'f, C, K>(
     builder: ResponseBuilder<'f, C>,
     cancel: K,
-) -> Result<(), ServeError>
+) -> Result<ResponseBodyWriter<'f, C>, ServeError>
 where
-    C: TrConfig,
+    C: TrConfig + 'f,
     K: TrCancellationToken,
 {
     let ResponseBuilder {
@@ -439,7 +492,7 @@ where
     ensure_no_body_(&prefix_)?;
 
     write_response_prefix_inner_(session_, prefix_, cancel).await?;
-    Result::Ok(())
+    Result::Ok(ResponseBodyWriter { session_ })
 }
 
 /// 定长回复体的 step 函数。
@@ -450,9 +503,9 @@ async fn response_sized_async_<'f, C, R, K>(
     body: &'f mut R,
     size: usize,
     cancel: K,
-) -> Result<(), ServeError>
+) -> Result<ResponseBodyWriter<'f, C>, ServeError>
 where
-    C: TrConfig,
+    C: TrConfig + 'f,
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -476,7 +529,7 @@ where
             .await
             .map_err(resp_copy_error_)?;
     }
-    Result::Ok(())
+    Result::Ok(ResponseBodyWriter { session_ })
 }
 
 /// 分块回复体的 step 函数。
@@ -486,9 +539,9 @@ async fn response_chunked_async_<'f, C, R, K>(
     builder: ResponseBuilder<'f, C>,
     body: &'f mut R,
     cancel: K,
-) -> Result<(), ServeError>
+) -> Result<ResponseBodyWriter<'f, C>, ServeError>
 where
-    C: TrConfig,
+    C: TrConfig + 'f,
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -520,7 +573,7 @@ where
                 })
             })?;
     }
-    Result::Ok(())
+    Result::Ok(ResponseBodyWriter { session_ })
 }
 
 /// 回复后缀流的 step 函数。

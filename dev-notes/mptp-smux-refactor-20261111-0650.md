@@ -423,8 +423,19 @@ impl<'a, C> ResponseBuilder<'a, C> {
     pub fn chunked_async<R>(self, body: &'a mut R) -> ResponseChunkedAsync<'a, C, R>
     where R: TrBuffRead<u8> + TrConsumerState;
 
-    /// 回复体之后的裸后缀流（`Pull` / `Call`）。
+    /// 没有回复体、只有后缀流（`Pull` / `Call`）。
     pub fn suffix_async<R>(self, suffix: &'a mut R) -> ResponseSuffixAsync<'a, C, R>
+    where R: TrBuffRead<u8> + TrConsumerState;
+}
+
+/// `no_body_async` / `sized_async` / `chunked_async` 返回的句柄；
+/// 可以在回复体之后追加后缀流。
+pub struct ResponseBodyWriter<'a, C> {
+    session_: &'a mut ServingSession<C>,
+}
+
+impl<'a, C> ResponseBodyWriter<'a, C> {
+    pub fn suffix_async<R>(self, suffix: &'a mut R) -> ResponseWriterSuffixAsync<'a, C, R>
     where R: TrBuffRead<u8> + TrConsumerState;
 }
 ```
@@ -438,7 +449,10 @@ impl<'a, C> ResponseBuilder<'a, C> {
 2. `sized_async` 覆盖前缀里的 `Body_Size`（按实参 `size`），并移除
    `Body_Transfer`；`chunked_async` 反之。显式设置冲突头时以 helper 实参为准，
    避免「头声明 10、实际写 20」的错位。
-3. 终结方法只写回复前缀 / 体 / 后缀，**不 drop tx**；收尾由
+3. `no_body_async` / `sized_async` / `chunked_async` 只写回复前缀 / 体，返回
+   `ResponseBodyWriter`；需要「体 + 后缀」时在 writer 上继续 `.suffix_async`。
+   `ResponseBuilder::suffix_async` 用于「没有体、只有后缀」。
+4. 终结方法**不 drop tx**；收尾由
    `ServingSession::finish_async` 统一完成。这样 `Call` 可以在写回复后继续读请求
    后缀。
 4. `serve_session_async` 的顺序：

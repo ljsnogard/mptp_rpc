@@ -429,10 +429,14 @@ where
         .may_cancel_with(cancel.child_token())
         .await?;
 
-    let _ = body_
-        .send_body_async(&mut session)
-        .may_cancel_with(cancel.child_token())
-        .await?;
+    // 前缀没有声明体时（例如 `.body_bytes(&[])` 把两个体头都清掉），状态已经是
+    // `WaitingResp`；此时不能再调用 `send_req_body_async`，否则会撞上状态检查。
+    if session.state() == SessionState::SendingBody {
+        let _ = body_
+            .send_body_async(&mut session)
+            .may_cancel_with(cancel.child_token())
+            .await?;
+    }
     let _ = suffix_
         .send_suffix_async(&mut session)
         .may_cancel_with(cancel.child_token())
