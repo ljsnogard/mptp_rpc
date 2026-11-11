@@ -58,11 +58,14 @@
 
 ```rust
 use abs_mptp::spec::Status;
-use mptp_smux::client::MptpClient;
+use mptp_smux::{HeaderVal, client::MptpClient};
 
 let mut resp = client
     .post("/api/v1/goods")
-    .header(abs_mptp::spec::StdHeaderKey::Data_Type_Id, type_id_text)
+    .header(
+        abs_mptp::spec::StdHeaderKey::Data_Type_Id,
+        HeaderVal::from_text(type_id_text),
+    )
     .body_bytes(&encoded)
     .send_async()
     .await?;
