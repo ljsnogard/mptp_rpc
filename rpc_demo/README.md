@@ -49,14 +49,15 @@ $ python3 rpc_demo/scripts/e2e_uds.py
 | --- | --- |
 | UDS | `tokio::net::UnixListener` / `UnixStream` + `buffex_tokio_adapt` |
 | 多流 | `smux_v1` 的 `MuxConnection`，每条 RPC 一条子流 |
-| MPTP | `mptp_smux` 的 `MptpClient` / `MptpSession` / `MptpServer` |
-| 顶层路径路由 | 本地 `src/router_.rs`：实现 `TrPathRouter`，用空前缀把所有路径交给 `RpcRouter` |
+| MPTP | `mptp_smux` 的 `MptpClient` / `MptpSession` / `MptpServlet` |
+| 多 dock 轮换 | 客户端每条请求轮换 dock，服务端一次绑定 32 个 dock；避开 `smux_v1` 拆流宽限期 |
+| 顶层路径路由 | 本地 `src/router_.rs`：实现 本地 `TrReqHandler`，用空前缀把所有路径交给 `RpcRouter` |
 | RPC 客户端 | `ClientProxy` 只持有 `&MptpClient`，interface 由零大小 marker 提供 |
 | RPC 服务端 | 运行期 `PathTrie`：interface 前缀 → 该 interface 内的 service 前缀 |
 | 业务组织 | 每个 service 独立有界队列，worker 线程按 body enum 的方法变体分派 |
 | 分派分配 | 服务端分派路径没有 `Pin<Box<dyn Future>>` |
 
-`MptpServer` 现在把 `ChannelTx` / `ChannelRx` **按值**交给 handler；handler 把两个半边移进
+`MptpServlet` 现在把 `ChannelTx` / `ChannelRx` **按值**交给 handler；handler 把两个半边移进
 队列，worker 线程负责写回复、半关闭 tx、drain rx。收尾顺序仍是：
 
 ```text
@@ -168,7 +169,7 @@ router 的 ServiceTrie」是一条显式装配链。
 
 - UDS 上可以建立 `smux_v1` 连接并跑 MPTP 会话；
 - `ChannelTx` / `ChannelRx` 可以按值跨线程交给 worker；
-- `MptpServer` 不再需要替 handler 收尾；
+- `MptpServlet` 不再需要替 handler 收尾；
 - 两级 `PathTrie` 能区分 `api/v1` / `api/v2`，且按 service path 分派；
 - 每个 service 独立队列 + worker 线程可行；
 - 服务端分派路径没有 boxed future；
@@ -176,8 +177,8 @@ router 的 ServiceTrie」是一条显式装配链。
 
 尚未验证：
 
-- worker 处理错误如何回传给 `MptpServer` / 监控（当前只打印日志并关闭 channel）；
+- worker 处理错误如何回传给 `MptpServlet` / 监控（当前只打印日志并关闭 channel）；
 - 优雅关闭、队列满时的背压行为与 worker 数量调优；
 - 流式 `Push` / `Pull` / suffix stream；
-- job 级取消令牌尚未从 `MptpServer` 传到 worker（worker 目前用 `NonCancellableToken` 驱动 service future）；
+- job 级取消令牌尚未从 `MptpServlet` 传到 worker（worker 目前用 `NonCancellableToken` 驱动 service future）；
 - 宏生成版本（本 demo 是手写版本）。

@@ -106,7 +106,8 @@ impl<C: client::config::TrConfig> MptpClient<C> {
     pub fn drop(&self, location: impl Into<String>) -> RequestBuilder<'_, C>;
     pub fn push(&self, location: impl Into<String>) -> RequestBuilder<'_, C>;
     pub fn pull(&self, location: impl Into<String>) -> RequestBuilder<'_, C>;
-    pub fn call(&self, location: impl Into<String>) -> RequestBuilder<'_, C>;
+    /// 名字取 `invoke`，避免与 RPC 层 `TrRpcClientExt::call::<I>()` 同名遮蔽。
+    pub fn invoke(&self, location: impl Into<String>) -> RequestBuilder<'_, C>;
 
     /// escape hatch：完全自定义前缀（含头、方法、位置）。
     pub fn request_prefix(&self, prefix: RequestPrefix) -> RequestBuilder<'_, C>;
@@ -231,16 +232,17 @@ where
     C: serving::config::TrConfig,
     H: TrServeHandler<C>,
 {
-    /// 本条 MPTP 连接；`MptpServlet` 只服务这一条连接。
-    conn_: SharedConn<C>,
-
     /// 单一 handler；路由 / 鉴权 / 方法分派都在它内部。
     handler_: H,
+
+    /// `C` 只出现在通道类型与 handler 约束里。
+    _use_c_: PhantomData<fn() -> C>,
 }
 
 impl<C, H> MptpServlet<C, H> {
-    pub const fn new(conn: SharedConn<C>, handler: H) -> Self;
-    pub fn conn(&self) -> &SharedConn<C>;
+    /// 用单一 handler 构造；一个 servlet 只服务一条连接，连接由调用者通过
+    /// `listen_async` / `accept_async` 的 listener 交给它。
+    pub const fn new(handler: H) -> Self;
     pub fn handler(&self) -> &H;
 
     /// 在 binding 上进入监听；返回上游 listener。
@@ -519,7 +521,7 @@ async fn handle_echo_async_(
 装配：
 
 ```rust
-let servlet = MptpServlet::<ServingCfg, EchoHandler>::new(conn, EchoHandler);
+let servlet = MptpServlet::<ServingCfg, EchoHandler>::new(EchoHandler);
 let mut listener = servlet.listen_async(&mut binding, 8).await?;
 
 loop {
@@ -539,7 +541,7 @@ loop {
 | `Drop` | 不应有 | 不应有 | 无 | `drop()` | 只允许 `no_body_async` |
 | `Push` | 可选 | 可选 | 客户端 → 服务端，必需 | `push()` + `.suffix()` | `req_suffix_async` 读请求后缀 |
 | `Pull` | 可选 | 可选 | 服务端 → 客户端，成功时必需 | `pull()` | `suffix_async` 写回复后缀 |
-| `Call` | 通常有 | 通常有 | 可选，双向 | `call()` + `.suffix()` | `req_suffix_async` / `suffix_async` |
+| `Call` | 通常有 | 通常有 | 可选，双向 | `invoke()` + `.suffix()` | `req_suffix_async` / `suffix_async` |
 
 **关键纪律：方法糖不能绕过协议头。**
 
@@ -548,9 +550,10 @@ loop {
 - `head` / `drop` 的客户端 builder 仍提供 `.body_*`（escape hatch 与显式覆盖是要求
   的一部分），但文档明确这与方法意图不符；框架只对**回复体**做强校验；
 - `head` / `drop` 的回复体是唯一做强校验的地方：服务端不写，客户端拒读；
-- `Push` / `Pull` 的后缀方向由方法糖的可用入口表达：`Push` builder 提供 `.suffix`，
-  `Pull` builder 不提供 `.suffix`（用 `request(AccessMethod::Pull, ...)` 可绕过）；
-  服务端不按方法禁止 `suffix_async`，由 handler 自己按 `method` 决定。
+- `Push` / `Pull` 的后缀方向由**文档与 handler** 表达：`RequestBuilder` 对所有方法都
+  提供 `.suffix`（它是通用 escape hatch），但 `Pull` 的请求后缀与服务端 `Push` 的回复
+  后缀不符合方法意图；服务端不按方法禁止 `suffix_async`，由 handler 自己按 `method`
+  决定。方法糖不会替调用者把不合意图的后缀变成协议错误。
 
 ## 5. 会话核心与 `mptp_quic` 边界
 
@@ -802,8 +805,8 @@ server = []
    `TrPathRouterList`。
 2. **删除** `mptp_smux` 对 `matchit_route` / `tlist` 的依赖；不提供 `router` feature。
 3. `MptpServer` **改名** `MptpServlet`；`new` 签名从 `new(router)` 改为
-   `new(conn, handler)`；`serve_channel_async(tx, rx)` 删除，改为
-   `accept_async` + `serve_session_async`。
+   `new(handler)`（连接由 listener 交给它）；`serve_channel_async(tx, rx)` 删除，
+   改为 `accept_async` + `serve_session_async`。
 4. 新增 `TrServeHandler<C>`（单一 handler）、`ServingSession<C>`、
    `ResponseBuilder<'_, C>`、`MethodSet`、`LegacyHandler<H>`。
 5. `ServeError` 移除 `Listen` / `Accept` / `RingPrepare` / `Decode` / `NotFound` /
@@ -812,8 +815,9 @@ server = []
 
 ### 11.2 客户端
 
-6. 新增 `MptpClient::{request, head, view, post, drop, push, pull, call,
-   request_prefix}` 与 `RequestBuilder` / `Response`。
+6. 新增 `MptpClient::{request, head, view, post, drop, push, pull, invoke,
+   request_prefix}` 与 `RequestBuilder` / `Response`。`invoke` 对应 `Call`，避免与
+   `TrRpcClientExt::call::<I>()` 的固有方法同名。
 7. `MptpSession` 新增 `close_req_async`；内部发送半边改为 `Option`（字段不公开）。
 8. `ClientError` 移除 `ConnectionLost(String)` / `ReqErr(String)` / `RespErr(String)` /
    `RingPrepare(String)` / `State(String)`；新增 `Cancelled` / `Transport` /

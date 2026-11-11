@@ -75,8 +75,8 @@ impl GoodsCustomerService for GoodsCustomerServiceImpl {
 `Router` 按 interface 前缀登记：
 
 ```rust
-use mptp_smux::serving::{MptpServer, Router};
-use rpc_core_v1::serving::RpcRouter;
+use mptp_smux::serving::MptpServlet;
+use rpc_core_v1::serving::{RpcRouter, Router};
 
 let router = Router::<ServingCfg, _>::new()
     .call(|ctx| {
@@ -91,7 +91,7 @@ let router = Router::<ServingCfg, _>::new()
                 GoodsAdminServiceImpl::new(another_args)
             })
     });
-let server = MptpServer::<ServingCfg, _>::new(router);
+let server = MptpServlet::<ServingCfg, _>::new(router);
 ```
 
 - `Router` 按最长路径前缀把请求交给对应的 `RpcRouter`；

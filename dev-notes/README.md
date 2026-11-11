@@ -21,6 +21,10 @@
 - [`mptp-smux-20261110-0730.md`](mptp-smux-20261110-0730.md)：`mptp_smux` 的职责
   边界与 README 依据：MPTP over `smux_v1` 的定位、与未来 `mptp_quic` 的共通点、
   当前各层使用方式、越界与缺口，以及 `client` / `server` feature 的目标划分。
+- [`mptp-smux-refactor-20261111-0650.md`](mptp-smux-refactor-20261111-0650.md)：
+  `mptp_smux` 的七种 AccessMethod 标准实现、服务端单一 `TrServeHandler` / `MptpServlet`、
+  `SessionCore` 共享会话、`no_std` + `client` / `server` feature，以及 Router 迁出本 crate
+  的设计与验收清单。
 - [`matchit-no_std-20261110-0520.md`](matchit-no_std-20261110-0520.md)：`matchit_route`
   的 no_std / bumpalo 移植：router 自有 arena、`T: 'static`、`Send` / `Sync` 的安全
   论证，以及第 3 步删除 `rpc_router_trie`、统一为一套路径匹配算法的计划。

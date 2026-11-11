@@ -216,6 +216,12 @@ let server = MptpServer::<ServingCfg, _>::new(top);
 
 ---
 
+> **2026-11-11 重构后**：`mptp_smux` 的 `serving` 模块已移除全部 router API；
+> `Router` / `RouterCtx` / `RouterError` / `TrPathRouter` / `TrPathHandler` 等迁到
+> `rpc_core_v1::serving`。`MptpServer` 改名 `MptpServlet`，只服务一条 MPTP 连接，
+> 持有一个单一 `TrServeHandler`；路由与 404 由应用 / `rpc_core_v1` 决定。下文关于
+> `mptp_smux::serving::Router` 与 `MptpServer` 的描述是重构前的形状，保留作历史记录。
+
 ## 实现现状（2026-11-10，matchit_route 已接管路径匹配）
 
 > 注意：`matchit_route`（matchit 0.9.2 的 no_std 移植）已经接管
