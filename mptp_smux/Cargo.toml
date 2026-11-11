@@ -25,8 +25,6 @@ gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 
-thiserror = { version = "2.0.20", default-features = false }
-
 # **本 crate 不选后端**：前缀编解码直接读写 ring 的段接口，不做任何同步等待，
 # 因此不需要 `abs_art_facade::Runtime`。后端的点亮是全图并集的，由**应用**（下游 crate）
 # 自己声明 `abs_art-facade/rt-*` 即可，不需要经本 crate 逐层转发。
