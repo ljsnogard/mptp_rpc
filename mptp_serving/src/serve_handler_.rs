@@ -24,19 +24,21 @@ use mptp_smux::{HeaderVal, ResponsePrefix, ServeError};
 
 use super::{MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher};
 
-impl<C, A, S> TrServeHandler<C> for RadixRouter<C, A, S>
+impl<C, A, S, R> TrServeHandler<C> for RadixRouter<C, A, S, R>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
+    R: Default + 'static,
 {
     type Err = ServeError;
 
     type HandleAsync<'f>
-        = RouterHandleAsync<'f, 'f, C, A, S>
+        = RouterHandleAsync<'f, 'f, C, A, S, R>
     where
         Self: 'f,
-        C: 'f;
+        C: 'f,
+        R: 'f;
 
     fn handle_async<'f>(
         &'f self,
@@ -50,8 +52,8 @@ where
 /// [`RadixRouter`] 作为 [`TrServeHandler`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(RouterHandle, pub, new(pub(crate)))]
-async fn router_handle_async_<'f, C, A, S, K>(
-    router: &'f RadixRouter<C, A, S>,
+async fn router_handle_async_<'f, C, A, S, R, K>(
+    router: &'f RadixRouter<C, A, S, R>,
     method: AccessMethod,
     session: &'f mut ServingSession<C>,
     cancel: K,
@@ -60,6 +62,7 @@ where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
+    R: Default + 'static,
     K: TrCancellationToken,
 {
     // 克隆 location：匹配结果的 params 借用 location，而调用 handler 需要 `&mut session`；
@@ -67,6 +70,8 @@ where
     let location = AbsString::from_str_in(session.location(), Global);
     // 请求级 arena：handler future 从它分配，随本次请求结束整体释放。
     let bump = Bump::new();
+    // 请求级运行期状态：中间件 stash、处理器读；随本次请求结束整体释放。
+    let request_state = bump.alloc(R::default());
 
     match router.match_route(method, &location) {
         MatchOutcome::Found {
@@ -81,6 +86,7 @@ where
                 params,
                 session,
                 router.state(),
+                request_state,
                 cancel,
             );
             router.pipeline().run(endpoint, &mut ctx).await
@@ -112,6 +118,7 @@ where
                 params,
                 session,
                 router.state(),
+                request_state,
                 cancel,
             );
             router.root().handle(&mut ctx).await

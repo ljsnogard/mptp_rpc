@@ -30,7 +30,7 @@ use abs_mptp::spec::Status;
 use anyhow::{Result, anyhow, bail};
 use compio::net::TcpListener;
 use flume::Receiver;
-use mptp_serving::{HandlerFuture, MptpContext, RadixRouter, TrEndpointHandler, box_future_};
+use mptp_serving::{HandlerFuture, MptpContext, TrEndpointHandler, box_future_};
 use mptp_smux::{
     HeaderKey, HeaderVal, ServeError,
     client::{MptpClient, Response},
@@ -39,7 +39,8 @@ use mptp_smux::{
 };
 use mptp_smux_v1_demo::scene::{
     ClientCfg, ConnectionCtx, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId,
-    PlanetParams, PlanetRegistry, SceneHub, SceneService, ServingCfg, UpdateAck,
+    PlanetParams, PlanetRegistry, SceneHub, SceneRequestState, SceneRouter, SceneService,
+    ServingCfg, UpdateAck,
     cfg_::Dock,
     conn_::{accept_conn_async_, dial_async_, share_conn_},
     handler_::assemble_router,
@@ -167,6 +168,7 @@ impl SceneFixture {
                     let router = router
                         .pull("test/multi", TestMultiPull)
                         .expect("装配测试路由");
+                    let router = router.view("test/state", TestState).expect("装配测试路由");
                     let servlet = Rc::new(MptpServlet::<ServingCfg, _>::new(router));
                     let _cleanup = ConnCleanup_(ctx.clone());
                     let _ = serve_connection_(shared, servlet, ctx, task_scope).await;
@@ -217,7 +219,7 @@ impl Drop for ConnCleanup_ {
 /// 在一条已建成的连接上绑定默认服务垛口并循环接受子流。
 async fn serve_connection_(
     shared: mptp_smux_v1_demo::scene::cfg_::SharedConn,
-    servlet: Rc<MptpServlet<ServingCfg, RadixRouter<ServingCfg>>>,
+    servlet: Rc<MptpServlet<ServingCfg, SceneRouter>>,
     ctx: Arc<ConnectionCtx>,
     scope: mptp_smux_v1_demo::scene::cfg_::SceneScope,
 ) -> Result<()> {
@@ -258,8 +260,8 @@ async fn serve_connection_(
 /// `Pull /test/chunks`：连续写三个 `Removed` 事件 chunk。
 struct TestChunks;
 
-impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestChunks {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestChunks {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let mut stream: SuffixStream<'_, C> = ctx
@@ -289,8 +291,8 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
 /// `Pull /test/split`：把一个事件拆成两个 chunk 写。
 struct TestSplit;
 
-impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestSplit {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestSplit {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let event = PlanetEvent::Updated(PlanetDescriptor {
@@ -363,8 +365,8 @@ struct TestCtx {
     probe_: Arc<Mutex<CtxProbe>>,
 }
 
-impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestCtx {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestCtx {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let before = ctx.reply_written();
@@ -395,8 +397,8 @@ struct TestCtxBody {
     probe_: Arc<Mutex<CtxProbe>>,
 }
 
-impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestCtxBody {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestCtxBody {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let body = ctx.req_body_async().await?;
@@ -418,8 +420,8 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
 /// `View /test/multi`: the VIEW side of the same-path multi-method test.
 struct TestMultiView;
 
-impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestMultiView {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestMultiView {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let mut response = ctx.response(Status::Ok);
@@ -435,8 +437,8 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
 /// `Pull /test/multi`: the PULL side of the same-path multi-method test.
 struct TestMultiPull;
 
-impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestMultiPull {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestMultiPull {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let event = PlanetEvent::Removed {
@@ -452,6 +454,33 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
                 ctx.response(Status::Ok).suffix_stream_async().await?;
             stream.write_chunk_async(&bytes).await?;
             let _ = stream.finish_async().await;
+            Ok(())
+        })
+    }
+}
+
+/// `View /test/state`：把请求级状态里的主体回写到响应头（Phase C 端到端）。
+///
+/// `View /test/state`: echoes the principal held in the per-request state.
+struct TestState;
+
+impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S, SceneRequestState>
+    for TestState
+{
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            let principal = ctx
+                .request_state()
+                .principal
+                .clone()
+                .unwrap_or_else(|| String::from("anonymous"));
+            let mut response = ctx.response(Status::Ok);
+            response.header("X-Scene-Principal", HeaderVal::from_text(principal));
+            response.no_body_async().await?;
             Ok(())
         })
     }

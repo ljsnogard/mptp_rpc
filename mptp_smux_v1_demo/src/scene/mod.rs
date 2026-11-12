@@ -9,15 +9,17 @@ pub mod conn_;
 pub mod handler_;
 pub mod net_;
 pub mod protocol_;
+pub mod req_state_;
 pub mod server_;
 pub mod state_;
 
 pub use cfg_::{ClientCfg, ServingCfg};
 pub use client_::SceneClient;
-pub use handler_::SceneService;
+pub use handler_::{SceneRouter, SceneService};
 pub use net_::{NetCommand, NetEvent, NetHandle, spawn_net_thread_};
 pub use protocol_::{
     PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId, PlanetParams, PlanetTheme, UpdateAck,
     UpdateRequest,
 };
+pub use req_state_::{K_HDR_PRINCIPAL, PrincipalMiddleware, SceneRequestState};
 pub use state_::{ConnectionCtx, PlanetRegistry, SceneHub};

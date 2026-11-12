@@ -201,7 +201,11 @@ fn method_params_(method: &EndpointMethodModel_) -> syn::Result<Vec<(syn::Ident,
 }
 
 /// 生成一个端点处理器结构体：持有 `Arc<Self>`，实现 [`TrEndpointHandler`]。
-fn handler_struct_(self_ident: &syn::Ident, self_ty: &Type, method: &EndpointMethodModel_) -> ::zyn::TokenStream {
+fn handler_struct_(
+    self_ident: &syn::Ident,
+    self_ty: &Type,
+    method: &EndpointMethodModel_,
+) -> ::zyn::TokenStream {
     let handler_ident = handler_ident_(self_ident, &method.ident_);
 
     quote! {
@@ -252,13 +256,13 @@ fn handler_impl_(
 
     Result::Ok(quote! {
         #[doc(hidden)]
-        impl<C, S> TrEndpointHandler<C, S> for #handler_ident
+        impl<C, S, R> TrEndpointHandler<C, S, R> for #handler_ident
         where
             C: TrConfig,
         {
             fn handle<'a, 'f>(
                 &'a self,
-                ctx: &'a mut MptpContext<'f, C, S>,
+                ctx: &'a mut MptpContext<'f, C, S, R>,
             ) -> HandlerFuture<'a> {
                 let arena = ctx.arena();
                 box_future_(arena, async move {
@@ -299,12 +303,17 @@ fn install_into_(self_ident: &syn::Ident, model: &ControllerModel_) -> ::zyn::To
 
     quote! {
         #[doc(hidden)]
-        pub fn install_into<C>(
-            router: RadixRouter<C>,
+        pub fn install_into<C, S, R>(
+            router: RadixRouter<C, ::std::alloc::Global, S, R>,
             svc: ::std::sync::Arc<#self_ty>,
-        ) -> Result<RadixRouter<C>, ::mptp_serving::x_deps::matchit_route::InsertError>
+        ) -> Result<
+            RadixRouter<C, ::std::alloc::Global, S, R>,
+            ::mptp_serving::x_deps::matchit_route::InsertError,
+        >
         where
             C: TrConfig + 'static,
+            S: Send + Sync + 'static,
+            R: 'static,
         {
             let router = router #(#bindings)*;
             Result::Ok(router)
@@ -340,10 +349,10 @@ fn pull_handler_impl_(
 
     Result::Ok(quote! {
         #[doc(hidden)]
-        impl<C: TrConfig, S> TrEndpointHandler<C, S> for #handler_ident {
+        impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for #handler_ident {
             fn handle<'a, 'f>(
                 &'a self,
-                ctx: &'a mut MptpContext<'f, C, S>,
+                ctx: &'a mut MptpContext<'f, C, S, R>,
             ) -> HandlerFuture<'a> {
                 let arena = ctx.arena();
                 box_future_(arena, async move {
@@ -592,4 +601,3 @@ impl VisitMut for SelfToSvc_ {
         visit_mut::visit_expr_path_mut(self, expr_path);
     }
 }
-

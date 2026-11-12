@@ -27,8 +27,8 @@ use crate::scene::{
     cancel_::cancel_pair_,
     protocol_::{
         JoinRequest, K_HDR_DIRECTORY_VERSION, K_HDR_PLANET_COUNT, PlanetDescriptor, PlanetEvent,
-        PlanetId, UnsubscribeAck, UnsubscribeRequest, UpdateAck, UpdateRequest, encode_event_async_,
-        parse_planet_uri_,
+        PlanetId, UnsubscribeAck, UnsubscribeRequest, UpdateAck, UpdateRequest,
+        encode_event_async_, parse_planet_uri_,
     },
     state_::{ConnectionCtx, K_SUB_QUEUE_CAP, SceneHub, SubId},
 };
@@ -88,7 +88,8 @@ impl TrReplyError for SceneError {
     }
 }
 
-#[allow(dead_code)] // 端点方法原样保留但由宏生成的 step 函数驱动；本方法供直接调用 / 测试。
+#[allow(dead_code)]
+// 端点方法原样保留但由宏生成的 step 函数驱动；本方法供直接调用 / 测试。
 #[rpc(interface = "scene")]
 impl SceneService {
     /// `Call /scene/join`：加入场景，创建自己的行星。
@@ -120,7 +121,11 @@ impl SceneService {
         let frame = encode_event_async_(&PlanetEvent::Updated(updated.clone()))
             .await
             .map_err(|err| SceneError::Codec(err.to_string()))?;
-        self.ctx_.hub_().lock().unwrap().broadcast_(planet_id, frame);
+        self.ctx_
+            .hub_()
+            .lock()
+            .unwrap()
+            .broadcast_(planet_id, frame);
         Ok(UpdateAck {
             planet_id,
             version: updated.version,
@@ -131,10 +136,12 @@ impl SceneService {
     /// `Call /scene/unsubscribe`：显式退订某颗行星。
     #[rpc(call = "unsubscribe")]
     async fn unsubscribe(&self, req: UnsubscribeRequest) -> Result<UnsubscribeAck, SceneError> {
-        let removed = self.ctx_.hub_().lock().unwrap().unsubscribe_connection_(
-            req.planet_id,
-            self.ctx_.connection_id_(),
-        );
+        let removed = self
+            .ctx_
+            .hub_()
+            .lock()
+            .unwrap()
+            .unsubscribe_connection_(req.planet_id, self.ctx_.connection_id_());
         Ok(UnsubscribeAck {
             removed: u32::try_from(removed).unwrap_or(u32::MAX),
         })
@@ -147,11 +154,8 @@ struct ScenePlanets {
     svc_: Arc<SceneService>,
 }
 
-impl<C: TrConfig, S> TrEndpointHandler<C, S> for ScenePlanets {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> HandlerFuture<'a> {
+impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for ScenePlanets {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             match ctx.method() {
@@ -192,10 +196,10 @@ struct ScenePull {
     svc_: Arc<SceneService>,
 }
 
-impl<S> TrEndpointHandler<crate::scene::cfg_::ServingCfg, S> for ScenePull {
+impl<S, R> TrEndpointHandler<crate::scene::cfg_::ServingCfg, S, R> for ScenePull {
     fn handle<'a, 'f>(
         &'a self,
-        ctx: &'a mut MptpContext<'f, crate::scene::cfg_::ServingCfg, S>,
+        ctx: &'a mut MptpContext<'f, crate::scene::cfg_::ServingCfg, S, R>,
     ) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
@@ -254,12 +258,11 @@ where
     // 先登记订阅，再打开后缀流：登记与快照之间没有 await，因此不会漏掉更新。
     let (tx, rx) = flume::bounded::<Arc<[u8]>>(K_SUB_QUEUE_CAP);
     let (canceller, token) = cancel_pair_();
-    let sub_id = conn.hub_().lock().unwrap().subscribe_(
-        planet_id,
-        conn.connection_id_(),
-        tx,
-        canceller,
-    );
+    let sub_id =
+        conn.hub_()
+            .lock()
+            .unwrap()
+            .subscribe_(planet_id, conn.connection_id_(), tx, canceller);
     let _guard = SubGuard_ {
         hub_: conn.hub_().clone(),
         planet_id_: planet_id,
@@ -328,11 +331,8 @@ where
 /// 场景根 handler：未命中任何端点时兜底写 404。
 struct SceneRoot;
 
-impl<C: TrConfig, S> TrEndpointHandler<C, S> for SceneRoot {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> HandlerFuture<'a> {
+impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for SceneRoot {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             ctx.session_mut()
@@ -344,15 +344,29 @@ impl<C: TrConfig, S> TrEndpointHandler<C, S> for SceneRoot {
     }
 }
 
+/// 场景路由类型：请求级状态固定为 [`SceneRequestState`]。
+///
+/// `C = ServingCfg` / 全局分配器 / 无连接状态 / 请求级状态 `SceneRequestState`。
+pub type SceneRouter = mptp_serving::RadixRouter<
+    crate::scene::cfg_::ServingCfg,
+    std::alloc::Global,
+    (),
+    crate::scene::req_state_::SceneRequestState,
+>;
+
 /// 把 controller 端点与手写端点装配进一个 [`mptp_serving::RadixRouter`]。
+///
+/// 中间件链上先挂 [`PrincipalMiddleware`](crate::scene::req_state_::PrincipalMiddleware)：
+/// 它把请求头里的主体写进请求级状态，处理器再只读消费。
 ///
 /// # Errors
 ///
 /// 端点路径冲突或装配失败时返回错误。
 pub fn assemble_router(
     svc: Arc<SceneService>,
-) -> Result<mptp_serving::RadixRouter<crate::scene::cfg_::ServingCfg>, mptp_serving::x_deps::matchit_route::InsertError> {
-    let router = mptp_serving::RadixRouter::<crate::scene::cfg_::ServingCfg>::new(Arc::new(SceneRoot));
+) -> Result<SceneRouter, mptp_serving::x_deps::matchit_route::InsertError> {
+    let router = SceneRouter::new_with_request_state(Arc::new(SceneRoot));
+    let router = router.use_middleware(crate::scene::req_state_::PrincipalMiddleware);
     let router = __rpc_controller_SceneService::install_into(router, svc.clone())?;
     let router = router
         .on(
