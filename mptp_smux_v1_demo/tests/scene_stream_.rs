@@ -111,6 +111,26 @@ async fn object_split_across_chunks_() {
     assert_eq!(planet.version, 3u64);
 }
 
+/// 测试宏生成的 Pull 端点把迭代器每一项作为后缀流 chunk 写出。
+/// Test that the macro-generated Pull endpoint writes each iterator item as a chunk.
+///
+/// - 手段：连接测试服务端的 `/test/ids/3`，宏生成的 handler 解码路径参数 `count=3`、
+///   调方法得到 `0..3`、逐项写后缀流后半关闭。
+/// - 判断：客户端按顺序读到 0、1、2，随后流以 EOF 结束。
+///
+/// - Means: pull `/test/ids/3`; the macro-generated handler decodes `count=3`, iterates
+///   `0..3`, writes each item, then half-closes.
+/// - Verdict: the client reads 0, 1, 2 in order and the stream then ends.
+#[compio::test]
+async fn macro_pull_streams_ids_() {
+    let fixture = SceneFixture::start_async_().await.expect("启动夹具");
+    let client = SceneTestClient::connect_async_(fixture.addr_())
+        .await
+        .expect("连接夹具");
+    let ids = client.pull_ids_async_(3u64).await.expect("拉取 id 流");
+    assert_eq!(ids, vec![0u64, 1u64, 2u64]);
+}
+
 /// 测试无限流不会因为一个对象写完而结束。
 /// Test that an infinite stream does not end after one object.
 ///

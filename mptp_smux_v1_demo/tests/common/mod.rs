@@ -50,6 +50,7 @@ use mptp_smux_v1_demo::scene::{
         decode_value_async_, encode_to_vec_async_, header_u64_, planet_uri_,
     },
 };
+use rpc_svc_macro::rpc;
 
 /// 单次测试网络等待的上限。
 pub const K_TEST_TIMEOUT: Duration = Duration::from_secs(10u64);
@@ -132,6 +133,11 @@ impl SceneFixture {
                     let ctx = Arc::new(ConnectionCtx::new_(connection_id, registry, hub));
                     let svc = Arc::new(SceneService::new_(ctx.clone()));
                     let router = assemble_router(svc).expect("装配场景路由");
+                    let router = __rpc_controller_TestIdSource::install_into(
+                        router,
+                        Arc::new(TestIdSource),
+                    )
+                    .expect("装配测试 controller");
                     let router = router
                         .pull("test/chunks", TestChunks)
                         .expect("装配测试路由");
@@ -290,6 +296,21 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
             let _ = stream.finish_async().await;
             Ok(())
         })
+    }
+}
+
+/// 测试用 controller：验证宏生成的 `Pull` 端点「路径参数解码 → 迭代器逐项写后缀流」。
+pub struct TestIdSource;
+
+#[rpc(interface = "test")]
+impl TestIdSource {
+    /// 拉取 `0..count` 的 id 序列（有限流，写完后半关闭）。
+    #[rpc(pull = "ids/{count}")]
+    fn ids(
+        &self,
+        count: u64,
+    ) -> impl rpc_core_v1::x_deps::abs_async_iter::TrAsyncIterator<Item = u64> {
+        0..count
     }
 }
 
@@ -455,6 +476,23 @@ impl SceneTestClient {
     pub async fn pull_status_async_(&self, uri: &str) -> Result<Status> {
         let resp = with_timeout_(async { self.client_.pull(uri).send_async().await }).await?;
         Ok(resp.status())
+    }
+
+    /// 拉取宏生成 Pull 端点 `/test/ids/{count}`，把 `0..count` 的每个 `u64` 解成列表。
+    ///
+    /// # Errors
+    ///
+    /// 请求失败、状态非 200 或取后缀流失败时返回错误。
+    pub async fn pull_ids_async_(&self, count: u64) -> Result<Vec<u64>> {
+        let uri = format!("/test/ids/{count}");
+        let mut resp = with_timeout_(async { self.client_.pull(&uri).send_async().await }).await?;
+        ensure_ok_(&resp, &uri)?;
+        let mut suffix = resp.suffix_async().await?;
+        let mut ids = Vec::new();
+        while let Ok(id) = decode_value_async_::<u64, _>(&mut suffix).await {
+            ids.push(id);
+        }
+        Ok(ids)
     }
 
     /// 发一条不允许的方法（`Post`），返回状态与 `Allow` 头文本。
