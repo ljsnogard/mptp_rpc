@@ -92,6 +92,9 @@ pub(crate) struct EndpointMethodModel_ {
     /// 方法签名（`#[rpc(...)]` 端点声明属性已剥离）。
     pub(crate) sig_: syn::Signature,
 
+    /// 方法体（`async fn` 的正文；codegen 会把它重写成 gen_mcf2 step 函数）。
+    pub(crate) block_: syn::Block,
+
     /// 方法上的其余属性（文档、`#[cfg]` 等）。
     pub(crate) attrs_: Vec<syn::Attribute>,
 

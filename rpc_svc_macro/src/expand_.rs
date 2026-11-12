@@ -25,15 +25,20 @@
 //! `RpcRouter::add_service` consumes.
 
 use zyn::{
+    format_ident,
     quote::quote,
-    syn::{self, Lifetime, Type, TypeParamBound},
+    syn::{
+        self, FnArg, Lifetime, Pat, ReturnType, Type, TypeParamBound,
+        spanned::Spanned,
+        visit_mut::{self, VisitMut},
+    },
 };
 
 use crate::{
     analyze_::cfg_attrs_,
     model_::{
-        ArgModel_, ControllerModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_,
-        ServiceOfModel_,
+        ArgModel_, ControllerModel_, ConvertKind_, EndpointMethodModel_, InterfaceModel_,
+        MethodModel_, ServiceModel_, ServiceOfModel_,
     },
 };
 
@@ -468,14 +473,138 @@ fn service_of_impl_(model: &ServiceOfModel_) -> ::zyn::TokenStream {
 
 /// 展开一个 controller impl 块。
 ///
-/// 占位实现：先把方法上的 `#[rpc(...)]` 端点声明属性剥离、原样保留 impl。每个方法生成
-/// `TrEndpointHandler` 与 `install_into` 注册属 P1 后续 round，届时在本函数里补齐。
+/// 保留原 impl（业务方法），并在隐藏模块里为每个端点方法生成 `gen_may_cancel_future` 的
+/// step 函数。端点处理器与 `install_into` 注册属 P1 后续 round，届时在
+/// [`controller_module_`] 里补齐。
 pub(crate) fn expand_controller_(model: &ControllerModel_) -> syn::Result<zyn::Output> {
     let impl_item = &model.impl_item_;
+    let module = controller_module_(model)?;
 
     Result::Ok(zyn::zyn! {
         {{ impl_item }}
+        {{ module }}
     })
+}
+
+/// 生成 controller 的隐藏模块：目前只含每个端点方法的 step 函数。
+fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStream> {
+    let self_ty = &model.self_ty_;
+    let self_ident = self_type_ident_(self_ty).ok_or_else(|| {
+        syn::Error::new(
+            self_ty.span(),
+            "controller 自身类型必须是简单路径类型，例如 `SceneService`",
+        )
+    })?;
+    let module_ident = format_ident!("__rpc_controller_{}", self_ident);
+    let steps = model
+        .methods_
+        .iter()
+        .map(|method| endpoint_step_fn_(self_ty, method))
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    Result::Ok(quote! {
+        #[doc(hidden)]
+        #[allow(non_snake_case, non_camel_case_types, unused_imports)]
+        pub mod #module_ident {
+            use super::*;
+
+            #(#steps)*
+        }
+    })
+}
+
+/// 把一个 `async fn` 端点方法重写成一个 `gen_may_cancel_future` step 函数。
+///
+/// 生成的 step 函数是自由函数（`svc: &'f Self` + 原参数 + `cancel: __C`），方法体内的
+/// `self` 被重写成 `svc`。处理器（P1 后续）会用它来驱动业务逻辑。
+fn endpoint_step_fn_(
+    self_ty: &Type,
+    method: &EndpointMethodModel_,
+) -> syn::Result<::zyn::TokenStream> {
+    let self_ident = self_type_ident_(self_ty).ok_or_else(|| {
+        syn::Error::new(
+            self_ty.span(),
+            "controller 自身类型必须是简单路径类型，例如 `SceneService`",
+        )
+    })?;
+    let method_ident = &method.ident_;
+    let sig = &method.sig_;
+
+    // `gen_may_cancel_future` 的前缀：`{Self}_{Method}` → `{Prefix}Async` / `{Prefix}Future`。
+    let prefix = format_ident!("{}_{}", self_ident, method_ident);
+    // step 函数名：`{self}_{method}_async_`。
+    let step_ident = format_ident!("{}_{}_async_", self_ident, method_ident);
+
+    // 收集非 `self` 参数（保留名字与类型）。
+    let mut arg_idents = Vec::new();
+    let mut arg_tys = Vec::new();
+    for input in &sig.inputs {
+        let FnArg::Typed(pat_type) = input else {
+            continue; // `&self` 接收者被 `svc` 取代。
+        };
+        let Pat::Ident(pattern) = &*pat_type.pat else {
+            return Result::Err(syn::Error::new(
+                pat_type.pat.span(),
+                "端点方法参数必须是简单标识符",
+            ));
+        };
+        arg_idents.push(pattern.ident.clone());
+        arg_tys.push((*pat_type.ty).clone());
+    }
+
+    let output_ty = match &sig.output {
+        ReturnType::Type(_, ty) => (**ty).clone(),
+        ReturnType::Default => syn::parse2(quote!(())).expect("() 是可解析的单元类型"),
+    };
+
+    // 重写方法体：`self` → `svc`。
+    let mut block = method.block_.clone();
+    SelfToSvc_.visit_block_mut(&mut block);
+
+    Result::Ok(quote! {
+        #[::rpc_core_v1::x_deps::gen_mcf2::gen_may_cancel_future(
+            #prefix,
+            pub(crate),
+            new(pub(crate))
+        )]
+        pub(crate) async fn #step_ident<'f, __C>(
+            svc: &'f #self_ty,
+            #(#arg_idents: #arg_tys,)*
+            cancel: __C,
+        ) -> #output_ty
+        where
+            __C: ::rpc_core_v1::x_deps::abs_cancel::TrCancellationToken,
+        {
+            #block
+        }
+    })
+}
+
+/// 取一个简单路径类型的最后一段标识符。
+fn self_type_ident_(ty: &Type) -> Option<syn::Ident> {
+    let Type::Path(type_path) = ty else {
+        return Option::None;
+    };
+    if type_path.qself.is_some() {
+        return Option::None;
+    }
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.clone())
+}
+
+/// 把方法体里的 `self` 重写成 `svc`。
+struct SelfToSvc_;
+
+impl VisitMut for SelfToSvc_ {
+    fn visit_expr_path_mut(&mut self, expr_path: &mut zyn::syn::ExprPath) {
+        if expr_path.qself.is_none() && expr_path.path.is_ident("self") {
+            expr_path.path = zyn::syn::parse_quote!(svc);
+        }
+        visit_mut::visit_expr_path_mut(self, expr_path);
+    }
 }
 
 #[cfg(test)]
