@@ -29,6 +29,8 @@
 | --- | --- | --- | --- |
 | `5fbac09` | 中文 UI、行星纹理、双视角相机、可调光照 | 无；光照是客户端本地状态 | 无 |
 | `f1e837a` | 轨道 / 行星半径、颜色、纹理主题广播 | `PlanetParams` 扩张；`PlanetDescriptor` 嵌套参数 | 无 |
+| `40b8ea7` | 修正纹理 / 材质资产生命周期 | 无 | 无 |
+| `c3690d0` | 颜色改为材质 tint，避免拖动时重建纹理 | 无；颜色语义不变 | 无 |
 | 本次文档提交 | 记录不变量与变化范围 | 无 | 无 |
 
 `f1e837a` 的 diff 里，`mptp_smux`、`mptp_wire`、`conn_.rs`、`cfg_.rs`、`server_.rs` 都没有
@@ -170,6 +172,21 @@ pub struct PlanetParams {
 - 代价是主题编号没有 schema 约束，错误编号会被静默当成类地；如果主题数量继续增长，
   应该提供 `View /scene/themes` 之类的目录，而不是让客户端硬编码。
 
+### 4.5 更新成本分级：颜色是 tint，主题是纹理
+
+最初的纹理把行星主色烘进像素；颜色选择器连续拖动时，每一帧都会重新生成 512x256
+纹理（debug 约 0.16 s/次），实时性不可接受。后来把纹理改成中性反照率图，颜色通过
+`StandardMaterial::base_color` 乘上去：
+
+- 颜色变化 = 改一个材质字段，几乎零成本；
+- 主题变化 = 重新生成纹理，是低频操作；
+- 半径变化 = 改 `Transform.scale`；
+- 速度变化 = 只影响每帧轨道计算。
+
+这不是纯性能优化，而是一条参数分类规则：**连续、高频、只影响着色的参数走材质
+uniform；离散、改变数据结构的参数才值得重建资产。** 后续增加「大气颜色」「云量」
+之类参数时，应先判断它属于哪一类，而不是一律塞进纹理生成。
+
 ### 4.5 哪些不是世界状态
 
 这一轮也明确了「什么不该广播」：
@@ -206,7 +223,8 @@ payload 变成客户端偏好设置的垃圾桶。判断标准：
 - 新增本地视图参数 → 只改客户端，不进 wire；
 - 新增有限枚举 → 优先「开放 wire 编号 + 客户端回退」，除非必须强一致；
 - 所有连续量 → 服务端定义范围并清洗，客户端 UI 复用同一组常量；
-- 外观重生成（纹理 / 材质 / 缩放）→ 原地更新，不重建实体，避免自转相位与订阅状态丢失。
+- 外观重生成（纹理 / 材质 / 缩放）→ 原地更新，不重建实体，避免自转相位与订阅状态丢失；
+- 高频着色参数（颜色等）→ 走材质 uniform，不要重生成纹理；离散结构参数（主题）才重建资产。
 
 ### 6.2 需要新 API 的情况
 
@@ -241,6 +259,8 @@ Heartbeat with full descriptors and monotonic versions), while all mutable world
 grouped into one `PlanetParams` value object. Continuous values are clamped server-side;
 texture themes use an open `u32` on the wire with a conservative client-side fallback.
 Local view state (camera, lighting, font) is deliberately excluded from the broadcast.
+High-frequency shading parameters such as color are applied as a material tint, while only
+discrete structural parameters such as the texture theme rebuild an asset.
 The note closes with the cases that would require new APIs: partial updates, cross-version
 schema compatibility, theme catalogs, high-frequency update coalescing, and joint parameter
 constraints.
