@@ -4,9 +4,10 @@
 两端都固定为 `abs_art-facade` + compio。它不使用 HTTP / WebSocket 网关，也不使用
 tokio。
 
-场景本身很简单：太阳在原点；每个客户端 `join` 后新增一颗行星；摄像机锁定自己的行星；
-两个客户端默认互相订阅、互相可见；客户端可以改自己的公转 / 自转速度，也可以按行星
-选择性退订 / 重新订阅。
+场景本身很简单：太阳在原点；每个客户端 `join` 后新增一颗行星，表面带程序化纹理；
+摄像机锁定自己的行星，可在「轨道跟随」与「地表随转」之间切换并用滚轮缩放；两个客户端
+默认互相订阅、互相可见；客户端可以改自己的公转 / 自转速度，也可以按行星选择性退订 /
+重新订阅。
 
 但 demo 的第一目标是**把 `mptp_smux` 的公开 API 用满**：
 
@@ -96,7 +97,10 @@ Heartbeat { sequence }       // 空闲心跳，客户端忽略
 | `src/scene/conn_.rs` | TCP ↔ smux 握手装配 |
 | `src/bin/scene-server.rs` | 服务端二进制 |
 | `src/bin/scene-smoke.rs` | headless 双客户端 e2e |
-| `src/bin/scene-client.rs` | feature-gated Bevy 客户端 |
+| `src/bin/scene-client.rs` | feature-gated Bevy 客户端：ECS、相机、egui 面板 |
+| `src/bin/scene-client/font_.rs` | 中文 TTF / OTF 查找与 egui 字体回退链装载 |
+| `src/bin/scene-client/surface_.rs` | 程序化行星表面纹理 + 轨道 / 地表相机几何 |
+| `assets/fonts/` | MapleMono NF CN Regular 与 SIL OFL 1.1 许可证 |
 | `tests/scene_stream_.rs` | 15 项无 Bevy 集成测试矩阵 |
 | `tests/common/mod.rs` | `SceneFixture` / `SceneTestClient` |
 
@@ -129,7 +133,41 @@ $ cargo run -p mptp_smux_v1_demo --features bevy-client --bin scene-client -- --
 
 - 每颗行星一个勾选框（订阅 / 退订）；自己的行星默认订阅且不可退订；
 - 自己的公转 / 自转滑杆；
+- 观察视角切换、缩放滑杆，以及实际使用的中文字体；
+- 背景光强度、太阳光强度滑杆（附「恢复默认」）；
 - 摄像机锁定自己的行星；未订阅行星不显示，重新勾选后按 `Snapshot` 恢复。
+
+### 中文字体
+
+`bevy_egui` 的默认字体不含 CJK 字形，界面中文会渲染成方块。客户端启动时按以下顺序
+查找一个支持中文的 TTF / OTF：
+
+1. `mptp_smux_v1_demo/assets/fonts/MapleMono-NF-CN-Regular.ttf`（仓库自带）；
+2. 可执行文件旁的 `assets/fonts/MapleMono-NF-CN-Regular.ttf`；
+3. 用户字体目录里的 MapleMono，以及常见系统 CJK 字体（兜底）。
+
+找到后以 `Lowest` 优先级追加到 egui 的 `Proportional` / `Monospace` 回退链：Latin
+仍用 egui 默认字体，缺字时才用中文字体。面板顶部显示实际使用的字体文件名；全路径
+同时打印到标准输出，便于排查。字体来自 Maple Mono 8.001 的 NF CN Regular 字重，
+许可证见 [`assets/fonts/OFL.txt`](assets/fonts/OFL.txt)。
+
+### 观察视角与自转
+
+- **轨道跟随**（默认）：相机在固定方向跟随行星，滚轮或「观察距离」滑杆拉远 / 拉近；
+- **地表随转**：相机固定在行星表面（北纬约 35°），跟着自转一起转；太阳与其他行星会
+  扫过天空，自转非常直观。滚轮或「离地高度」滑杆调整离地高度；
+- 键盘 `1` / `2` 切换两种视角；
+- 行星表面纹理按 `planet_id` 程序化生成（大陆 / 海洋 / 极冠 / 云带），不依赖外部图片
+  资产；纹理随自转移动，轨道视角下也能看出自转。
+
+### 光照
+
+- **太阳是场景里唯一的直接光源**：点光源位于太阳球心，不再使用固定方向的平行光；
+- 「背景光强度」控制环境光（默认 30，可调到 0）：调低后夜面更暗、明暗交界更清晰；
+- 「太阳光强度」控制太阳点光（单位：万流明，默认 600，即 6,000,000）；
+- 两者都能实时调整；「恢复默认」一键还原。背景光调低、太阳光调高时，行星的明暗
+  交界和自转最明显；
+- 光照参数只影响渲染，不改变服务端下发的行星参数或 MPTP 协议。
 
 命令行：
 
@@ -150,6 +188,7 @@ $ just e2e-scene
 
 ```console
 $ cargo test -p mptp_smux_v1_demo          # 15 项集成测试，无 Bevy
+$ cargo test -p mptp_smux_v1_demo --features bevy-client --bin scene-client  # 纹理 / 相机单元测试
 $ cargo test -p mptp_smux                  # SuffixStream 单元测试
 $ cargo check -p mptp_smux_v1_demo --features bevy-client --bin scene-client
 ```
@@ -205,4 +244,8 @@ removed through a bounded queue without blocking others. All MPTP/smux transport
 inside `mptp_smux`; this crate only owns scene state and rendering. A known API gap (the
 server cannot promptly observe a dropped `Response`) is recorded in the dev-note; the demo
 uses a business-level `/scene/unsubscribe` hint until a public symmetric close API is
-approved.
+approved. The Bevy client loads a bundled MapleMono CJK fallback so Chinese UI text renders,
+draws a deterministic procedural surface texture per planet so rotation is visible, and
+offers an orbit-follow camera and a surface-fixed camera with scroll-wheel zoom. Lighting is
+adjustable at runtime: the background ambient light and the sun point light (the only direct
+light) have separate sliders, so the terminator and rotation stay readable.
