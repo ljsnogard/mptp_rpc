@@ -19,29 +19,31 @@
 use std::{
     future::Future,
     net::SocketAddr,
+    pin::Pin,
     rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use abs_art_facade::{TrJoinHandle, TrLocalScope};
-use abs_cancel::{TrCancellationToken, TrMayCancel};
-use abs_mptp::spec::{Status, access_method::AccessMethod};
+use abs_cancel::TrMayCancel;
+use abs_mptp::spec::Status;
 use anyhow::{Result, anyhow, bail};
 use compio::net::TcpListener;
 use flume::Receiver;
-use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::{
-    MethodSet, ServeError,
+    ServeError,
     client::{MptpClient, Response},
-    serving::{MptpServlet, ServingSession, SuffixStream, TrServeHandler},
-    x_deps::{abs_cancel, abs_smux, gen_mcf2},
+    serving::{MptpServlet, SuffixStream},
+    x_deps::abs_smux,
 };
+use mptp_serving::{MptpContext, RadixRouter, TrEndpointHandler};
 use mptp_smux_v1_demo::scene::{
     ClientCfg, ConnectionCtx, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId,
-    PlanetParams, PlanetRegistry, SceneHandler, SceneHub, ServingCfg, UpdateAck,
+    PlanetParams, PlanetRegistry, SceneHub, SceneService, ServingCfg, UpdateAck,
     cfg_::Dock,
     conn_::{accept_conn_async_, dial_async_, share_conn_},
+    handler_::assemble_router,
     protocol_::{
         JoinRequest, K_HDR_DIRECTORY_VERSION, K_HDR_PLANET_COUNT, K_SCENE_JOIN, K_SCENE_PLANETS,
         K_SCENE_UNSUBSCRIBE, K_SCENE_UPDATE, UnsubscribeAck, UnsubscribeRequest, UpdateRequest,
@@ -128,8 +130,15 @@ impl SceneFixture {
                     };
                     let shared = share_conn_(conn);
                     let ctx = Arc::new(ConnectionCtx::new_(connection_id, registry, hub));
-                    let handler = FixtureHandler::new_(SceneHandler::new_(ctx.clone()));
-                    let servlet = Rc::new(MptpServlet::<ServingCfg, FixtureHandler>::new(handler));
+                    let svc = Arc::new(SceneService::new_(ctx.clone()));
+                    let router = assemble_router(svc).expect("装配场景路由");
+                    let router = router
+                        .pull("test/chunks", TestChunks)
+                        .expect("装配测试路由");
+                    let router = router
+                        .pull("test/split", TestSplit)
+                        .expect("装配测试路由");
+                    let servlet = Rc::new(MptpServlet::<ServingCfg, _>::new(router));
                     let _cleanup = ConnCleanup_(ctx.clone());
                     let _ = serve_connection_(shared, servlet, ctx, task_scope).await;
                 });
@@ -173,7 +182,7 @@ impl Drop for ConnCleanup_ {
 /// 在一条已建成的连接上绑定默认服务垛口并循环接受子流。
 async fn serve_connection_(
     shared: mptp_smux_v1_demo::scene::cfg_::SharedConn,
-    servlet: Rc<MptpServlet<ServingCfg, FixtureHandler>>,
+    servlet: Rc<MptpServlet<ServingCfg, RadixRouter<ServingCfg>>>,
     ctx: Arc<ConnectionCtx>,
     scope: mptp_smux_v1_demo::scene::cfg_::SceneScope,
 ) -> Result<()> {
@@ -208,86 +217,50 @@ async fn serve_connection_(
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
-// 仅测试用的 handler：补充两条协议路径
+// 仅测试用的端点：补充两条协议路径
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
-/// 场景 handler 的测试包装。
-pub struct FixtureHandler {
-    /// 真正的场景 handler。
-    scene_: SceneHandler,
-}
+/// `Pull /test/chunks`：连续写三个 `Removed` 事件 chunk。
+struct TestChunks;
 
-impl FixtureHandler {
-    /// 包住一个场景 handler。
-    pub fn new_(scene: SceneHandler) -> Self {
-        FixtureHandler { scene_: scene }
-    }
-}
-
-impl TrServeHandler<ServingCfg> for FixtureHandler {
-    type Err = ServeError;
-
-    fn allowed_methods(&self) -> MethodSet {
-        self.scene_.allowed_methods()
-    }
-
-    type HandleAsync<'f>
-        = FixtureHandleAsync<'f, 'f>
-    where
-        Self: 'f,
-        ServingCfg: 'f;
-
-    fn handle_async<'f>(
-        &'f self,
-        method: AccessMethod,
-        session: &'f mut ServingSession<ServingCfg>,
-    ) -> Self::HandleAsync<'f> {
-        FixtureHandleAsync::new(self, method, session)
-    }
-}
-
-/// [`FixtureHandler::handle_async`] 的 step 函数。
-#[allow(clippy::needless_lifetimes)]
-#[gen_may_cancel_future(FixtureHandle, pub, new(pub(crate)))]
-async fn fixture_handle_async_<'f, K>(
-    handler: &'f FixtureHandler,
-    method: AccessMethod,
-    session: &'f mut ServingSession<ServingCfg>,
-    cancel: K,
-) -> Result<(), ServeError>
-where
-    K: TrCancellationToken,
-{
-    match (method, session.location()) {
-        (AccessMethod::Pull, "/test/chunks") => {
-            let mut stream: SuffixStream<'_, ServingCfg> = session
+impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestChunks {
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
+        Box::pin(async move {
+            let mut stream: SuffixStream<'_, C> = ctx
+                .session_mut()
                 .response(Status::Ok)
                 .suffix_stream_async()
-                .may_cancel_with(cancel.child_token())
                 .await?;
             for index in 1u64..=3u64 {
                 let event = PlanetEvent::Removed {
                     planet_id: index,
                     version: index,
                 };
-                let bytes =
-                    encode_to_vec_async_(&event)
-                        .await
-                        .map_err(|err| ServeError::Target {
-                            detail: err.to_string(),
-                        })?;
-                stream
-                    .write_chunk_async(&bytes)
-                    .may_cancel_with(cancel.child_token())
-                    .await?;
+                let bytes = encode_to_vec_async_(&event)
+                    .await
+                    .map_err(|err| ServeError::Target {
+                        detail: err.to_string(),
+                    })?;
+                stream.write_chunk_async(&bytes).await?;
             }
-            let _ = stream
-                .finish_async()
-                .may_cancel_with(cancel.child_token())
-                .await;
+            let _ = stream.finish_async().await;
             Ok(())
-        }
-        (AccessMethod::Pull, "/test/split") => {
+        })
+    }
+}
+
+/// `Pull /test/split`：把一个事件拆成两个 chunk 写。
+struct TestSplit;
+
+impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestSplit {
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
+        Box::pin(async move {
             let event = PlanetEvent::Updated(PlanetDescriptor {
                 id: 7u64,
                 owner: 1u64,
@@ -307,32 +280,16 @@ where
                     detail: err.to_string(),
                 })?;
             let middle = bytes.len() / 2usize;
-            let mut stream: SuffixStream<'_, ServingCfg> = session
+            let mut stream: SuffixStream<'_, C> = ctx
+                .session_mut()
                 .response(Status::Ok)
                 .suffix_stream_async()
-                .may_cancel_with(cancel.child_token())
                 .await?;
-            stream
-                .write_chunk_async(&bytes[..middle])
-                .may_cancel_with(cancel.child_token())
-                .await?;
-            stream
-                .write_chunk_async(&bytes[middle..])
-                .may_cancel_with(cancel.child_token())
-                .await?;
-            let _ = stream
-                .finish_async()
-                .may_cancel_with(cancel.child_token())
-                .await;
+            stream.write_chunk_async(&bytes[..middle]).await?;
+            stream.write_chunk_async(&bytes[middle..]).await?;
+            let _ = stream.finish_async().await;
             Ok(())
-        }
-        _ => {
-            handler
-                .scene_
-                .handle_async(method, session)
-                .may_cancel_with(cancel)
-                .await
-        }
+        })
     }
 }
 

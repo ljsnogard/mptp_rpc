@@ -1,5 +1,3 @@
-#![feature(impl_trait_in_assoc_type)]
-
 //! 场景协议的无 Bevy 集成测试矩阵。
 //!
 //! 每个用例都跑在**真实 TCP** 上：`compio` 单线程运行时、`smux_v1` 握手、`MptpServlet` /
@@ -564,10 +562,10 @@ async fn unknown_planet_is_404_() {
 /// Test that a disallowed method returns 405 with an `Allow` header.
 ///
 /// - 手段：A 对 `/scene/planets` 发 `Post`。
-/// - 判断：状态 405；`Allow` 头包含本 handler 允许的 HEAD / VIEW / PULL / CALL。
+/// - 判断：状态 405；`Allow` 头包含本路径（`/scene/planets`）允许的 HEAD / VIEW。
 ///
 /// - Means: A sends `Post` to `/scene/planets`.
-/// - Verdict: status 405 and `Allow` lists HEAD / VIEW / PULL / CALL.
+/// - Verdict: status 405 and `Allow` lists HEAD / VIEW for this path.
 #[compio::test]
 async fn post_is_405_() {
     let fixture = SceneFixture::start_async_().await.expect("启动夹具");
@@ -580,7 +578,7 @@ async fn post_is_405_() {
         .expect("Post 目录");
     assert_eq!(status.inner(), 405u16);
     let allow = allow.expect("405 应当带 Allow 头");
-    for method in ["HEAD", "VIEW", "PULL", "CALL"] {
+    for method in ["HEAD", "VIEW"] {
         assert!(allow.contains(method), "Allow 缺少 {method}：{allow:?}");
     }
     assert!(!allow.contains("POST"), "Allow 不应包含 POST：{allow:?}");

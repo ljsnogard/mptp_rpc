@@ -15,6 +15,11 @@ mptp_smux = { path = "../mptp_smux" }
 mptp_wire = { path = "../mptp_wire" }
 abs_mptp = { path = "../abs_mptp" }
 
+# 服务端框架 + RPC 层 + controller 宏。
+mptp_serving = { path = "../mptp_serving" }
+rpc_core_v1 = { path = "../rpc_core_v1" }
+rpc_svc_macro = { path = "../rpc_svc_macro" }
+
 abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 
 # 业务体序列化：`abs_denco` 是抽象层，`mp_denco` 是 MessagePack 实现，`denco_macro` 提供派生。
