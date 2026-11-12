@@ -431,19 +431,25 @@ fn sync_planet_entities_(
             continue;
         };
         let theme = PlanetTheme::from_wire_(planet.params.texture_theme);
-        if visual.color_ != planet.params.color || visual.theme_ != theme {
-            let base = color_of_(planet.params.color).to_srgba();
-            let texture = images.add(planet_surface_image(
-                planet.id,
-                theme,
-                [base.red, base.green, base.blue],
-            ));
-            let old_texture = std::mem::replace(&mut visual.texture_, texture.clone());
+        let color_changed = visual.color_ != planet.params.color;
+        let theme_changed = visual.theme_ != theme;
+        if color_changed || theme_changed {
+            // 颜色只改材质 tint；只有主题变化才重生成中性反照率纹理。
+            let new_texture = theme_changed.then(|| {
+                let texture = images.add(planet_surface_image(planet.id, theme));
+                let old_texture = std::mem::replace(&mut visual.texture_, texture.clone());
+                let _ = images.remove(&old_texture);
+                texture
+            });
             if let Some(mut material) = materials.get_mut(&material_handle.0) {
-                material.base_color_texture = Some(texture);
-                material.emissive = theme_emissive_(theme);
+                if color_changed {
+                    material.base_color = color_of_(planet.params.color);
+                }
+                if let Some(texture) = new_texture {
+                    material.base_color_texture = Some(texture);
+                    material.emissive = theme_emissive_(theme);
+                }
             }
-            let _ = images.remove(&old_texture);
             visual.color_ = planet.params.color;
             visual.theme_ = theme;
         }
@@ -458,16 +464,11 @@ fn sync_planet_entities_(
             continue;
         }
         let theme = PlanetTheme::from_wire_(planet.params.texture_theme);
-        let base = color_of_(planet.params.color).to_srgba();
-        let texture = images.add(planet_surface_image(
-            planet.id,
-            theme,
-            [base.red, base.green, base.blue],
-        ));
+        let texture = images.add(planet_surface_image(planet.id, theme));
         commands.spawn((
             Mesh3d(assets.unit_sphere.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::WHITE,
+                base_color: color_of_(planet.params.color),
                 base_color_texture: Some(texture.clone()),
                 emissive: theme_emissive_(theme),
                 perceptual_roughness: 0.88f32,
