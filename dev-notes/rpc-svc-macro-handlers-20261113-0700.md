@@ -1,7 +1,9 @@
 # rpc_svc_macro handler 形态扩展（round 32）与闭包 handler 的可行性结论
 
 - 日期：2026-11-13 07:00
-- 状态：**实施记录 + 调研结论**；①② 已落地，③ 给出「不可行 + 替代方案」的结论，待决策
+- 状态：**已收口**；①② 已落地，③ 经 spike 实证不可行，团队已决策「接受现状」（不做
+  `bind_handler!`，用自由函数 / controller 覆盖），原因与替代方案已写进
+  `rpc_svc_macro` 的 crate 文档
 - 分支：`feat/round-32-macro-handlers`（`--no-ff` 合回 `feat/serv-framework`，
   `merge round-32-macro-handlers`）
 
@@ -11,7 +13,7 @@
 | --- | --- |
 | ① 端点方法尾参 `TrCancellationToken` | ✅ 已落地（gen_mcf2 形状） |
 | ② 自由函数 `#[rpc(method="path")] async fn` | ✅ 已落地 |
-| ③ 闭包 `FnHandler` + `bind_handler!(router, "path", \|ctx\| async move {...})` | ❌ 受 Rust 生命周期约束，**无法实现**；已 spike 实证 |
+| ③ 闭包 `FnHandler` + `bind_handler!(router, "path", \|ctx\| async move {...})` | ❌ 受 Rust 生命周期约束，**无法实现**（已 spike 实证）；决策：接受现状 |
 
 ## 1. 已落地（round 32）
 
@@ -80,13 +82,20 @@ future」都必须输出一个依赖 `'a` 的类型，而 Rust 的 `Fn` trait �
    future 不再借用 ctx，`Fn` 即成立（axum 的 owned extractor 路线）。属较大公开 API 重
    设计，需单独决策。
 
-## 3. 遗留决策
+## 3. 决策与收口
 
-③ 的走向待定：接受 1（收口）、上 2（owned 重设计）、或其它折中。
+③ 已决策：**接受现状（方案 1）**。闭包 handler 不做；「无捕获」用自由函数、「有状态」用
+controller 方法覆盖，需要完全控制时手写 `TrEndpointHandler`。这一取舍已写进
+`rpc_svc_macro` 的 crate 文档（`组织服务端代码的方式` / `如何选择` / `闭包为什么不支持`）。
+
+后续若要真正支持「捕获环境的闭包」，唯一路线是「owned 请求 handler」重设计（方案 2），
+属独立大改，不在本目标内。
 
 ## 4. 验收
 
 - `cargo check --workspace --all-targets --offline`：通过；
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`：通过；
-- `cargo test --workspace --offline`：通过（新增 4 项行为测试 + 1 项编译期断言；
-  demo 不回归）。
+- `cargo test --workspace --offline`：通过（新增 4 项行为测试 + 1 项编译期断言；demo 不回归）。
+- round 33 追加端到端集成测试：demo 夹具注册 `common::free_token`（自由函数 + 尾参令牌），
+  `tests/free_fn_` 走真实 TCP 验证 `Call /test/free-token` 返回 `count + 1`；为此给 6 个
+  demo 集成测试文件补 `#![feature(impl_trait_in_assoc_type)]`。
