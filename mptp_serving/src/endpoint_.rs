@@ -1,26 +1,29 @@
-//! 路由端点：一个 pattern + 方法集合 + 终端处理器。
+//! 路由端点：一个 pattern + 方法集合 + 元数据 + 终端处理器。
 //!
-//! 端点是“将要运行什么”的**描述**，不是执行体。元数据字段在 P2 补上（端点携带类型化元数据，
-//! 中间件按元数据执行策略）。
+//! 端点是“将要运行什么”的**描述**，不是执行体。元数据是类型化标记集合，中间件按它执行
+//! 横切策略（P2）。
 //!
 //! # `endpoint_`: a route endpoint
 //!
-//! An endpoint describes what will run (pattern + method set + terminal handler); it is not
-//! the execution itself. Metadata arrives in P2.
+//! An endpoint describes what will run (pattern + method set + metadata + terminal handler);
+//! it is not the execution itself. Metadata is a typed marker collection read by middleware.
 
+use alloc::alloc::Global;
 use alloc::sync::Arc;
+use core::any::Any;
 
 use abs_mptp::spec::access_method::AccessMethod;
 use mptp_smux::serving::config::TrConfig;
 use mptp_smux::MethodSet;
 
 use super::handler_::TrEndpointHandler;
+use super::metadata_::EndpointMetadata;
 
-/// 一个路由目标：`pattern` + 方法集合 + 终端处理器。
+/// 一个路由目标：`pattern` + 方法集合 + 元数据 + 终端处理器。
 ///
 /// `C` 是服务端配置类型；它只出现在 handler 的类型约束里，端点上不存储 `C` 的值。
 /// `C: 'static` 是因为 handler 以 `Arc<dyn TrEndpointHandler<C>>`（默认 `'static` 对象）
-/// 存储，需要配置类型自身可静态存活。
+/// 存储。元数据集合的分配器固定为 [`Global`]（[`EndpointMetadata`] 类型本身可参数化）。
 pub struct Endpoint<C>
 where
     C: TrConfig + 'static,
@@ -30,6 +33,9 @@ where
 
     /// 本端点响应的方法集合。
     methods_: MethodSet,
+
+    /// 本端点的类型化元数据（P2：中间件按它执行策略）。
+    metadata_: EndpointMetadata<Global>,
 
     /// 终端处理器；类型擦除只发生在装配边界。
     handler_: Arc<dyn TrEndpointHandler<C>>,
@@ -48,6 +54,7 @@ where
         Endpoint {
             pattern_: pattern,
             methods_: methods,
+            metadata_: EndpointMetadata::new_in(Global),
             handler_: handler,
         }
     }
@@ -70,5 +77,19 @@ where
     /// 终端处理器。
     pub fn handler(&self) -> &Arc<dyn TrEndpointHandler<C>> {
         &self.handler_
+    }
+
+    /// 本端点的元数据。
+    pub fn metadata(&self) -> &EndpointMetadata<Global> {
+        &self.metadata_
+    }
+
+    /// 追加一个类型化元数据标记（消费式构建）。
+    pub fn with_metadata<T>(mut self, value: T) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.metadata_.insert(value);
+        self
     }
 }
