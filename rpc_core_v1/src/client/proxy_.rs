@@ -6,8 +6,7 @@
 //!
 //! 一次 unary 调用由 [`call_unary_async`] 完成：拼路径 → 请求头声明分块 →
 //! 编码器与 `send_req_body_async` 通过 ring 边编码边发送 → 检查状态 → 流式解码回复。
-//! `#[rpc(service = "...")]` 宏生成的 service 方法体只是构造对应的 body enum 变体，
-//! 然后把这一步交给本模块。
+//! 调用方构造 body 后把这一步交给本模块。
 //!
 //! # `proxy_`: the minimal client proxy and unary calls
 //!
@@ -126,8 +125,8 @@ where
 
 /// interface 到客户端视图的选择器。
 ///
-/// 接口宏会为每个 `#[rpc(path = "...")]` 类型生成它的实现；`select` 的返回值就是
-/// `ClientProxy<'a, C, I>`。它让调用点不必显式写 `call::<I>()`。
+/// 使用者为每个 interface 类型实现它；`select` 的返回值就是 `ClientProxy<'a, C, I>`。
+/// 它让调用点不必显式写 `call::<I>()`。
 pub trait ServiceSelector<C>
 where
     C: rpc_client::TrRpcClientConfig,
@@ -227,8 +226,8 @@ where
 
 /// 发起一次 unary 调用，返回具名、可取消的 future。
 ///
-/// 这是 `#[rpc(service = "...")]` 生成的客户端方法体使用的入口；普通使用者不需要
-/// 直接调用它，直接调用 service trait 的方法即可。
+/// 这是 unary 客户端方法体使用的入口；普通使用者通常经由更高层的代理方法调用，不需要
+/// 直接调用它。
 ///
 /// # Errors
 ///
