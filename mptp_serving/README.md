@@ -30,7 +30,9 @@ mptp_wire / abs_mptp / smux_v1
 - [`RouteParams`]：零拷贝路径参数（参数名借路由表、值借 `location`）；
 - [`TrRouteMatcher`] + [`RadixRouter`]：分层匹配（handler 规则 → 子 router → 根 endpoint），
   复用 `matchit_route`，方法糖 `head/view/post/drop/push/pull/call`；
-- [`RadixRouter`] 实现 `mptp_smux::serving::TrServeHandler`，可直接交给 `MptpServlet`。
+- [`RadixRouter`] 实现 `mptp_smux::serving::TrServeHandler`，可直接交给 `MptpServlet`；
+- [`ReqHandlerTarget`]：旧 `abs_mptp::serving::TrReqHandler` 到 [`TrEndpointHandler`] 的
+  适配器（仅适用于 `Send` 传输，如 tokio）。
 
 **尚未实施**（后续 round）：运行期增删（`remove_route`，需 no_std 读多写少锁）、
 `TrRouter` 注册契约与 `TrRouterExt` 扩展 trait、类型化路径参数（`TrRouteParams` + derive
@@ -46,6 +48,7 @@ mptp_wire / abs_mptp / smux_v1
 [`matchit_route`]: ../matchit_route
 [`Endpoint`]: crate::Endpoint
 [`TrEndpointHandler`]: crate::TrEndpointHandler
+[`ReqHandlerTarget`]: crate::ReqHandlerTarget
 [`RouteParams`]: crate::RouteParams
 [`TrRouteMatcher`]: crate::TrRouteMatcher
 [`RadixRouter`]: crate::RadixRouter

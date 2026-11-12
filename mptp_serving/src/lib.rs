@@ -33,12 +33,14 @@ extern crate alloc;
 
 mod endpoint_;
 mod handler_;
+mod req_handler_target_;
 mod route_params_;
 mod router_;
 mod serve_handler_;
 
 pub use endpoint_::Endpoint;
 pub use handler_::TrEndpointHandler;
+pub use req_handler_target_::ReqHandlerTarget;
 pub use route_params_::RouteParams;
 pub use router_::{MatchOutcome, RadixRouter, TrRouteMatcher};
 
