@@ -26,7 +26,8 @@
 //! [`MptpContext`]）、[`TrMiddleware`] + [`Pipeline`]（线性“前置”中间件，按元数据短路）、
 //! [`ReqHandlerTarget`]（旧 `TrReqHandler` 适配）、`RouteParams`、[`TrRouteMatcher`] 与
 //! 默认实现 [`RadixRouter`]（复用 `matchit_route`），以及连接作用域状态 `S`（经
-//! [`MptpContext::state`] 注入）。请求级取消令牌属 P3 后续部分。
+//! [`MptpContext::state`] 注入），以及对象安全的取消句柄 [`RequestCancel`]（请求级取消
+//! 令牌进 `MptpContext` 属 P3 的下一步）。
 
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]
@@ -39,6 +40,7 @@ mod handler_;
 mod metadata_;
 mod middleware_;
 mod req_handler_target_;
+mod request_cancel_;
 mod route_param_;
 mod route_params_;
 mod router_;
@@ -50,6 +52,7 @@ pub use handler_::TrEndpointHandler;
 pub use metadata_::EndpointMetadata;
 pub use middleware_::{Pipeline, TrMiddleware};
 pub use req_handler_target_::ReqHandlerTarget;
+pub use request_cancel_::RequestCancel;
 pub use route_param_::{RouteParamError, TrFromRouteParam};
 pub use route_params_::RouteParams;
 pub use router_::{MatchOutcome, RadixRouter, TrRouteMatcher};
@@ -61,6 +64,7 @@ pub use mptp_smux::MethodSet;
 ///
 /// 这不是稳定的公共 API 面；下游需要时优先使用具体模块。
 pub mod x_deps {
+    pub use abs_cancel;
     pub use abs_mptp;
     pub use matchit_route;
     pub use mptp_smux;
