@@ -44,7 +44,7 @@ trait ErasedToken: Send + Sync {
 impl<K> ErasedToken for K
 where
     K: TrCancellationToken + Clone + Send + Sync + 'static,
-    K::Cancellation: Future<Output = ()> + Send + 'static,
+    K::Cancellation: Send + 'static,
 {
     fn is_cancelled(&self) -> bool {
         TrCancellationToken::is_cancelled(self)
@@ -55,13 +55,16 @@ where
     }
 
     fn cancellation(&self) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(TrCancellationToken::cancellation(self.clone()))
+        let fut = TrCancellationToken::cancellation(self.clone());
+        Box::pin(async move {
+            let _ = fut.await;
+        })
     }
 }
 
 /// 对象安全的取消句柄。
 ///
-/// 由任意 `K: TrCancellationToken + Clone + 'static`（且 `K::Cancellation: Future<Output = ()> + Send + 'static`）
+/// 由任意 `K: TrCancellationToken + Clone + 'static`（且 `K::Cancellation: Send + 'static`）
 /// 构造；实现 [`TrCancellationToken`]，因此可以交给所有接受取消令牌的入口。
 pub struct RequestCancel {
     /// 被擦除的底层令牌。
@@ -73,7 +76,7 @@ impl RequestCancel {
     pub fn from_token<K>(token: K) -> Self
     where
         K: TrCancellationToken + Clone + Send + Sync + 'static,
-        K::Cancellation: Future<Output = ()> + Send + 'static,
+        K::Cancellation: Send + 'static,
     {
         RequestCancel {
             inner_: Arc::new(token),
