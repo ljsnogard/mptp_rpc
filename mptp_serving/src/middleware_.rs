@@ -1,15 +1,20 @@
 //! 中间件与管线：按端点元数据执行横切策略。
 //!
-//! 本 crate 采用**线性“前置”中间件**而不是洋葱式的 `Service`/`Layer` 服务栈：每个中间件
-//! 在终端处理器之前运行，返回 [`Status`] 表示「短路」（管线写拒绝回复并停止），返回 `None`
-//! 表示放行。这样 `next` 是普通循环里的直接调用，不需要 Tower 式的高阶闭包类型体操。
+//! 中间件是**洋葱**：每个 [`TrMiddleware::call`] 拿到一个 `next` 回调，调用它就把控制权
+//! 交给下一环（最后一环是终端处理器），自己可以在 `.await` 前后做事。这与设计稿 §6.5 的
+//! `next` 形状一致，但不用 `Service` / `Layer` 泛型栈：`next` 是 arena 里的普通
+//! `FnMut`，链上没有一个泛型包装器。
+//!
+//! 短路有两种写法：返回 `Ok(Some(status))` 让管线写该状态的无体回复（省事、统一），或者
+//! 自己写完回复后返回 `Ok(None)` 且不调用 `next`（需要写头 / 写体时）。
 //!
 //! # `middleware_`: middleware and the pipeline
 //!
-//! We use a linear *before*-middleware instead of an onion `Service`/`Layer` stack. Each
-//! middleware runs before the terminal handler; `Some(status)` short-circuits (the pipeline
-//! writes a rejection), `None` passes through. This keeps `next` as an ordinary loop, not a
-//! higher-ranked closure chain.
+//! Middleware is an onion: each [`TrMiddleware::call`] receives a `next` callback, invokes it
+//! to hand control to the next layer (the terminal handler is the innermost one), and may do
+//! work before and after the `.await`. Short-circuiting either returns `Ok(Some(status))`
+//! (the pipeline writes a no-body rejection) or writes the reply itself and returns
+//! `Ok(None)` without calling `next`.
 
 use alloc::alloc::Global;
 use alloc::sync::Arc;
@@ -25,18 +30,33 @@ use mptp_smux::serving::config::TrConfig;
 
 use super::context_::MptpContext;
 use super::endpoint_::Endpoint;
+use super::handler_::box_future_;
 
-/// 中间件 `before` 返回的 future：分配在请求级 arena 里、类型擦除的 [`BumpBox`]。
+/// 中间件 `call` 返回的 future：分配在请求级 arena 里、类型擦除的 [`BumpBox`]。
 ///
 /// 不带 `Send`：与 [`TrEndpointHandler`] 一致，future 链天然 `!Send`，`Send` 边界在分派层。
 pub type MiddlewareFuture<'f> =
     Pin<BumpBox<'f, dyn Future<Output = Result<Option<Status>, ServeError>> + 'f>>;
 
+/// 中间件的 `next` 回调：把控制权交给链上的下一环。
+///
+/// `'a` 是本次借用的生命周期，`'f` 是 [`MptpContext`] 内部借用的生命周期。回调由
+/// [`Pipeline`] 在请求作用域、从请求级 arena 里构造，因此可以在中间件的 future 里跨
+/// `.await` 存活；中间件调用 `next(ctx)` 即放行，不调用即短路。
+pub type NextFn<'a, 'f, C, S = (), R = ()> =
+    dyn FnMut(&'a mut MptpContext<'f, C, S, R>) -> MiddlewareFuture<'a> + 'a;
+
 /// 一个横切策略中间件。
 ///
-/// 对象安全：`before` 返回类型擦除的 arena box（[`MiddlewareFuture`]）。它读
-/// `endpoint.metadata()` 决定是否介入；返回 `Some(status)` 表示短路（管线写该状态的无体
-/// 回复并停止），`None` 表示放行。
+/// 对象安全：`call` 返回类型擦除的 arena box（[`MiddlewareFuture`]）。它通常先读
+/// `endpoint.metadata()` 决定是否介入，然后调用 `next(ctx).await` 放行；也可以在 `next`
+/// 返回之后再做清理 / 计量（洋葱的「后置」半边）。
+///
+/// 返回值约定：
+///
+/// - `Ok(None)`：本中间件（或它调用的 `next`）已经处理完，管线不再补写回复；
+/// - `Ok(Some(status))`：短路，且由管线写该状态的无体回复（中间件不必自己写）；
+/// - `Err(err)`：按 [`ServeError`] 上抛，收尾仍由 servlet 兜底。
 ///
 /// `'a` 是本次借用，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，使管线在一次
 /// `.await` 之后能重新借用 `ctx`。
@@ -44,11 +64,12 @@ pub trait TrMiddleware<C, S = (), R = ()>: Send + Sync
 where
     C: TrConfig,
 {
-    /// 在终端处理器之前执行。
-    fn before<'a, 'f>(
+    /// 包裹一次请求处理：在调用 `next` 之前 / 之后做本中间件的事。
+    fn call<'a, 'f>(
         &'a self,
         endpoint: &'a Endpoint<C, S, R>,
         ctx: &'a mut MptpContext<'f, C, S, R>,
+        next: &'a mut NextFn<'a, 'f, C, S, R>,
     ) -> MiddlewareFuture<'a>;
 }
 
@@ -104,21 +125,48 @@ where
         self
     }
 
-    /// 依次运行中间件，全部放行后调用终端处理器。
+    /// 从最外层开始跑整条洋葱链，末端是终端处理器。
     ///
-    /// 任一中间件返回 `Some(status)` 即写该状态的无体回复并停止；中间件返回错误或
-    /// 处理器返回错误都按 [`ServeError`] 上抛，收尾仍由 servlet 兜底。
-    pub async fn run<'f>(
-        &'f self,
-        endpoint: &'f Endpoint<C, S, R>,
-        ctx: &'f mut MptpContext<'f, C, S, R>,
+    /// 任一中间件返回 `Some(status)`（且没有继续调用 `next`）时，管线写该状态的无体回复；
+    /// 中间件返回错误或处理器返回错误都按 [`ServeError`] 上抛，收尾仍由 servlet 兜底。
+    pub async fn run<'a, 'f>(
+        &'a self,
+        endpoint: &'a Endpoint<C, S, R>,
+        ctx: &'a mut MptpContext<'f, C, S, R>,
     ) -> Result<(), ServeError> {
-        for middleware in &self.middlewares_ {
-            if let Option::Some(status) = middleware.before(endpoint, ctx).await? {
-                ctx.session_mut().response(status).no_body_async().await?;
-                return Result::Ok(());
-            }
+        // 只把 ctx 借给整条链一次：链跑完后还要用同一份 ctx 写短路回复。
+        let short_circuit = {
+            let ctx = &mut *ctx;
+            self.run_from_(0usize, endpoint, ctx).await?
+        };
+        if let Option::Some(status) = short_circuit {
+            ctx.session_mut().response(status).no_body_async().await?;
         }
-        endpoint.handler().handle(ctx).await
+        Result::Ok(())
+    }
+
+    /// 从第 `index` 环开始跑：把「下一环」装成 arena 里的 `next` 回调交给当前中间件。
+    ///
+    /// 之所以把回调放进请求级 arena 而不是栈上局部变量：`next` 的借用生命周期是 `'a`
+    /// （中间件的 future 持有它跨 `.await`），而栈上局部变量活不到调用者选定的 `'a`。
+    /// 闭包只捕获 `&self` / `&endpoint` / `usize`，没有 `Drop` 需要执行，因此用
+    /// [`Bump::alloc`](bumpalo::Bump::alloc) 放进 arena 不会遗漏析构。
+    async fn run_from_<'a, 'f>(
+        &'a self,
+        index: usize,
+        endpoint: &'a Endpoint<C, S, R>,
+        ctx: &'a mut MptpContext<'f, C, S, R>,
+    ) -> Result<Option<Status>, ServeError> {
+        let Some(middleware) = self.middlewares_.get(index) else {
+            endpoint.handler().handle(ctx).await?;
+            return Result::Ok(Option::None);
+        };
+        let arena = ctx.arena();
+        let next = move |ctx: &'a mut MptpContext<'f, C, S, R>| -> MiddlewareFuture<'a> {
+            let arena = ctx.arena();
+            box_future_(arena, self.run_from_(index + 1usize, endpoint, ctx))
+        };
+        let next: &'a mut NextFn<'a, 'f, C, S, R> = arena.alloc(next);
+        middleware.call(endpoint, ctx, next).await
     }
 }

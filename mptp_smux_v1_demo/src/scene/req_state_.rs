@@ -10,9 +10,8 @@
 //! metadata, which is an assembly-time declaration). The sample here is the design note's
 //! minimal auth flow: a middleware stashes the principal, handlers read it back.
 
-use abs_mptp::spec::Status;
-use mptp_serving::{Endpoint, MiddlewareFuture, MptpContext, TrMiddleware};
-use mptp_smux::{HeaderKey, HeaderVal, ServeError, serving::config::TrConfig};
+use mptp_serving::{Endpoint, MiddlewareFuture, MptpContext, NextFn, TrMiddleware};
+use mptp_smux::{HeaderKey, HeaderVal, serving::config::TrConfig};
 
 /// 请求头：测试 / 演示用的主体名（真实业务应换成令牌解析）。
 pub const K_HDR_PRINCIPAL: &str = "X-Scene-Principal";
@@ -37,10 +36,11 @@ impl<C, S> TrMiddleware<C, S, SceneRequestState> for PrincipalMiddleware
 where
     C: TrConfig,
 {
-    fn before<'a, 'f>(
+    fn call<'a, 'f>(
         &'a self,
         _endpoint: &'a Endpoint<C, S, SceneRequestState>,
         ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+        next: &'a mut NextFn<'a, 'f, C, S, SceneRequestState>,
     ) -> MiddlewareFuture<'a> {
         let arena = ctx.arena();
         mptp_serving::box_future_(arena, async move {
@@ -50,7 +50,8 @@ where
                 .and_then(HeaderVal::as_text)
                 .map(str::to_string);
             ctx.request_state_mut().principal = principal;
-            Result::<Option<Status>, ServeError>::Ok(Option::None)
+            // 洋葱：写入请求级状态后把控制权交给下一环。
+            next(ctx).await
         })
     }
 }
