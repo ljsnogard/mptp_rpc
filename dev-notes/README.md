@@ -47,6 +47,10 @@
   取消 / 超时」，服务端升级为「端点 + 元数据 + 中间件 + 处理器」，并把 QUIC 做成
   `abs_smux` 的第二个实现（`abs_mptp` 继续依赖 `abs_smux`，不抽 `abs_mux`）；含 P0–P4
   分阶段与公开 API 变更清单。
+- [`integration-decisions-20261112-2045.md`](integration-decisions-20261112-2045.md)：
+  集成阶段的设计决策：取消令牌进 `MptpContext` 引入 `K: Clone` 公开约束（暂缓待确认）、
+  框架保持 `Send`-by-design（compio 需非 `Send` 变体）、`MptpConnection` 属 `mptp_smux`
+  绑定层、demo 迁移按 tokio 先行 / compio 待后。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。
