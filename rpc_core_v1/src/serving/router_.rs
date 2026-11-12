@@ -183,6 +183,9 @@ where
 /// assert!(router.match_path("/echo/1").is_some());
 /// assert!(router.match_path("/other").is_some()); // 顶层 Router 总是返回自身
 /// ```
+#[deprecated(
+    note = "已由 `mptp_serving::RadixRouter` 取代；见 dev-notes/mptp-api-plan-20261112-1850.md P1"
+)]
 pub struct Router<C, R: TrRouteValues = TNil> {
     /// 已登记的路由运行期值；顺序与类型列表的头尾对应。
     routes_: R::Values,

@@ -210,6 +210,9 @@ where
 ///     .add_service::<GoodsCustomerServiceImpl>(move |_| GoodsCustomerServiceImpl::new())
 ///     .add_service::<GoodsAdminServiceImpl>(move |_| GoodsAdminServiceImpl::new());
 /// ```
+#[deprecated(
+    note = "已由 `mptp_serving::RadixRouter` 的 interface/service 子 router 取代；见 dev-notes/mptp-api-plan-20261112-1850.md P1"
+)]
 pub struct RpcRouter<I, S: TrRpcServiceValues = TNil> {
     /// 已装入的 service 运行期值；顺序与类型列表的头尾对应。
     services_: S::Values,

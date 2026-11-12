@@ -10,6 +10,9 @@
 
 #![feature(impl_trait_in_assoc_type)]
 #![recursion_limit = "256"]
+// 过渡期：本测试仍装配已标 `deprecated` 的 `Router` / `RpcRouter`；P1 迁移到
+// `mptp_serving::RadixRouter` 后移除本允许。
+#![allow(deprecated)]
 
 use core::{
     future::{Future, IntoFuture},
