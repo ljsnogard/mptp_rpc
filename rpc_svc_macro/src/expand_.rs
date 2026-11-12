@@ -506,13 +506,13 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
         .iter()
         .map(|method| {
             let handler_struct = handler_struct_(&self_ident, self_ty, method);
-            let handler_impl = handler_impl_(&self_ident, method);
-            quote! {
+            let handler_impl = handler_impl_(&self_ident, method)?;
+            Result::Ok(quote! {
                 #handler_struct
                 #handler_impl
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<syn::Result<Vec<_>>>()?;
     let install = install_into_(&self_ident, model);
 
     Result::Ok(quote! {
@@ -522,6 +522,8 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
             use super::*;
             use ::mptp_serving::{Endpoint, MethodSet, MptpContext, RadixRouter, TrEndpointHandler};
             use ::mptp_serving::x_deps::mptp_smux::{ServeError, serving::config::TrConfig};
+            use ::rpc_core_v1::serving::{decode_body_async, write_ok_async, write_status_async};
+            use ::rpc_core_v1::x_deps::abs_mptp::spec::Status;
 
             #(#steps)*
             #(#handlers)*
@@ -617,6 +619,29 @@ fn handler_ident_(self_ident: &syn::Ident, method_ident: &syn::Ident) -> syn::Id
     format_ident!("{}_{}", self_ident, method_ident)
 }
 
+/// 一个端点方法对应的 `{Prefix}Async` 类型标识符（`gen_may_cancel_future` 生成）。
+fn step_async_ident_(self_ident: &syn::Ident, method_ident: &syn::Ident) -> syn::Ident {
+    format_ident!("{}_{}Async", self_ident, method_ident)
+}
+
+/// 取出端点方法的非 `self` 参数（名字 + 类型）。
+fn method_params_(method: &EndpointMethodModel_) -> syn::Result<Vec<(syn::Ident, Type)>> {
+    let mut params = Vec::new();
+    for input in &method.sig_.inputs {
+        let FnArg::Typed(pat_type) = input else {
+            continue; // `&self` 接收者。
+        };
+        let Pat::Ident(pattern) = &*pat_type.pat else {
+            return Result::Err(syn::Error::new(
+                pat_type.pat.span(),
+                "端点方法参数必须是简单标识符",
+            ));
+        };
+        params.push((pattern.ident.clone(), (*pat_type.ty).clone()));
+    }
+    Result::Ok(params)
+}
+
 /// 生成一个端点处理器结构体：持有 `Arc<Self>`，实现 [`TrEndpointHandler`]。
 fn handler_struct_(self_ident: &syn::Ident, self_ty: &Type, method: &EndpointMethodModel_) -> ::zyn::TokenStream {
     let handler_ident = handler_ident_(self_ident, &method.ident_);
@@ -631,11 +656,40 @@ fn handler_struct_(self_ident: &syn::Ident, self_ty: &Type, method: &EndpointMet
 
 /// 生成一个端点处理器的 [`TrEndpointHandler`] 实现。
 ///
-/// 当前 `handle` 是占位：body 解码与回复写入属 P1 后续 round（届时把 step 函数接进来）。
-fn handler_impl_(self_ident: &syn::Ident, method: &EndpointMethodModel_) -> ::zyn::TokenStream {
+/// `handle` 解码请求体（0 或 1 个 body 参数）、调用 step 函数、写回复。业务错误按
+/// `Display` 文本写成 `500` 状态（更精细的错误→状态映射属后续 round）。
+fn handler_impl_(
+    self_ident: &syn::Ident,
+    method: &EndpointMethodModel_,
+) -> syn::Result<::zyn::TokenStream> {
     let handler_ident = handler_ident_(self_ident, &method.ident_);
+    let step_async_ident = step_async_ident_(self_ident, &method.ident_);
+    let params = method_params_(method)?;
 
-    quote! {
+    let decode_call = match params.len() {
+        0usize => quote! {
+            let result = #step_async_ident::new(&self.svc_)
+                .may_cancel_with(ctx.cancel().child_token())
+                .await;
+        },
+        1usize => {
+            let (arg_ident, arg_ty) = &params[0];
+            quote! {
+                let #arg_ident: #arg_ty = decode_body_async(ctx.session_mut()).await?;
+                let result = #step_async_ident::new(&self.svc_, #arg_ident)
+                    .may_cancel_with(ctx.cancel().child_token())
+                    .await;
+            }
+        }
+        _ => {
+            return Result::Err(syn::Error::new(
+                method.sig_.span(),
+                "端点方法暂只支持 0 或 1 个 body 参数",
+            ));
+        }
+    };
+
+    Result::Ok(quote! {
         #[doc(hidden)]
         impl<C, S> TrEndpointHandler<C, S> for #handler_ident
         where
@@ -650,13 +704,24 @@ fn handler_impl_(self_ident: &syn::Ident, method: &EndpointMethodModel_) -> ::zy
                 >
             > {
                 ::std::boxed::Box::pin(async move {
-                    let _ = (self, ctx);
-                    // TODO(P1 后续): 解码 body、调用 step 函数、写回复。
+                    #decode_call
+                    match result {
+                        Ok(value) => {
+                            write_ok_async(ctx.session_mut(), &value).await?;
+                        }
+                        Err(error) => {
+                            write_status_async(
+                                ctx.session_mut(),
+                                Status::InternalServerError,
+                                error.to_string(),
+                            ).await?;
+                        }
+                    }
                     Result::Ok(())
                 })
             }
         }
-    }
+    })
 }
 
 /// 生成 `install_into`：把每个端点处理器注册进 [`RadixRouter`]。
