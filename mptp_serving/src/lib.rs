@@ -27,6 +27,7 @@
 //! 属 P2，尚未来到这里。
 
 #![no_std]
+#![feature(impl_trait_in_assoc_type)]
 
 extern crate alloc;
 
@@ -34,6 +35,7 @@ mod endpoint_;
 mod handler_;
 mod route_params_;
 mod router_;
+mod serve_handler_;
 
 pub use endpoint_::Endpoint;
 pub use handler_::TrEndpointHandler;

@@ -25,6 +25,13 @@ impl<'f> RouteParams<'f> {
         RouteParams { inner_: inner }
     }
 
+    /// 空的参数表（根 endpoint 兜底时使用）。
+    pub(crate) fn empty() -> Self {
+        RouteParams {
+            inner_: Params::new(),
+        }
+    }
+
     /// 按参数名取值；缺失返回 `None`。
     pub fn get(&self, key: &str) -> Option<&'f str> {
         self.inner_.get(key)
