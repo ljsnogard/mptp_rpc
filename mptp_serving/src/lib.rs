@@ -38,6 +38,7 @@ mod handler_;
 mod metadata_;
 mod middleware_;
 mod req_handler_target_;
+mod route_param_;
 mod route_params_;
 mod router_;
 mod serve_handler_;
@@ -48,6 +49,7 @@ pub use handler_::TrEndpointHandler;
 pub use metadata_::EndpointMetadata;
 pub use middleware_::{Pipeline, TrMiddleware};
 pub use req_handler_target_::ReqHandlerTarget;
+pub use route_param_::{RouteParamError, TrFromRouteParam};
 pub use route_params_::RouteParams;
 pub use router_::{MatchOutcome, RadixRouter, TrRouteMatcher};
 
