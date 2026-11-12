@@ -104,6 +104,22 @@ fn controller_step_fn_runs_() {
     assert_eq!(desc.name, "terra");
 }
 
+/// 编译期验证客户端代理构造器与类型存在。
+/// Compile-time check that the client proxy constructor and type exist.
+///
+/// - 手段：用生成的 `rpc` 构造器构造 `SceneServiceRpc`。
+/// - 判断：编译通过。
+///
+/// - Means: construct `SceneServiceRpc` via the generated `rpc` constructor.
+/// - Verdict: it compiles.
+#[allow(dead_code)]
+fn client_proxy_compiles_<C>(client: &rpc_core_v1::x_deps::mptp_smux::client::MptpClient<C>)
+where
+    C: rpc_core_v1::client::TrRpcClientConfig,
+{
+    let _proxy = __rpc_controller_SceneService::rpc(client);
+}
+
 /// 用立即完成的执行器驱动纯内存 future。
 fn block_on_<TyFut>(future: TyFut) -> TyFut::Output
 where

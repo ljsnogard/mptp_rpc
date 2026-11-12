@@ -514,6 +514,7 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
         })
         .collect::<syn::Result<Vec<_>>>()?;
     let install = install_into_(&self_ident, model);
+    let client = client_proxy_(&self_ident, model)?;
 
     Result::Ok(quote! {
         #[doc(hidden)]
@@ -527,6 +528,7 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
             #(#steps)*
             #(#handlers)*
             #install
+            #client
         }
     })
 }
@@ -774,6 +776,149 @@ fn full_path_lit_(interface: &str, path: &str) -> syn::LitStr {
         format!("{}/{}", interface, path)
     };
     syn::LitStr::new(&full, proc_macro2::Span::call_site())
+}
+
+/// 生成 controller 的客户端代理：`{Self}Rpc<'a, C>` + 构造器 + 各端点方法。
+fn client_proxy_(
+    self_ident: &syn::Ident,
+    model: &ControllerModel_,
+) -> syn::Result<::zyn::TokenStream> {
+    let proxy_ident = format_ident!("{}Rpc", self_ident);
+    let interface = &model.path_;
+    let methods = model
+        .methods_
+        .iter()
+        .map(|method| controller_client_method_(self_ident, interface, method))
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    Result::Ok(quote! {
+        #[doc(hidden)]
+        pub struct #proxy_ident<'a, C>
+        where
+            C: ::rpc_core_v1::client::TrRpcClientConfig,
+        {
+            client_: &'a ::rpc_core_v1::x_deps::mptp_smux::client::MptpClient<C>,
+        }
+
+        #[doc(hidden)]
+        pub fn rpc<'a, C>(
+            client: &'a ::rpc_core_v1::x_deps::mptp_smux::client::MptpClient<C>,
+        ) -> #proxy_ident<'a, C>
+        where
+            C: ::rpc_core_v1::client::TrRpcClientConfig,
+        {
+            #proxy_ident { client_: client }
+        }
+
+        #[doc(hidden)]
+        impl<'a, C> #proxy_ident<'a, C>
+        where
+            C: ::rpc_core_v1::client::TrRpcClientConfig,
+        {
+            #(#methods)*
+        }
+    })
+}
+
+/// 生成一个客户端代理方法（当前只支持 1 个 body 参数的 unary 端点）。
+fn controller_client_method_(
+    _self_ident: &syn::Ident,
+    interface: &str,
+    method: &EndpointMethodModel_,
+) -> syn::Result<::zyn::TokenStream> {
+    let method_ident = &method.ident_;
+    let params = method_params_(method)?;
+    let (arg_ident, arg_ty) = match params.as_slice() {
+        [single] => (&single.0, &single.1),
+        _ => {
+            return Result::Err(syn::Error::new(
+                method.sig_.span(),
+                "客户端代理暂只支持 1 个 body 参数的端点",
+            ));
+        }
+    };
+    let output_ty = success_ty_(method)?;
+    let path = full_path_lit_(interface, &method.endpoint_.path_);
+    let access_method = access_method_expr_(method.endpoint_.method_);
+
+    Result::Ok(quote! {
+        #[doc(hidden)]
+        pub fn #method_ident<'f>(&'f self, #arg_ident: #arg_ty)
+            -> impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
+                'f,
+                MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<#output_ty>
+            > + 'f
+        {
+            ::rpc_core_v1::client::call_endpoint_async(
+                self.client_,
+                #access_method,
+                #path,
+                #arg_ident,
+            )
+        }
+    })
+}
+
+/// 从 `Result<T, E>` 返回类型里取成功类型 `T`。
+fn success_ty_(method: &EndpointMethodModel_) -> syn::Result<Type> {
+    let ReturnType::Type(_, ty) = &method.sig_.output else {
+        return Result::Err(syn::Error::new(
+            method.sig_.ident.span(),
+            "客户端代理要求端点方法返回 `Result<T, E>`",
+        ));
+    };
+    let Type::Path(type_path) = &**ty else {
+        return Result::Err(syn::Error::new(
+            ty.span(),
+            "客户端代理要求端点方法返回 `Result<T, E>`",
+        ));
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return Result::Err(syn::Error::new(
+            ty.span(),
+            "客户端代理要求端点方法返回 `Result<T, E>`",
+        ));
+    };
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return Result::Err(syn::Error::new(
+            segment.span(),
+            "客户端代理要求端点方法返回 `Result<T, E>`",
+        ));
+    };
+    let Some(syn::GenericArgument::Type(ok_ty)) = args.args.first() else {
+        return Result::Err(syn::Error::new(
+            segment.span(),
+            "客户端代理要求端点方法返回 `Result<T, E>`",
+        ));
+    };
+    Result::Ok(ok_ty.clone())
+}
+
+/// 访问方法种类 → [`AccessMethod`] 表达式。
+fn access_method_expr_(kind: MethodKind_) -> ::zyn::TokenStream {
+    match kind {
+        MethodKind_::Call => {
+            quote!(::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Call)
+        }
+        MethodKind_::View => {
+            quote!(::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::View)
+        }
+        MethodKind_::Head => {
+            quote!(::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Head)
+        }
+        MethodKind_::Post => {
+            quote!(::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Post)
+        }
+        MethodKind_::Drop => {
+            quote!(::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Drop)
+        }
+        MethodKind_::Push => {
+            quote!(::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Push)
+        }
+        MethodKind_::Pull => {
+            quote!(::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Pull)
+        }
+    }
 }
 
 /// 把方法体里的 `self` 重写成 `svc`。
