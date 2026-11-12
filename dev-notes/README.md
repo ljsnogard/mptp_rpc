@@ -51,6 +51,15 @@
 - [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
   `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
   dev/0.3.0 的改动、依赖统一与验证结果。
+- [`mptp-serving-framework-20261112-1845.md`](mptp-serving-framework-20261112-1845.md)：
+  MPTP 服务端框架设计：借鉴 ASP.NET Core 的四层关注点分离（路由只匹配、端点携带元数据、
+  中间件按元数据执行策略、处理器只关心业务），用 Salvo 式基于路由规则的路径树组织功能；
+  明确不用 Salvo 的 Depot（类型擦除状态袋）与 Tower 的 `Service`/`Layer` 类型体操。
+- [`mptp-api-plan-20261112-1850.md`](mptp-api-plan-20261112-1850.md)：
+  MPTP/SMUX API 优化计划：客户端行为收敛到「方法糖 + 类型状态 builder + 显式半关闭 /
+  取消 / 超时」，服务端升级为「端点 + 元数据 + 中间件 + 处理器」，并把 `abs_mptp` 与
+  `abs_smux` 解耦、抽取 `abs_mux` / `mptp_session` 以实现传输中立；含 P0–P4 分阶段与
+  公开 API 变更清单。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。
