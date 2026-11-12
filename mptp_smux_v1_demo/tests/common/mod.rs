@@ -30,7 +30,10 @@ use abs_mptp::spec::Status;
 use anyhow::{Result, anyhow, bail};
 use compio::net::TcpListener;
 use flume::Receiver;
-use mptp_serving::{HandlerFuture, MptpContext, TrEndpointHandler, box_future_};
+use mptp_serving::{
+    Endpoint, HandlerFuture, MiddlewareFuture, MptpContext, NextFn, TrEndpointHandler,
+    TrMiddleware, box_future_,
+};
 use mptp_smux::{
     HeaderKey, HeaderVal, ServeError,
     client::{MptpClient, Response},
@@ -96,6 +99,9 @@ pub struct SceneFixture {
 
     /// `MptpContext` 一级 helper 的观测探针（`/test/ctx` 端点写、测试读）。
     probe_: Arc<Mutex<CtxProbe>>,
+
+    /// 中间件洋葱顺序的观测记录（`/test/order` 路径）。
+    trace_: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl SceneFixture {
@@ -114,11 +120,13 @@ impl SceneFixture {
         let registry = Arc::new(Mutex::new(PlanetRegistry::new_()));
         let hub = Arc::new(Mutex::new(SceneHub::new_()));
         let probe = Arc::new(Mutex::new(CtxProbe::default()));
+        let trace = Arc::new(Mutex::new(Vec::new()));
         let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
 
         let registry_for_server = registry.clone();
         let hub_for_server = hub.clone();
         let probe_for_server = probe.clone();
+        let trace_for_server = trace.clone();
         let accept = scope.clone().spawn_local(async move {
             let mut next_connection = 1u64;
             loop {
@@ -130,6 +138,7 @@ impl SceneFixture {
                 let registry = registry_for_server.clone();
                 let hub = hub_for_server.clone();
                 let probe = probe_for_server.clone();
+                let trace = trace_for_server.clone();
                 let task_scope = scope.clone();
                 let task = scope.spawn_local(async move {
                     let Ok(conn) = accept_conn_async_(stream).await else {
@@ -169,6 +178,19 @@ impl SceneFixture {
                         .pull("test/multi", TestMultiPull)
                         .expect("装配测试路由");
                     let router = router.view("test/state", TestState).expect("装配测试路由");
+                    let router = router
+                        .view(
+                            "test/order",
+                            TestOrder {
+                                trace_: trace.clone(),
+                            },
+                        )
+                        .expect("装配测试路由");
+                    let router = router
+                        .use_middleware(OrderMiddleware {
+                            trace_: trace.clone(),
+                        })
+                        .use_middleware(GuardMiddleware);
                     let servlet = Rc::new(MptpServlet::<ServingCfg, _>::new(router));
                     let _cleanup = ConnCleanup_(ctx.clone());
                     let _ = serve_connection_(shared, servlet, ctx, task_scope).await;
@@ -183,6 +205,7 @@ impl SceneFixture {
             registry_: registry,
             hub_: hub,
             probe_: probe,
+            trace_: trace,
         })
     }
 
@@ -204,6 +227,11 @@ impl SceneFixture {
     /// `MptpContext` 一级 helper 的观测探针。
     pub fn probe_(&self) -> &Arc<Mutex<CtxProbe>> {
         &self.probe_
+    }
+
+    /// 中间件洋葱顺序的观测记录。
+    pub fn trace_(&self) -> &Arc<Mutex<Vec<&'static str>>> {
+        &self.trace_
     }
 }
 
@@ -481,6 +509,92 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S, SceneRe
             let mut response = ctx.response(Status::Ok);
             response.header("X-Scene-Principal", HeaderVal::from_text(principal));
             response.no_body_async().await?;
+            Ok(())
+        })
+    }
+}
+
+/// 洋葱顺序中间件：在 `next` 前后各记一笔。
+///
+/// `OrderMiddleware`: records one entry before and one after `next`.
+struct OrderMiddleware {
+    /// 共享观测记录。
+    trace_: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl<C, S> TrMiddleware<C, S, SceneRequestState> for OrderMiddleware
+where
+    C: mptp_smux::serving::config::TrConfig,
+{
+    fn call<'a, 'f>(
+        &'a self,
+        _endpoint: &'a Endpoint<C, S, SceneRequestState>,
+        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+        next: &'a mut NextFn<'a, 'f, C, S, SceneRequestState>,
+    ) -> MiddlewareFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            self.trace_.lock().expect("洋葱记录锁被污染").push("before");
+            let outcome = next(ctx).await?;
+            self.trace_.lock().expect("洋葱记录锁被污染").push("after");
+            Ok(outcome)
+        })
+    }
+}
+
+/// 短路中间件：带 `X-Scene-Deny` 头时直接返回 403，不调用 `next`。
+///
+/// `GuardMiddleware`: returns 403 without calling `next` when `X-Scene-Deny` is present.
+struct GuardMiddleware;
+
+impl<C, S> TrMiddleware<C, S, SceneRequestState> for GuardMiddleware
+where
+    C: mptp_smux::serving::config::TrConfig,
+{
+    fn call<'a, 'f>(
+        &'a self,
+        _endpoint: &'a Endpoint<C, S, SceneRequestState>,
+        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+        next: &'a mut NextFn<'a, 'f, C, S, SceneRequestState>,
+    ) -> MiddlewareFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            let denied = ctx
+                .headers()
+                .try_get(HeaderKey::from_text("X-Scene-Deny"))
+                .is_some();
+            if denied {
+                // 由管线统一写 403 无体回复。
+                return Ok(Some(Status::Forbidden));
+            }
+            next(ctx).await
+        })
+    }
+}
+
+/// `View /test/order`：记录「处理器」并回复 200（洋葱顺序测试用）。
+///
+/// `View /test/order`: records the handler hit and replies 200.
+struct TestOrder {
+    /// 共享观测记录。
+    trace_: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestOrder
+where
+    C: mptp_smux::serving::config::TrConfig,
+{
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            self.trace_
+                .lock()
+                .expect("洋葱记录锁被污染")
+                .push("handler");
+            ctx.response(Status::Ok).no_body_async().await?;
             Ok(())
         })
     }

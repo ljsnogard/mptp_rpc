@@ -23,7 +23,8 @@
 //! # 当前状态（round 1–6 / P0–P2 + Phase A–C）
 //!
 //! 已落地：`Endpoint`（含类型化 [`EndpointMetadata`]）、[`TrEndpointHandler`]（收
-//! [`MptpContext`]）、[`TrMiddleware`] + [`Pipeline`]（线性“前置”中间件，按元数据短路）、
+//! [`MptpContext`]）、[`TrMiddleware`] + [`Pipeline`]（**洋葱**中间件：`next` 回调，
+//! 可前置 / 后置 / 短路）、
 //! [`ReqHandlerTarget`]（旧 `TrReqHandler` 适配）、`RouteParams`、[`TrRouteMatcher`] 与
 //! 默认实现 [`RadixRouter`]（复用 `matchit_route`，同一路径可挂多个方法不同的端点），以及：
 //!
@@ -61,7 +62,7 @@ pub use context_::MptpContext;
 pub use endpoint_::Endpoint;
 pub use handler_::{HandlerFuture, TrEndpointHandler, box_future_};
 pub use metadata_::EndpointMetadata;
-pub use middleware_::{MiddlewareFuture, Pipeline, TrMiddleware};
+pub use middleware_::{MiddlewareFuture, NextFn, Pipeline, TrMiddleware};
 /// 访问方法集合：来自 [`mptp_smux`]，本 crate 不重复定义。
 pub use mptp_smux::MethodSet;
 pub use req_handler_target_::ReqHandlerTarget;
