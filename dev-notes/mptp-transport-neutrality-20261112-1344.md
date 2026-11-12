@@ -431,3 +431,123 @@ handler 捕获，冲突域约束靠调用约定。
 
 这与上一节的结论一致：真正需要明确的是 connection scope 和 accept 职责的 owner，而不是
 继续让 `MptpServlet` 同时扮演 dispatcher 和 acceptor。
+
+## 12. 更正：`DockBinding` 的归属单位是 dock / service，不是 connection，也不是 servlet
+
+前两节把 `MptpServlet` 说成“connection 对象”或“dispatcher”，容易让人以为一条 smux
+connection 只有一个 dock。更准确的模型如下：
+
+```text
+TCP port
+  └─ TcpListener
+       └─ TCP connection
+            └─ smux MuxConnection
+                 ├─ Dock 0x80  ── DockBinding(0x80) ── Listener(0x80) ── MPTP sessions（scene）
+                 ├─ Dock 0x90  ── DockBinding(0x90) ── Listener(0x90) ── 其他业务 sessions
+                 └─ ...
+```
+
+- **TCP port**：顶层 `TcpListener` 监听；接受的是新的 TCP connection。
+- **TCP connection**：一条字节流；smux 在它上面多路复用。
+- **smux connection**：一条 TCP connection 对应一个 `MuxConnection`；它可以有多个 dock。
+- **DockBinding**：某条 smux connection 上某个 dock 的本地端点；`bind_async(dock)` 得到。
+  它持有 connection root 的一份克隆，所以同一个 connection 可以同时有多个 DockBinding。
+  丢弃 binding 只解绑自己的 dock；已经建立、由应用持有的子流 half 不受影响。
+- **Listener**：该 dock 的入向会话接收器；`income_async()` 得到一条 session。
+- **MPTP session**：该 dock 上的一条请求子流。
+
+所以：
+
+- 0x80 只是 MPTP 的默认服务垛口，不是“整条 connection”；
+- 同一条 smux connection 完全可以有 0x90 的业务；0x80 的 scene server 不该拥有整条
+  connection 的排他所有权；
+- `DockBinding` 属于 **dock endpoint / service**，不属于 connection 级 servlet。
+
+### 12.1 当前 demo 的实际所有权
+
+`serve_connection_async_` 实际上做了：
+
+1. `accept_conn_async_` 建立 smux connection；
+2. `share_conn_` 得到 `SharedConn`；
+3. `bind_async(Dock::new(0x80))` 得到 0x80 的 binding；
+4. 把 binding 临时交给 `servlet.listen_async`，得到 listener；
+5. 自己持有 `SharedConn` 和 binding/listener，循环 accept 0x80 的 session。
+
+因此当前 scene 任务**确实持有着整条 smux connection 的根**（`shared`），只是业务上只
+使用 0x80。如果此时同一 TCP connection 上要有 0x90 的业务，当前实现无法把 `shared`
+交给第二个业务——它不是“只持有 0x80”的结构，而是“持有整条连接但只绑定 0x80”。
+这是多业务共享 connection 时需要改的地方。
+
+`MptpServlet` 本身不持有 connection，也不持有 binding（`listen_async` 只是转调）。
+真正持有 connection 和 binding 的是 `serve_connection_async_`。所以“把 DockBinding
+交给 servlet”在**当前代码**里只是把一个临时借用的 listener 创建步骤放在 servlet 上，
+不是 servlet 拥有 dock。但从接口形状看，它确实让 servlet 看起来像是 dock/connection
+的所有者，这是归属表达不清的根源。
+
+### 12.2 正确的 ownership
+
+| 资源 | 正确 owner | 不应由谁独占 |
+| --- | --- | --- |
+| TCP listener / port | 顶层 server | 单条 connection 的业务 |
+| smux connection root | connection router / dispatcher | 单个 dock 业务 |
+| 某个 DockBinding / Listener | 该 dock 的 service，或 connection router 代管 | 与 dock 无关的 servlet |
+| per-session 状态 | ServingSession | 全局或 connection |
+| per-connection 状态（idle / cancel / auth） | connection router | dock 业务各自复制 |
+| per-dock / per-service 状态（scene join、own planet） | 该 dock 的 service / handler | 其他 dock 的业务 |
+| server 级共享状态（registry / hub） | server | 单条 connection |
+
+推荐两种自洽结构：
+
+**A. router 持有全部 dock binding / listener**
+
+```text
+ConnectionRouter (per TCP/smux connection)
+  ├─ owns SharedConn + DockBinding(0x80) + Listener(0x80)
+  ├─ owns SharedConn + DockBinding(0x90) + Listener(0x90)
+  ├─ routes sessions by dock to a service
+  └─ owns idle / cancel / cleanup
+SceneService (0x80)   ← 只拿到 ServingSession + per-connection scene context
+OtherService (0x90)   ← 只拿到自己的 sessions
+```
+
+- servlet 完全不碰 DockBinding；
+- connection 级生命周期集中在 router；
+- 业务只关心本 dock 的 session；
+- 新增 0x90 只是注册一个 service，不需要改 scene。
+
+**B. 每个 dock service 持有自己的 binding / listener**
+
+```text
+ConnectionRouter owns SharedConn (and maybe creates bindings)
+  ├─ SceneService owns DockBinding(0x80) + Listener(0x80)
+  └─ OtherService owns DockBinding(0x90) + Listener(0x90)
+```
+
+- 每个 service 自己 accept 本 dock 的 session；
+- router 只负责连接级 idle / cancel / 生命周期，并确保 connection root 不被某个 service
+  独占；
+- `DockBinding` 的 `Drop` 只解绑本 dock，适合这种 per-dock service 所有权。
+
+两种都可以，但**不能把“整条 connection + 唯一 dock”交给一个 connection-wide servlet，
+同时又声称 scene server 只持有 0x80**。当前 demo 是“connection-owned by scene task,
+single dock used”；多业务场景必须显式拆出 connection router。
+
+### 12.3 对前面结论的修正
+
+- 前文说“servlet 绑定 connection”应修正为：**servlet/service 绑定 dock，connection
+  由 router 持有并被多个 dock 共享**。
+- “servlet 一定需要 DockBinding”不成立：dispatcher 只需要 `ServingSession`；
+  router 或 per-dock service 需要 binding。
+- 把 0x80 的 binding 交给 scene service 本身不是错误；错误的是把 **整条 smux
+  connection** 的排他所有权也交给它，从而让 0x90 无法在同一 connection 上出现。
+- scene server 的业务范围只有 0x80；这是对的。**ownership 上它不应该持有整条
+  connection 的根**；当前代码只是为了单业务 demo 方便，把 connection task 和 0x80
+  service 写在一起。多业务支持需要 connection router。
+
+### 12.4 与 `mptp_quic` 的关系
+
+QUIC 同样是一条 connection 多 stream；如果 MPTP 的 dock 映射到 QUIC 的 stream type /
+应用层 selector，那么“一个 connection 多个 service”在 QUIC 上也成立。传输中立的 core
+应该持有 connection + dock/service 路由；`mptp_smux` 和 `mptp_quic` 只提供 binding /
+listener 的具体类型。这样 scene 业务只依赖“0x80 service 的 sessions”，不依赖 smux 的
+connection root，也不依赖 TCP port。

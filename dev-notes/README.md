@@ -42,8 +42,9 @@
   迁移，但当前 `abs_mptp` 依赖 `abs_smux`、`mptp_smux` 会话驱动与绑定合一、`Dock` 与
   ring 内存模型仍绑定 smux；提出 `mptp_core` / `abs_mux` 的分层判据与第二个传输的
   验证方式；补充讨论 servlet 与 connection 的绑定、每连接状态 owner 与并发 session
-  的冲突域，以及 DockBinding 作为 per-connection acceptor 资源与 servlet 分派职责的
-  分离。
+  的冲突域，以及 DockBinding 作为 per-connection/per-dock acceptor 资源与 servlet
+  分派职责的分离；最后更正为「servlet/service 绑定 dock，connection 由 router 持有并
+  被多个 dock 共享」。
 - [`matchit-no_std-20261110-0520.md`](matchit-no_std-20261110-0520.md)：`matchit_route`
   的 no_std / bumpalo 移植：router 自有 arena、`T: 'static`、`Send` / `Sync` 的安全
   论证，以及第 3 步删除 `rpc_router_trie`、统一为一套路径匹配算法的计划。
