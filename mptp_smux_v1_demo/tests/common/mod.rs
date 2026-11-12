@@ -86,6 +86,25 @@ const K_PULL_QUEUE_CAP: usize = 64usize;
 // 服务端夹具
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
+/// 自由函数 + 尾参取消令牌的端点（`#[rpc(call = "test/free-token")]`）。
+///
+/// 无 `self`、无 struct；`Call /test/free-token` 把 `count + 1` 写回。这条路径同时覆盖
+/// 「自由函数 handler」与「尾参 `TrCancellationToken`」两个特性。
+///
+/// `Call /test/free-token`: a free function plus a trailing cancel token; echoes `count + 1`.
+#[rpc(call = "test/free-token")]
+#[allow(dead_code)]
+async fn free_token<K>(
+    count: u64,
+    cancel: K,
+) -> Result<u64, mptp_smux_v1_demo::scene::handler_::SceneError>
+where
+    K: abs_cancel::TrCancellationToken,
+{
+    let _ = cancel.can_be_cancelled();
+    Ok(count + 1)
+}
+
 /// 最小场景服务端。
 pub struct SceneFixture {
     /// 实际监听地址。
@@ -157,6 +176,8 @@ impl SceneFixture {
                     let router =
                         __rpc_controller_TestIdSource::install_into(router, Arc::new(TestIdSource))
                             .expect("装配测试 controller");
+                    let router = __rpc_handler_free_token::install_into(router)
+                        .expect("装配自由函数测试路由");
                     let router = router
                         .pull("test/chunks", TestChunks)
                         .expect("装配测试路由");

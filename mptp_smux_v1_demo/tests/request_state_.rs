@@ -1,3 +1,5 @@
+#![feature(impl_trait_in_assoc_type)]
+
 //! 请求级运行期状态 `R`（Phase C / G2）的集成测试。
 //!
 //! 场景路由现在带 `R = SceneRequestState`：`PrincipalMiddleware` 把请求头
