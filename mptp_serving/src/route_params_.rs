@@ -10,6 +10,8 @@
 
 use matchit_route::Params;
 
+use super::route_param_::{RouteParamError, TrFromRouteParam};
+
 /// 一次成功匹配得到的路径参数。
 ///
 /// 内部直接持有 `matchit_route::Params` 的零拷贝视图：`get` / `iter` 返回的 `&str` 都
@@ -35,6 +37,13 @@ impl<'f> RouteParams<'f> {
     /// 按参数名取值；缺失返回 `None`。
     pub fn get(&self, key: &str) -> Option<&'f str> {
         self.inner_.get(key)
+    }
+
+    /// 按参数名取**类型化**值。
+    ///
+    /// 缺失返回 `None`；存在但解析失败返回 `Some(Err(...))`，由处理器决定是否写 `400`。
+    pub fn get_typed<T: TrFromRouteParam>(&self, key: &str) -> Option<Result<T, RouteParamError>> {
+        self.get(key).map(TrFromRouteParam::from_route_param)
     }
 
     /// 遍历所有 `(参数名, 参数值)`。
