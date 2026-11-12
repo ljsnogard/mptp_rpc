@@ -183,7 +183,7 @@ async fn directory_view_lists_streams_() {
         .collect();
     assert!(uris.contains(&a_planet.stream_uri.as_str()));
     assert!(uris.contains(&b_planet.stream_uri.as_str()));
-    assert_eq!(fixture.hub_().borrow().total_subscribers_(), 0usize);
+    assert_eq!(fixture.hub_().lock().unwrap().total_subscribers_(), 0usize);
 }
 
 /// 测试 `Call /scene/join` 返回自己的行星标识与 URI。
@@ -353,7 +353,7 @@ async fn selective_subscription_() {
         .expect("等待窗口");
     assert!(quiet.is_none(), "未订阅的 C 不应到达：{quiet:?}");
     assert_eq!(
-        fixture.hub_().borrow().subscriber_count_(c_planet.id),
+        fixture.hub_().lock().unwrap().subscriber_count_(c_planet.id),
         0usize
     );
 }
@@ -382,7 +382,7 @@ async fn unsubscribe_stops_events_() {
         b_planet.id,
     );
     assert_eq!(
-        fixture.hub_().borrow().subscriber_count_(b_planet.id),
+        fixture.hub_().lock().unwrap().subscriber_count_(b_planet.id),
         1usize
     );
 
@@ -622,7 +622,7 @@ async fn subscription_cleanup_() {
         b_planet.id,
     );
     assert_eq!(
-        fixture.hub_().borrow().subscriber_count_(b_planet.id),
+        fixture.hub_().lock().unwrap().subscriber_count_(b_planet.id),
         2usize
     );
 
@@ -699,13 +699,13 @@ async fn slow_subscriber_does_not_block_others_() {
     // A 的慢订阅最终被移除，只剩 C。
     let deadline = std::time::Instant::now() + Duration::from_secs(10u64);
     loop {
-        if fixture.hub_().borrow().subscriber_count_(b_planet.id) == 1usize {
+        if fixture.hub_().lock().unwrap().subscriber_count_(b_planet.id) == 1usize {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
             "慢订阅者没有被移除（仍在 {}）",
-            fixture.hub_().borrow().subscriber_count_(b_planet.id)
+            fixture.hub_().lock().unwrap().subscriber_count_(b_planet.id)
         );
         compio::time::sleep(Duration::from_millis(10u64)).await;
     }

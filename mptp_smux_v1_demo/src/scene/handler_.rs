@@ -13,7 +13,7 @@
 //! One handler per connection. Routing, 404 and dispatch live here; 405 is handled by the
 //! framework through `allowed_methods`. The planet stream is written with `SuffixStream`.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::sync::{Arc, Mutex};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
@@ -39,17 +39,17 @@ use crate::scene::{
 /// 场景 handler。
 pub struct SceneHandler {
     /// 本连接的上下文。
-    ctx_: Rc<ConnectionCtx>,
+    ctx_: Arc<ConnectionCtx>,
 }
 
 impl SceneHandler {
     /// 用连接上下文构造 handler。
-    pub fn new_(ctx: Rc<ConnectionCtx>) -> Self {
+    pub fn new_(ctx: Arc<ConnectionCtx>) -> Self {
         SceneHandler { ctx_: ctx }
     }
 
     /// 本连接的上下文。
-    pub fn ctx_(&self) -> &Rc<ConnectionCtx> {
+    pub fn ctx_(&self) -> &Arc<ConnectionCtx> {
         &self.ctx_
     }
 }
@@ -184,7 +184,7 @@ where
         return reply_status_async_(session, Status::new(409u16)).await;
     }
 
-    let descriptor = handler.ctx_.registry_().borrow_mut().allocate_planet_(
+    let descriptor = handler.ctx_.registry_().lock().unwrap().allocate_planet_(
         handler.ctx_.connection_id_(),
         &request.name,
         request.color,
@@ -215,7 +215,7 @@ where
     let updated = handler
         .ctx_
         .registry_()
-        .borrow_mut()
+        .lock().unwrap()
         .update_planet_(planet_id, request.params)
         .ok_or_else(|| ServeError::Target {
             detail: format!("行星 {planet_id} 已不存在"),
@@ -229,7 +229,7 @@ where
     handler
         .ctx_
         .hub_()
-        .borrow_mut()
+        .lock().unwrap()
         .broadcast_(planet_id, frame);
 
     let ack = UpdateAck {
@@ -245,7 +245,7 @@ async fn view_async_(
     handler: &SceneHandler,
     session: &mut ServingSession<ServingCfg>,
 ) -> Result<(), ServeError> {
-    let directory = handler.ctx_.registry_().borrow().directory_();
+    let directory = handler.ctx_.registry_().lock().unwrap().directory_();
     reply_value_async_(session, Status::Ok, &directory).await
 }
 
@@ -255,7 +255,7 @@ async fn head_async_(
     session: &mut ServingSession<ServingCfg>,
 ) -> Result<(), ServeError> {
     let (count, version) = {
-        let registry = handler.ctx_.registry_().borrow();
+        let registry = handler.ctx_.registry_().lock().unwrap();
         (registry.planet_count_(), registry.directory_version_())
     };
     let mut builder = session.response(Status::Ok);
@@ -282,7 +282,7 @@ async fn unsubscribe_async_(
     let removed = handler
         .ctx_
         .hub_()
-        .borrow_mut()
+        .lock().unwrap()
         .unsubscribe_connection_(request.planet_id, handler.ctx_.connection_id_());
     let ack = UnsubscribeAck {
         removed: u32::try_from(removed).unwrap_or(u32::MAX),
@@ -293,7 +293,7 @@ async fn unsubscribe_async_(
 /// 退订守卫：无论正常结束、写失败还是任务被取消，都从 hub 里摘掉订阅。
 struct SubGuard_ {
     /// 订阅中心。
-    hub_: Rc<RefCell<SceneHub>>,
+    hub_: Arc<Mutex<SceneHub>>,
 
     /// 行星。
     planet_id_: PlanetId,
@@ -306,7 +306,7 @@ impl Drop for SubGuard_ {
     fn drop(&mut self) {
         let _ = self
             .hub_
-            .borrow_mut()
+            .lock().unwrap()
             .unsubscribe_(self.planet_id_, self.sub_id_);
     }
 }
@@ -326,7 +326,7 @@ where
     let Some(planet_id) = parse_planet_uri_(session.location()) else {
         return reply_status_async_(session, Status::NotFound).await;
     };
-    let Some(snapshot) = handler.ctx_.registry_().borrow().snapshot_(planet_id) else {
+    let Some(snapshot) = handler.ctx_.registry_().lock().unwrap().snapshot_(planet_id) else {
         return reply_status_async_(session, Status::NotFound).await;
     };
     let snapshot_frame = encode_event_async_(&PlanetEvent::Snapshot(snapshot))
@@ -338,7 +338,7 @@ where
     // 先登记订阅，再打开后缀流：登记与快照之间没有 await，因此不会漏掉更新。
     let (tx, rx) = flume::bounded::<Arc<[u8]>>(K_SUB_QUEUE_CAP);
     let (canceller, token) = cancel_pair_();
-    let sub_id = handler.ctx_.hub_().borrow_mut().subscribe_(
+    let sub_id = handler.ctx_.hub_().lock().unwrap().subscribe_(
         planet_id,
         handler.ctx_.connection_id_(),
         tx,

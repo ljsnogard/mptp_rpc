@@ -1,8 +1,9 @@
 //! 场景的业务状态：行星目录 + 每颗行星的订阅中心。
 //!
-//! 服务端是**单线程**的（所有连接、所有 session 都在同一条 compio 线程上），因此这里
-//! 不需要 `Mutex` / `RwLock`：调用方用 `Rc<RefCell<...>>` 持有它们即可。唯一需要跨任务
-//! 传递的是每颗行星的广播队列（[`flume`] 的发送端），它本身就是线程安全的。
+//! 业务本身仍在单条 compio 线程上运行；但为了挂到 `mptp_serving` 的 `Send + Sync` 处理器，
+//! 目录 / 订阅中心用 `Arc<Mutex<...>>` 持有。锁只在跨 session 共享只读时短暂持有，
+//! 绝不在 `await` 期间持有。唯一需要跨任务传递的是每颗行星的广播队列（[`flume`] 的
+//! 发送端），它本身就是线程安全的。
 //!
 //! # 广播策略
 //!
@@ -13,11 +14,16 @@
 //!
 //! # `state_`: scene registry and per-planet hubs
 //!
-//! The server is single-threaded, so the registry and hubs live behind `Rc<RefCell<..>>`.
-//! Each subscription has a bounded queue and its own cancel trigger; `broadcast_` only
-//! uses `try_send`, so a slow subscriber is dropped without blocking the others.
+//! Business still runs on one compio thread, but the registry and hubs live behind
+//! `Arc<Mutex<..>>` so the handler types are `Send + Sync` for `mptp_serving`. Locks are
+//! held only briefly across sessions, never across an `await`. Each subscription has a
+//! bounded queue and its own cancel trigger; `broadcast_` only uses `try_send`, so a slow
+//! subscriber is dropped without blocking the others.
 
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use crate::scene::{
     cancel_::{SceneCancelToken, SceneCanceller, cancel_pair_},
@@ -277,19 +283,21 @@ impl Default for SceneHub {
 
 /// 一条连接的场景上下文：连接身份、自己的行星、目录与 hub。
 ///
-/// 单线程使用，因此用 `RefCell` / `Cell` 而不是锁；绝不在 `await` 期间持有借用。
+/// 为挂到 `mptp_serving` 的 `Send + Sync` 处理器上，本类型用 `Arc` + `Mutex` 而不是
+/// `Rc` + `RefCell`（`mptp_serving` 要求 handler 类型 `Send + Sync`，future 才允许 `!Send`）。
+/// 业务仍是单线程：锁只在跨 session 共享只读时短暂持有，绝不在 `await` 期间持有借用。
 pub struct ConnectionCtx {
     /// 连接标识。
     connection_id_: ClientId,
 
     /// 本连接创建的行星（每个连接只允许 join 一次）。
-    own_planet_: RefCell<Option<PlanetId>>,
+    own_planet_: Mutex<Option<PlanetId>>,
 
     /// 场景目录。
-    registry_: Rc<RefCell<PlanetRegistry>>,
+    registry_: Arc<Mutex<PlanetRegistry>>,
 
     /// 订阅中心。
-    hub_: Rc<RefCell<SceneHub>>,
+    hub_: Arc<Mutex<SceneHub>>,
 
     /// 本连接所有 session 的取消触发端。
     cancel_: SceneCanceller,
@@ -298,25 +306,25 @@ pub struct ConnectionCtx {
     token_: SceneCancelToken,
 
     /// 最近一次收到请求的时刻；连接级保活判据。
-    last_seen_: std::cell::Cell<std::time::Instant>,
+    last_seen_: Mutex<std::time::Instant>,
 }
 
 impl ConnectionCtx {
     /// 造一条连接的上下文。
     pub fn new_(
         connection_id: ClientId,
-        registry: Rc<RefCell<PlanetRegistry>>,
-        hub: Rc<RefCell<SceneHub>>,
+        registry: Arc<Mutex<PlanetRegistry>>,
+        hub: Arc<Mutex<SceneHub>>,
     ) -> Self {
         let (cancel_, token_) = cancel_pair_();
         ConnectionCtx {
             connection_id_: connection_id,
-            own_planet_: RefCell::new(None),
+            own_planet_: Mutex::new(None),
             registry_: registry,
             hub_: hub,
             cancel_,
             token_,
-            last_seen_: std::cell::Cell::new(std::time::Instant::now()),
+            last_seen_: Mutex::new(std::time::Instant::now()),
         }
     }
 
@@ -327,12 +335,12 @@ impl ConnectionCtx {
 
     /// 自己的行星（若已 join）。
     pub fn own_planet_(&self) -> Option<PlanetId> {
-        *self.own_planet_.borrow()
+        *self.own_planet_.lock().unwrap()
     }
 
     /// 记下自己的行星；已经 join 过时返回 `false`。
     pub fn claim_own_planet_(&self, planet_id: PlanetId) -> bool {
-        let mut slot = self.own_planet_.borrow_mut();
+        let mut slot = self.own_planet_.lock().unwrap();
         if slot.is_some() {
             return false;
         }
@@ -341,12 +349,12 @@ impl ConnectionCtx {
     }
 
     /// 目录句柄。
-    pub fn registry_(&self) -> &Rc<RefCell<PlanetRegistry>> {
+    pub fn registry_(&self) -> &Arc<Mutex<PlanetRegistry>> {
         &self.registry_
     }
 
     /// 订阅中心句柄。
-    pub fn hub_(&self) -> &Rc<RefCell<SceneHub>> {
+    pub fn hub_(&self) -> &Arc<Mutex<SceneHub>> {
         &self.hub_
     }
 
@@ -362,44 +370,44 @@ impl ConnectionCtx {
 
     /// 记下「刚刚收到过请求」。
     pub fn touch_(&self) {
-        self.last_seen_.set(std::time::Instant::now());
+        *self.last_seen_.lock().unwrap() = std::time::Instant::now();
     }
 
     /// 距离上一次请求过去了多久。
     pub fn idle_for_(&self) -> std::time::Duration {
-        self.last_seen_.get().elapsed()
+        self.last_seen_.lock().unwrap().elapsed()
     }
 
     /// 连接离开：删除自己的行星、向订阅者广播 `Removed` 并清空该行星的订阅。
     ///
     /// 幂等：重复调用不会重复删除或重复广播。编码在借用目录 / hub 之前完成，因此不会
-    /// 在 `await` 期间持有 `RefCell` 借用。
+    /// 在 `await` 期间持有锁。
     pub async fn cleanup_async_(&self) {
         // 本连接不会再产生新的 session；让在途的 Pull 写立即退出。
         self.cancel_.cancel_();
-        let Some(planet_id) = self.own_planet_.borrow_mut().take() else {
+        let Some(planet_id) = self.own_planet_.lock().unwrap().take() else {
             return;
         };
-        let directory_version = self.registry_.borrow().directory_version_();
+        let directory_version = self.registry_.lock().unwrap().directory_version_();
         let event = PlanetEvent::Removed {
             planet_id,
             version: directory_version,
         };
         if let Ok(frame) = crate::scene::protocol_::encode_event_async_(&event).await {
-            self.hub_.borrow_mut().broadcast_(planet_id, frame);
+            self.hub_.lock().unwrap().broadcast_(planet_id, frame);
         }
-        let _ = self.registry_.borrow_mut().remove_planet_(planet_id);
-        let _ = self.hub_.borrow_mut().remove_planet_(planet_id);
+        let _ = self.registry_.lock().unwrap().remove_planet_(planet_id);
+        let _ = self.hub_.lock().unwrap().remove_planet_(planet_id);
     }
 
     /// 只能同步完成的兜底清理：不广播 `Removed`，只把行星与订阅从表里摘掉。
     ///
     /// 正常路径用 [`Self::cleanup_async_`]；本方法只由 `Drop` 守卫在任务被取消时调用。
     pub fn cleanup_sync_(&self) {
-        let Some(planet_id) = self.own_planet_.borrow_mut().take() else {
+        let Some(planet_id) = self.own_planet_.lock().unwrap().take() else {
             return;
         };
-        let _ = self.registry_.borrow_mut().remove_planet_(planet_id);
-        let _ = self.hub_.borrow_mut().remove_planet_(planet_id);
+        let _ = self.registry_.lock().unwrap().remove_planet_(planet_id);
+        let _ = self.hub_.lock().unwrap().remove_planet_(planet_id);
     }
 }

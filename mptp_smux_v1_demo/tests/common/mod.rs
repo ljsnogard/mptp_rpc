@@ -16,7 +16,13 @@
 
 #![allow(dead_code)]
 
-use std::{cell::RefCell, future::Future, net::SocketAddr, rc::Rc, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    rc::Rc,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use abs_art_facade::{TrJoinHandle, TrLocalScope};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
@@ -80,10 +86,10 @@ pub struct SceneFixture {
     addr_: SocketAddr,
 
     /// 目录（测试可直接观察）。
-    registry_: Rc<RefCell<PlanetRegistry>>,
+    registry_: Arc<Mutex<PlanetRegistry>>,
 
     /// 订阅中心（测试可直接观察订阅者数量）。
-    hub_: Rc<RefCell<SceneHub>>,
+    hub_: Arc<Mutex<SceneHub>>,
 }
 
 impl SceneFixture {
@@ -99,8 +105,8 @@ impl SceneFixture {
         let addr = listener
             .local_addr()
             .map_err(|err| anyhow!("取测试监听地址失败：{err}"))?;
-        let registry = Rc::new(RefCell::new(PlanetRegistry::new_()));
-        let hub = Rc::new(RefCell::new(SceneHub::new_()));
+        let registry = Arc::new(Mutex::new(PlanetRegistry::new_()));
+        let hub = Arc::new(Mutex::new(SceneHub::new_()));
         let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
 
         let registry_for_server = registry.clone();
@@ -121,7 +127,7 @@ impl SceneFixture {
                         return;
                     };
                     let shared = share_conn_(conn);
-                    let ctx = Rc::new(ConnectionCtx::new_(connection_id, registry, hub));
+                    let ctx = Arc::new(ConnectionCtx::new_(connection_id, registry, hub));
                     let handler = FixtureHandler::new_(SceneHandler::new_(ctx.clone()));
                     let servlet = Rc::new(MptpServlet::<ServingCfg, FixtureHandler>::new(handler));
                     let _cleanup = ConnCleanup_(ctx.clone());
@@ -145,18 +151,18 @@ impl SceneFixture {
     }
 
     /// 目录句柄。
-    pub fn registry_(&self) -> &Rc<RefCell<PlanetRegistry>> {
+    pub fn registry_(&self) -> &Arc<Mutex<PlanetRegistry>> {
         &self.registry_
     }
 
     /// 订阅中心句柄。
-    pub fn hub_(&self) -> &Rc<RefCell<SceneHub>> {
+    pub fn hub_(&self) -> &Arc<Mutex<SceneHub>> {
         &self.hub_
     }
 }
 
 /// 连接任务被取消时的兜底清理（不广播 `Removed`）。
-struct ConnCleanup_(Rc<ConnectionCtx>);
+struct ConnCleanup_(Arc<ConnectionCtx>);
 
 impl Drop for ConnCleanup_ {
     fn drop(&mut self) {
@@ -168,7 +174,7 @@ impl Drop for ConnCleanup_ {
 async fn serve_connection_(
     shared: mptp_smux_v1_demo::scene::cfg_::SharedConn,
     servlet: Rc<MptpServlet<ServingCfg, FixtureHandler>>,
-    ctx: Rc<ConnectionCtx>,
+    ctx: Arc<ConnectionCtx>,
     scope: mptp_smux_v1_demo::scene::cfg_::SceneScope,
 ) -> Result<()> {
     let mut binding = abs_smux::conn::TrConnection::bind_async(
@@ -633,7 +639,7 @@ impl Drop for ScenePull {
 
 /// 让测试可以显式等待服务端把订阅清理掉。
 pub async fn wait_subscribers_(fixture: &SceneFixture, planet_id: PlanetId, expected: usize) {
-    wait_until_async_(|| fixture.hub_().borrow().subscriber_count_(planet_id) == expected).await;
+    wait_until_async_(|| fixture.hub_().lock().unwrap().subscriber_count_(planet_id) == expected).await;
 }
 
 /// 构造一个「只有一条连接」的测试客户端与它的行星。
