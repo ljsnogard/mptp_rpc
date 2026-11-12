@@ -29,6 +29,7 @@ use super::endpoint_::Endpoint;
 use super::handler_::TrEndpointHandler;
 use super::middleware_::{Pipeline, TrMiddleware};
 use super::route_params_::RouteParams;
+use super::{CancellationSource, RequestCancel};
 
 /// 一次匹配的结果，泛型于端点值类型 `V`（便于纯逻辑单测）。
 ///
@@ -95,6 +96,9 @@ where
 
     /// 连接作用域状态（每连接一份，跨 session 共享只读）。
     state_: Arc<S>,
+
+    /// 连接级取消源：`MptpContext` 的请求级取消句柄从它派生。
+    cancel_source_: Arc<CancellationSource>,
 }
 
 impl<C> RadixRouter<C, Global, ()>
@@ -109,6 +113,7 @@ where
             routers_: Vec::new_in(Global),
             pipeline_: Pipeline::new(),
             state_: Arc::new(()),
+            cancel_source_: Arc::new(CancellationSource::new()),
         }
     }
 }
@@ -126,6 +131,7 @@ where
             routers_: Vec::new_in(alloc),
             pipeline_: Pipeline::new(),
             state_: Arc::new(()),
+            cancel_source_: Arc::new(CancellationSource::new()),
         }
     }
 }
@@ -143,6 +149,7 @@ where
             routers_: Vec::new_in(Global),
             pipeline_: Pipeline::new(),
             state_: state,
+            cancel_source_: Arc::new(CancellationSource::new()),
         }
     }
 }
@@ -165,6 +172,7 @@ where
             routers_: Vec::new_in(alloc),
             pipeline_: Pipeline::new(),
             state_: state,
+            cancel_source_: Arc::new(CancellationSource::new()),
         }
     }
 
@@ -176,6 +184,16 @@ where
     /// 连接作用域状态（共享借用）。
     pub fn state(&self) -> &S {
         &self.state_
+    }
+
+    /// 连接级取消源（只读）。
+    pub fn cancel_source(&self) -> &CancellationSource {
+        self.cancel_source_.as_ref()
+    }
+
+    /// 派生一个请求级取消句柄（借用本 router 的取消源）。
+    pub fn cancel_token(&self) -> RequestCancel<'_> {
+        self.cancel_source_.child_token()
     }
 
     /// 绑定一条 handler 规则：`pattern` + 方法集合 + 终端处理器。

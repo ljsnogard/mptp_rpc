@@ -67,7 +67,9 @@ where
 
     match router.match_route(method, &location) {
         MatchOutcome::Found { value: endpoint, params } => {
-            let mut ctx = MptpContext::new_(method, &location, params, session, router.state());
+            let cancel = router.cancel_token();
+            let mut ctx =
+                MptpContext::new_(method, &location, params, session, router.state(), cancel);
             router.pipeline().run(endpoint, &mut ctx).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
@@ -88,7 +90,9 @@ where
         }
         MatchOutcome::Root => {
             let params = RouteParams::empty();
-            let mut ctx = MptpContext::new_(method, &location, params, session, router.state());
+            let cancel = router.cancel_token();
+            let mut ctx =
+                MptpContext::new_(method, &location, params, session, router.state(), cancel);
             router.root().handle(&mut ctx).await
         }
     }
