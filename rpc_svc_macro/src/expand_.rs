@@ -522,8 +522,7 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
             use super::*;
             use ::mptp_serving::{Endpoint, MethodSet, MptpContext, RadixRouter, TrEndpointHandler};
             use ::mptp_serving::x_deps::mptp_smux::{ServeError, serving::config::TrConfig};
-            use ::rpc_core_v1::serving::{decode_body_async, write_ok_async, write_status_async};
-            use ::rpc_core_v1::x_deps::abs_mptp::spec::Status;
+            use ::rpc_core_v1::serving::{TrReplyError, decode_body_async, write_ok_async, write_status_async};
 
             #(#steps)*
             #(#handlers)*
@@ -710,11 +709,9 @@ fn handler_impl_(
                             write_ok_async(ctx.session_mut(), &value).await?;
                         }
                         Err(error) => {
-                            write_status_async(
-                                ctx.session_mut(),
-                                Status::InternalServerError,
-                                error.to_string(),
-                            ).await?;
+                            let status = TrReplyError::status(&error);
+                            let message = TrReplyError::message(&error);
+                            write_status_async(ctx.session_mut(), status, message).await?;
                         }
                     }
                     Result::Ok(())
