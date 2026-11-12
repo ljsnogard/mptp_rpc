@@ -30,13 +30,13 @@ use abs_mptp::spec::Status;
 use anyhow::{Result, anyhow, bail};
 use compio::net::TcpListener;
 use flume::Receiver;
+use mptp_serving::{HandlerFuture, MptpContext, RadixRouter, TrEndpointHandler, box_future_};
 use mptp_smux::{
-    ServeError,
+    HeaderKey, HeaderVal, ServeError,
     client::{MptpClient, Response},
     serving::{MptpServlet, SuffixStream},
     x_deps::abs_smux,
 };
-use mptp_serving::{HandlerFuture, MptpContext, RadixRouter, TrEndpointHandler, box_future_};
 use mptp_smux_v1_demo::scene::{
     ClientCfg, ConnectionCtx, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId,
     PlanetParams, PlanetRegistry, SceneHub, SceneService, ServingCfg, UpdateAck,
@@ -92,6 +92,9 @@ pub struct SceneFixture {
 
     /// 订阅中心（测试可直接观察订阅者数量）。
     hub_: Arc<Mutex<SceneHub>>,
+
+    /// `MptpContext` 一级 helper 的观测探针（`/test/ctx` 端点写、测试读）。
+    probe_: Arc<Mutex<CtxProbe>>,
 }
 
 impl SceneFixture {
@@ -109,10 +112,12 @@ impl SceneFixture {
             .map_err(|err| anyhow!("取测试监听地址失败：{err}"))?;
         let registry = Arc::new(Mutex::new(PlanetRegistry::new_()));
         let hub = Arc::new(Mutex::new(SceneHub::new_()));
+        let probe = Arc::new(Mutex::new(CtxProbe::default()));
         let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
 
         let registry_for_server = registry.clone();
         let hub_for_server = hub.clone();
+        let probe_for_server = probe.clone();
         let accept = scope.clone().spawn_local(async move {
             let mut next_connection = 1u64;
             loop {
@@ -123,6 +128,7 @@ impl SceneFixture {
                 next_connection = next_connection.saturating_add(1u64);
                 let registry = registry_for_server.clone();
                 let hub = hub_for_server.clone();
+                let probe = probe_for_server.clone();
                 let task_scope = scope.clone();
                 let task = scope.spawn_local(async move {
                     let Ok(conn) = accept_conn_async_(stream).await else {
@@ -132,16 +138,28 @@ impl SceneFixture {
                     let ctx = Arc::new(ConnectionCtx::new_(connection_id, registry, hub));
                     let svc = Arc::new(SceneService::new_(ctx.clone()));
                     let router = assemble_router(svc).expect("装配场景路由");
-                    let router = __rpc_controller_TestIdSource::install_into(
-                        router,
-                        Arc::new(TestIdSource),
-                    )
-                    .expect("装配测试 controller");
+                    let router =
+                        __rpc_controller_TestIdSource::install_into(router, Arc::new(TestIdSource))
+                            .expect("装配测试 controller");
                     let router = router
                         .pull("test/chunks", TestChunks)
                         .expect("装配测试路由");
+                    let router = router.pull("test/split", TestSplit).expect("装配测试路由");
                     let router = router
-                        .pull("test/split", TestSplit)
+                        .view(
+                            "test/ctx",
+                            TestCtx {
+                                probe_: probe.clone(),
+                            },
+                        )
+                        .expect("装配测试路由");
+                    let router = router
+                        .view(
+                            "test/ctx-body",
+                            TestCtxBody {
+                                probe_: probe.clone(),
+                            },
+                        )
                         .expect("装配测试路由");
                     let servlet = Rc::new(MptpServlet::<ServingCfg, _>::new(router));
                     let _cleanup = ConnCleanup_(ctx.clone());
@@ -156,6 +174,7 @@ impl SceneFixture {
             addr_: addr,
             registry_: registry,
             hub_: hub,
+            probe_: probe,
         })
     }
 
@@ -172,6 +191,11 @@ impl SceneFixture {
     /// 订阅中心句柄。
     pub fn hub_(&self) -> &Arc<Mutex<SceneHub>> {
         &self.hub_
+    }
+
+    /// `MptpContext` 一级 helper 的观测探针。
+    pub fn probe_(&self) -> &Arc<Mutex<CtxProbe>> {
+        &self.probe_
     }
 }
 
@@ -229,10 +253,7 @@ async fn serve_connection_(
 struct TestChunks;
 
 impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestChunks {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let mut stream: SuffixStream<'_, C> = ctx
@@ -245,11 +266,12 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
                     planet_id: index,
                     version: index,
                 };
-                let bytes = encode_to_vec_async_(&event)
-                    .await
-                    .map_err(|err| ServeError::Target {
-                        detail: err.to_string(),
-                    })?;
+                let bytes =
+                    encode_to_vec_async_(&event)
+                        .await
+                        .map_err(|err| ServeError::Target {
+                            detail: err.to_string(),
+                        })?;
                 stream.write_chunk_async(&bytes).await?;
             }
             let _ = stream.finish_async().await;
@@ -262,10 +284,7 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
 struct TestSplit;
 
 impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestSplit {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let event = PlanetEvent::Updated(PlanetDescriptor {
@@ -295,6 +314,94 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
             stream.write_chunk_async(&bytes[..middle]).await?;
             stream.write_chunk_async(&bytes[middle..]).await?;
             let _ = stream.finish_async().await;
+            Ok(())
+        })
+    }
+}
+
+/// `MptpContext` 一级 helper 的观测探针：`/test/ctx*` 端点写、测试读。
+///
+/// 端点写出回复前缀之后无法再把「已回复」放进同一条响应头，因此观测结果经共享探针带出
+/// 请求作用域；测试在收到回复后轮询 [`CtxProbe::done`]。
+///
+/// # `CtxProbe`: observations taken inside a `MptpContext` endpoint
+///
+/// The endpoint writes its findings into this shared probe because a reply header cannot
+/// report "the reply has started". Tests poll [`CtxProbe::done`] after receiving the reply.
+#[derive(Debug, Default)]
+pub struct CtxProbe {
+    /// 写回复前 `reply_written()` 的观测值（预期 `false`）。
+    pub reply_before: bool,
+
+    /// 写回复后 `reply_written()` 的观测值（预期 `true`）。
+    pub reply_after: bool,
+
+    /// `headers_mut` 写入后能否从 `headers()` 读回（预期 `true`）。
+    pub headers_mutated: bool,
+
+    /// `req_body_async` 看到的剩余体字节数（无体请求预期 `Some(0)`）。
+    pub body_remaining: Option<usize>,
+
+    /// 体读视图是否已经读完（无体请求预期 `true`）。
+    pub body_finished: bool,
+
+    /// 端点是否已经跑完（测试轮询位）。
+    pub done: bool,
+}
+
+/// `View /test/ctx`：验证 `reply_written` / `headers_mut` / `response` 的委托。
+///
+/// `View /test/ctx`: exercises the `reply_written` / `headers_mut` / `response` delegates.
+struct TestCtx {
+    /// 观测探针。
+    probe_: Arc<Mutex<CtxProbe>>,
+}
+
+impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestCtx {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            let before = ctx.reply_written();
+            ctx.headers_mut()
+                .set("X-Ctx-Probe", HeaderVal::from_text("mutated"));
+            let mutated = ctx
+                .headers()
+                .try_get(HeaderKey::from_text("X-Ctx-Probe"))
+                .and_then(HeaderVal::as_text)
+                == Some("mutated");
+            ctx.response(Status::Ok).no_body_async().await?;
+            let after = ctx.reply_written();
+            let mut probe = self.probe_.lock().expect("ctx 探针锁被污染");
+            probe.reply_before = before;
+            probe.reply_after = after;
+            probe.headers_mutated = mutated;
+            probe.done = true;
+            Ok(())
+        })
+    }
+}
+
+/// `View /test/ctx-body`：验证 `req_body_async` 的委托（无体请求）。
+///
+/// `View /test/ctx-body`: exercises the `req_body_async` delegate on an empty body.
+struct TestCtxBody {
+    /// 观测探针。
+    probe_: Arc<Mutex<CtxProbe>>,
+}
+
+impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestCtxBody {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            let body = ctx.req_body_async().await?;
+            let remaining = body.remaining();
+            let finished = body.is_finished();
+            drop(body);
+            ctx.response(Status::Ok).no_body_async().await?;
+            let mut probe = self.probe_.lock().expect("ctx 探针锁被污染");
+            probe.body_remaining = remaining;
+            probe.body_finished = finished;
+            probe.done = true;
             Ok(())
         })
     }
@@ -635,7 +742,8 @@ impl Drop for ScenePull {
 
 /// 让测试可以显式等待服务端把订阅清理掉。
 pub async fn wait_subscribers_(fixture: &SceneFixture, planet_id: PlanetId, expected: usize) {
-    wait_until_async_(|| fixture.hub_().lock().unwrap().subscriber_count_(planet_id) == expected).await;
+    wait_until_async_(|| fixture.hub_().lock().unwrap().subscriber_count_(planet_id) == expected)
+        .await;
 }
 
 /// 构造一个「只有一条连接」的测试客户端与它的行星。

@@ -12,6 +12,8 @@ license.workspace = true
 [dependencies]
 # 协议形状：AccessMethod / Status。
 abs_mptp = { path = "../abs_mptp" }
+# 缓冲读契约：`req_body_async` / `req_suffix_async` 的返回类型带同样的 trait 约束。
+abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 # 服务端会话与单一 handler 契约；本 crate 的分层 router 实现 `TrServeHandler`。
 mptp_smux = { path = "../mptp_smux" }
 # 路径树匹配：复用 matchit_route（no_std + bumpalo），不新造第二套匹配算法。
