@@ -43,6 +43,21 @@ compio 单线程传输的 channel 半边是 `!Send`，无法挂到当前 handler
 倾向先按路径 1 做最小复刻（compio 场景价值高于抽象纯洁度），但要等 demo 迁移真正需要时再
 动手。
 
+### 2.1 补充（2026-11-12）：`Send` 问题不止 compio
+
+尝试把 `rpc_demo`（tokio，`Send` 传输）的旧 `RpcRouter` 经 `ReqHandlerTarget` 挂到
+`RadixRouter` 时**编译失败**：旧 `TrReqHandler` 的 future（`RouterHandleFuture`）不是
+`Send`，无法装箱成 `Box<dyn Future + Send>`。
+
+即：**即使 channel 半边是 `Send` 的，`abs_buff` / `abs_denco` 这条 IO·编解码 future 链
+本身不是 `Send`**，导致旧 handler future 整体 `!Send`。这意味着决策 B 的「非 `Send`
+handler 变体」不只是 compio 需要——任何直接吃 `abs_buff` / `abs_denco` 的 handler 都可能
+撞上 `!Send`，而框架的 `Send`-by-design 与之冲突。
+
+下一步要先定位这条链里具体是哪个 future 不 `Send`（`read_async` / `write_response_prefix_async`
+/ denco encode 之一），再决定：是让那条 future `Send`、还是给框架加非 `Send` 变体、还是让
+`TrEndpointHandler` 的 future 去掉 `Send` 约束。
+
 ## 3. 决策 C：`MptpConnection` 状态 owner
 
 把「一连接 = 一个 binding + 一个 servlet + 一份状态」从调用约定升级为类型不变量：
