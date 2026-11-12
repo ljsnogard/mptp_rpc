@@ -1,7 +1,9 @@
 # mptp_serving 对齐设计目标的实施计划
 
 - 日期：2026-11-13 00:50
-- 状态：**实施计划**；本文件只规划后续补齐工作，不改代码
+- 状态：**已实施**（round 27–31，Phase A–F 全部落地；结果、关键决策与遗留缺口见
+  [`mptp-serving-implementation-20261113-0115.md`](mptp-serving-implementation-20261113-0115.md)）。
+  本文件保留为计划与验收门槛的历史记录。
 - 依据：`dev-notes/mptp-serving-framework-20261112-1845.md`（设计稿）逐条对照当前实现
 - 前置状态：`feat/serv-framework` HEAD = round-26 合并后；`cargo check/clippy/test --workspace
   --offline` 全绿，demo 17 项集成测试不回归；本地分支已收敛到 `main` + `feat/serv-framework`
