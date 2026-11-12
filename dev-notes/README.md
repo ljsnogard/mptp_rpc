@@ -57,6 +57,10 @@
   路径 + 元数据 + 参数来源），宏直接落在 `RadixRouter` / `Endpoint` / `EndpointMetadata` /
   `TrEndpointHandler` 上，退役 `RpcRouter` / `TrRpcService` / `TrRpcCallCtx`；含三个框架侧
   前置缺口、理想语法、场景 demo 前后对照与 P0–P3 分阶段。
+- [`mptp-serving-gap-plan-20261113-0050.md`](mptp-serving-gap-plan-20261113-0050.md)：
+  `mptp_serving` 对齐框架设计稿的差距清单（G1–G7）与分阶段实施计划（Phase A–F），含
+  每阶段文件 / 步骤 / 验收门槛、风险回退，以及**开新会话接续用的提示词**；面向
+  「本会话做不完、跨会话推进」的场景。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。
