@@ -20,12 +20,12 @@
 //! mptp_wire / abs_mptp / smux_v1
 //! ```
 //!
-//! # 当前状态（round 1–5 / P0–P2 过渡）
+//! # 当前状态（round 1–6 / P0–P2 基本完成）
 //!
-//! 已落地：`Endpoint`（含类型化 [`EndpointMetadata`]）、[`TrEndpointHandler`]（签名已改为
-//! 收 [`MptpContext`]）、[`ReqHandlerTarget`]（旧 `TrReqHandler` 适配）、`RouteParams`、
-//! [`TrRouteMatcher`] 与默认实现 [`RadixRouter`]（复用 `matchit_route`）。中间件链与按
-//! 元数据执行策略仍属后续 P2。
+//! 已落地：`Endpoint`（含类型化 [`EndpointMetadata`]）、[`TrEndpointHandler`]（收
+//! [`MptpContext`]）、[`TrMiddleware`] + [`Pipeline`]（线性“前置”中间件，按元数据短路）、
+//! [`ReqHandlerTarget`]（旧 `TrReqHandler` 适配）、`RouteParams`、[`TrRouteMatcher`] 与
+//! 默认实现 [`RadixRouter`]（复用 `matchit_route`）。连接状态与取消令牌属 P3。
 
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]
@@ -36,6 +36,7 @@ mod context_;
 mod endpoint_;
 mod handler_;
 mod metadata_;
+mod middleware_;
 mod req_handler_target_;
 mod route_params_;
 mod router_;
@@ -45,6 +46,7 @@ pub use context_::MptpContext;
 pub use endpoint_::Endpoint;
 pub use handler_::TrEndpointHandler;
 pub use metadata_::EndpointMetadata;
+pub use middleware_::{Pipeline, TrMiddleware};
 pub use req_handler_target_::ReqHandlerTarget;
 pub use route_params_::RouteParams;
 pub use router_::{MatchOutcome, RadixRouter, TrRouteMatcher};

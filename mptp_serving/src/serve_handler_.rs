@@ -66,7 +66,7 @@ where
     match router.match_route(method, &location) {
         MatchOutcome::Found { value: endpoint, params } => {
             let mut ctx = MptpContext::new_(method, &location, params, session);
-            endpoint.handler().handle(&mut ctx).await
+            router.pipeline().run(endpoint, &mut ctx).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
             let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);

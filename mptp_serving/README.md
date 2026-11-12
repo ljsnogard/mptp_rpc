@@ -23,12 +23,13 @@ mptp_wire / abs_mptp / smux_v1
 `#![no_std]` + `alloc`。堆上对象带分配器参数（`Vec<T, A>`、`abs_str::String<A>`），或复用
 [`matchit_route`] 的 `bumpalo` arena；不引入 `std::sync::OnceLock` / `RwLock` / `Mutex`。
 
-## 当前状态（round 1 / P0）
+## 当前状态（round 1–6 / P0–P2 基本完成）
 
 - [`Endpoint`]：`pattern + MethodSet + 元数据 + 终端 handler`；
 - [`EndpointMetadata`]：类型化元数据标记集合（`Vec<Arc<dyn Any>, A>`，中间件按类型读取）；
 - [`TrEndpointHandler`]：对象安全的终端处理器（boxed future，收 [`MptpContext`]）；
 - [`MptpContext`]：请求上下文（方法 + 位置 + 零拷贝路由参数 + 会话）；
+- [`TrMiddleware`] + [`Pipeline`]：线性“前置”中间件链，按 [`EndpointMetadata`] 短路；
 - [`RouteParams`]：零拷贝路径参数（参数名借路由表、值借 `location`）；
 - [`TrRouteMatcher`] + [`RadixRouter`]：分层匹配（handler 规则 → 子 router → 根 endpoint），
   复用 `matchit_route`，方法糖 `head/view/post/drop/push/pull/call`；
@@ -38,8 +39,8 @@ mptp_wire / abs_mptp / smux_v1
 
 **尚未实施**（后续 round）：运行期增删（`remove_route`，需 no_std 读多写少锁）、
 `TrRouter` 注册契约与 `TrRouterExt` 扩展 trait、类型化路径参数（`TrRouteParams` + derive
-编译期校验）、端点元数据 + 中间件链（P2）、旧 `rpc_core_v1::serving::Router` 的
-`deprecated` 迁移。
+编译期校验）、连接状态 `S` 与请求级取消令牌（P3）、demo 迁移、`!Send`（compio）传输的
+非 `Send` handler 变体。
 
 ## 设计文档
 
@@ -52,6 +53,8 @@ mptp_wire / abs_mptp / smux_v1
 [`EndpointMetadata`]: crate::EndpointMetadata
 [`TrEndpointHandler`]: crate::TrEndpointHandler
 [`MptpContext`]: crate::MptpContext
+[`TrMiddleware`]: crate::TrMiddleware
+[`Pipeline`]: crate::Pipeline
 [`ReqHandlerTarget`]: crate::ReqHandlerTarget
 [`RouteParams`]: crate::RouteParams
 [`TrRouteMatcher`]: crate::TrRouteMatcher

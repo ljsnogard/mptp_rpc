@@ -27,8 +27,11 @@ where
     C: TrConfig,
 {
     /// 处理一次已完成路由的请求。
-    fn handle<'f>(
-        &'f self,
-        ctx: &'f mut MptpContext<'f, C>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'f>>;
+    ///
+    /// `'a` 是本次借用的生命周期，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，
+    /// 这样调用方可以在一次 `.await` 之后重新借用 `ctx`（中间件链的关键）。
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'a>>;
 }

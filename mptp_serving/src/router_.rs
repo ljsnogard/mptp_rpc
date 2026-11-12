@@ -23,6 +23,7 @@ use mptp_smux::MethodSet;
 
 use super::endpoint_::Endpoint;
 use super::handler_::TrEndpointHandler;
+use super::middleware_::{Pipeline, TrMiddleware};
 use super::route_params_::RouteParams;
 
 /// 一次匹配的结果，泛型于端点值类型 `V`（便于纯逻辑单测）。
@@ -82,6 +83,9 @@ where
 
     /// 子 router 规则：静态前缀 → 子 router 匹配器。
     routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C>>), A>,
+
+    /// 请求路径上的中间件链（装配期构建，请求路径只读）。
+    pipeline_: Pipeline<C>,
 }
 
 impl<C> RadixRouter<C, Global>
@@ -94,6 +98,7 @@ where
             root_: root,
             trie_: Trie::new(),
             routers_: Vec::new_in(Global),
+            pipeline_: Pipeline::new(),
         }
     }
 }
@@ -109,6 +114,7 @@ where
             root_: root,
             trie_: Trie::new(),
             routers_: Vec::new_in(alloc),
+            pipeline_: Pipeline::new(),
         }
     }
 
@@ -213,6 +219,17 @@ where
     pub fn bind_router(mut self, prefix: &'static str, child: Arc<dyn TrRouteMatcher<C>>) -> Self {
         self.routers_.push((prefix, child));
         self
+    }
+
+    /// 追加一个中间件（装配顺序即执行顺序）。
+    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C> + 'static) -> Self {
+        self.pipeline_ = self.pipeline_.use_middleware(middleware);
+        self
+    }
+
+    /// 本 router 的中间件链。
+    pub fn pipeline(&self) -> &Pipeline<C> {
+        &self.pipeline_
     }
 }
 
