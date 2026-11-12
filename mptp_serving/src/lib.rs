@@ -47,9 +47,9 @@ mod serve_handler_;
 
 pub use context_::MptpContext;
 pub use endpoint_::Endpoint;
-pub use handler_::TrEndpointHandler;
+pub use handler_::{HandlerFuture, TrEndpointHandler, box_future_};
 pub use metadata_::EndpointMetadata;
-pub use middleware_::{Pipeline, TrMiddleware};
+pub use middleware_::{MiddlewareFuture, Pipeline, TrMiddleware};
 pub use req_handler_target_::ReqHandlerTarget;
 pub use route_param_::{RouteParamError, TrFromRouteParam};
 pub use route_params_::RouteParams;

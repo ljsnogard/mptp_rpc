@@ -16,6 +16,8 @@ abs_mptp = { path = "../abs_mptp" }
 mptp_smux = { path = "../mptp_smux" }
 # 路径树匹配：复用 matchit_route（no_std + bumpalo），不新造第二套匹配算法。
 matchit_route = { path = "../matchit_route" }
+# 请求级 arena：handler future 用它的 boxed::Box 分配（带 Drop 语义，内存随 arena 释放）。
+bumpalo = { version = "3.20.3", features = ["boxed"] }
 # 克隆 `location` 用带分配器的 String（no_std 纪律：String 一律 abs_str::String<A>）。
 abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git", default-features = false, features = [
     "str_alloc",

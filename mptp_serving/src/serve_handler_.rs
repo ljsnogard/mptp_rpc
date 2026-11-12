@@ -16,6 +16,7 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::access_method::AccessMethod;
 use abs_mptp::spec::Status;
 use abs_str::str_alloc::String as AbsString;
+use bumpalo::Bump;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::serving::config::TrConfig;
 use mptp_smux::serving::{K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler};
@@ -64,12 +65,14 @@ where
     // 克隆 location：匹配结果的 params 借用 location，而调用 handler 需要 `&mut session`；
     // 两者不能同时借 session，因此把 location 放到独立的堆上（带分配器的 String）。
     let location = AbsString::from_str_in(session.location(), Global);
+    // 请求级 arena：handler future 从它分配，随本次请求结束整体释放。
+    let bump = Bump::new();
 
     match router.match_route(method, &location) {
         MatchOutcome::Found { value: endpoint, params } => {
             let cancel = router.cancel_token();
             let mut ctx =
-                MptpContext::new_(method, &location, params, session, router.state(), cancel);
+                MptpContext::new_(&bump, method, &location, params, session, router.state(), cancel);
             router.pipeline().run(endpoint, &mut ctx).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
@@ -92,7 +95,7 @@ where
             let params = RouteParams::empty();
             let cancel = router.cancel_token();
             let mut ctx =
-                MptpContext::new_(method, &location, params, session, router.state(), cancel);
+                MptpContext::new_(&bump, method, &location, params, session, router.state(), cancel);
             router.root().handle(&mut ctx).await
         }
     }

@@ -11,12 +11,11 @@
 //! unary endpoints; `Head` (headers-only) and `Pull` (suffix stream) are hand-written
 //! `TrEndpointHandler` implementations.
 
-use core::{future::Future, pin::Pin};
 use std::sync::{Arc, Mutex};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
-use mptp_serving::{MethodSet, MptpContext, TrEndpointHandler};
+use mptp_serving::{HandlerFuture, MethodSet, MptpContext, TrEndpointHandler, box_future_};
 use mptp_smux::{
     HeaderVal, ServeError,
     serving::{ServingSession, SuffixStream, config::TrConfig},
@@ -152,8 +151,9 @@ impl<C: TrConfig, S> TrEndpointHandler<C, S> for ScenePlanets {
     fn handle<'a, 'f>(
         &'a self,
         ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
-        Box::pin(async move {
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
             match ctx.method() {
                 AccessMethod::View => {
                     let directory = self.svc_.ctx_().registry_().lock().unwrap().directory_();
@@ -196,8 +196,9 @@ impl<S> TrEndpointHandler<crate::scene::cfg_::ServingCfg, S> for ScenePull {
     fn handle<'a, 'f>(
         &'a self,
         ctx: &'a mut MptpContext<'f, crate::scene::cfg_::ServingCfg, S>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
-        Box::pin(async move {
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
             let cancel = ctx.cancel().child_token();
             pull_async_(self.svc_.ctx_(), ctx.session_mut(), cancel).await
         })
@@ -331,8 +332,9 @@ impl<C: TrConfig, S> TrEndpointHandler<C, S> for SceneRoot {
     fn handle<'a, 'f>(
         &'a self,
         ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
-        Box::pin(async move {
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
             ctx.session_mut()
                 .response(Status::NotFound)
                 .no_body_async()

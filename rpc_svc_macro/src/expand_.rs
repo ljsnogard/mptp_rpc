@@ -75,7 +75,7 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
         #[allow(non_snake_case, non_camel_case_types, unused_imports)]
         pub mod #module_ident {
             use super::*;
-            use ::mptp_serving::{Endpoint, MethodSet, MptpContext, RadixRouter, TrEndpointHandler};
+            use ::mptp_serving::{Endpoint, HandlerFuture, MethodSet, MptpContext, RadixRouter, TrEndpointHandler, box_future_};
             use ::mptp_serving::x_deps::mptp_smux::{ServeError, serving::config::TrConfig};
             use ::rpc_core_v1::serving::{TrReplyError, decode_body_async, write_ok_async, write_status_async, write_stream_item_async};
             use ::rpc_core_v1::x_deps::abs_async_iter::TrAsyncIterator;
@@ -259,12 +259,9 @@ fn handler_impl_(
             fn handle<'a, 'f>(
                 &'a self,
                 ctx: &'a mut MptpContext<'f, C, S>,
-            ) -> ::core::pin::Pin<
-                ::std::boxed::Box<
-                    dyn ::core::future::Future<Output = Result<(), ServeError>> + 'a
-                >
-            > {
-                ::std::boxed::Box::pin(async move {
+            ) -> HandlerFuture<'a> {
+                let arena = ctx.arena();
+                box_future_(arena, async move {
                     #decode_call
                     match result {
                         Ok(value) => {
@@ -347,12 +344,9 @@ fn pull_handler_impl_(
             fn handle<'a, 'f>(
                 &'a self,
                 ctx: &'a mut MptpContext<'f, C, S>,
-            ) -> ::core::pin::Pin<
-                ::std::boxed::Box<
-                    dyn ::core::future::Future<Output = Result<(), ServeError>> + 'a
-                >
-            > {
-                ::std::boxed::Box::pin(async move {
+            ) -> HandlerFuture<'a> {
+                let arena = ctx.arena();
+                box_future_(arena, async move {
                     let cancel = ctx.cancel().child_token();
                     #(#decode_stmts)*
                     let mut iter: _ = self.svc_.#method_ident(#(#call_args),*);

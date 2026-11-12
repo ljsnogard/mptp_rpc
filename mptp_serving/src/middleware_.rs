@@ -12,7 +12,6 @@
 //! higher-ranked closure chain.
 
 use alloc::alloc::Global;
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Allocator;
@@ -20,22 +19,24 @@ use core::future::Future;
 use core::pin::Pin;
 
 use abs_mptp::spec::Status;
+use bumpalo::boxed::Box as BumpBox;
 use mptp_smux::serving::config::TrConfig;
 use mptp_smux::ServeError;
 
 use super::context_::MptpContext;
 use super::endpoint_::Endpoint;
 
-/// 中间件 `before` 返回的 future。
+/// 中间件 `before` 返回的 future：分配在请求级 arena 里、类型擦除的 [`BumpBox`]。
 ///
 /// 不带 `Send`：与 [`TrEndpointHandler`] 一致，future 链天然 `!Send`，`Send` 边界在分派层。
 pub type MiddlewareFuture<'f> =
-    Pin<Box<dyn Future<Output = Result<Option<Status>, ServeError>> + 'f>>;
+    Pin<BumpBox<'f, dyn Future<Output = Result<Option<Status>, ServeError>> + 'f>>;
 
 /// 一个横切策略中间件。
 ///
-/// 对象安全：`before` 返回擦除的 `Box<dyn Future>`。它读 `endpoint.metadata()` 决定是否
-/// 介入；返回 `Some(status)` 表示短路（管线写该状态的无体回复并停止），`None` 表示放行。
+/// 对象安全：`before` 返回类型擦除的 arena box（[`MiddlewareFuture`]）。它读
+/// `endpoint.metadata()` 决定是否介入；返回 `Some(status)` 表示短路（管线写该状态的无体
+/// 回复并停止），`None` 表示放行。
 ///
 /// `'a` 是本次借用，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，使管线在一次
 /// `.await` 之后能重新借用 `ctx`。

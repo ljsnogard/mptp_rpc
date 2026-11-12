@@ -17,11 +17,10 @@
 //! handed to handlers/middleware as a shared `&S`.
 
 use abs_mptp::spec::access_method::AccessMethod;
-use mptp_smux::serving::config::TrConfig;
-use mptp_smux::serving::ServingSession;
+use bumpalo::Bump;
+use mptp_smux::serving::{ServingSession, config::TrConfig};
 
-use super::route_params_::RouteParams;
-use super::RequestCancel;
+use super::{RequestCancel, route_params_::RouteParams};
 
 /// 一次请求的上下文。
 ///
@@ -33,6 +32,9 @@ where
 {
     /// 本次请求的方法。
     method_: AccessMethod,
+
+    /// 请求级 arena（借用自请求作用域）：handler future 从它分配。
+    arena_: &'f Bump,
 
     /// 本次请求的位置（借用调用方的克隆）。
     location_: &'f str,
@@ -56,6 +58,7 @@ where
 {
     /// 由「方法 + 位置 + 路由参数 + 会话 + 状态 + 取消句柄」构造。
     pub(crate) fn new_(
+        arena: &'f Bump,
         method: AccessMethod,
         location: &'f str,
         route: RouteParams<'f>,
@@ -65,6 +68,7 @@ where
     ) -> Self {
         MptpContext {
             method_: method,
+            arena_: arena,
             location_: location,
             route_: route,
             session_: session,
@@ -76,6 +80,15 @@ where
     /// 本次请求的方法。
     pub fn method(&self) -> AccessMethod {
         self.method_
+    }
+
+    /// 请求级 arena 句柄（`&'f Bump`，`Copy`）。
+    ///
+    /// 终端处理器用它把 future 分配进 arena：先取出句柄、再构造 future、最后经
+    /// [`crate::handler_::box_future_`] 装箱。
+    #[doc(hidden)]
+    pub fn arena(&self) -> &'f Bump {
+        self.arena_
     }
 
     /// 本次请求的位置。
