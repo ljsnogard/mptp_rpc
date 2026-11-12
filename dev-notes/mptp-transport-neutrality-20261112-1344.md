@@ -332,3 +332,102 @@ impl<C, H, S> MptpServlet<C, H, S> {
 - 这与 `mptp_quic` 的讨论是同一个问题：传输中立的 core 需要一个连接对象；smux 和
   QUIC 只是提供不同的 binding/connection 类型和状态。先把 connection scope 做对，
   再谈 transport swap，否则每个绑定都会复制一套“隐式连接状态”约定。
+
+## 11. `DockBinding` 在太阳系业务中的角色
+
+先分清两种 accept：
+
+| accept 的对象 | API | 谁来做 |
+| --- | --- | --- |
+| 新的 TCP / smux connection | `TcpListener::accept` + `accept_conn_async_` | 顶层 server |
+| 已有一条 smux connection 上新的 MPTP 请求子流 | `DockBinding::listen_async` → `Listener::income_async` | 该 connection 的 acceptor |
+
+`DockBinding` 不是“接受新连接”的句柄，而是**一条已建立 smux connection 上的某个 dock 端点**。
+在 demo 里它只做一件事：
+
+```rust
+let mut binding = shared.bind_async(Dock::new(0x80)).await?;
+let mut listener = servlet.listen_async(&mut binding, 16).await?;
+let session = servlet.accept_async(&mut listener).await?;
+```
+
+- 它选择本端服务垛口 `0x80`（[`K_DEFAULT_SERVING_DOCK`](../mptp_smux/src/lib.rs#L85)）；
+- 它让这条 connection 能接收发往该 dock 的入向子流；
+- 每个 `Call / View / Head / Pull` 都是一条独立子流，由 `ServingSession` 解码；
+- 它不参与行星目录、owner、订阅或任何场景业务；handler 和 registry / hub 根本看不到它。
+
+所以 **DockBinding 是纯传输层对象，不属于太阳系业务**。
+
+### 11.1 Servlet 现在为什么“看起来需要”它
+
+`MptpServlet` 只有 `listen_async` 这一步接触 binding：
+
+```rust
+pub fn listen_async(&'f self, binding: &'f mut DockBinding<C>, reserve: usize) -> ... {
+    binding.listen_async(reserve)
+}
+
+pub fn accept_async(&'f self, listener: &'f mut Listener<C>) -> ... { ... }
+
+pub fn serve_session_async(&'f self, session: ServingSession<C>) -> ... { ... }
+```
+
+`accept_async` 只接收 `Listener`，`serve_session_async` 只接收 `ServingSession`；servlet 不保存
+binding。`listen_async` 只是一个便利包装：调用者本来就可以直接
+`binding.listen_async(reserve)` 得到 `Listener`，再把 listener 交给 servlet。
+
+所以你的判断是对的：**servlet 本质上不需要 DockBinding；它需要的是 Listener 或 Session。**
+现在的写法把“accept 侧”的职责塞进了 servlet，导致看起来 servlet 借用了它。
+
+### 11.2 两种自洽的设计，不要混在一起
+
+**A. connection 对象 + servlet 分派器**（推荐）
+
+```text
+MptpConnection<C, H, S>
+  ├─ owns DockBinding<C> / Listener<C>
+  ├─ owns per-connection state S
+  ├─ accept_async() -> ServingSession
+  └─ servlet.serve_session_async(session, &S)
+MptpServlet<C, H>
+  └─ handler dispatch only; no binding
+```
+
+- 顶层 server 只负责 `TcpListener` 接受新 smux connection；
+- 每个 connection 对象绑定自己的 dock、持续 accept 新 session、维护 idle / cancel / cleanup；
+- servlet 只处理 session，不碰 DockBinding；
+- 冲突域 = 该 connection 对象；服务器共享的 registry / hub 仍是 server 级。
+- 这是 `mptp_quic` 也能复用的形状：smux / quic 只提供不同的 connection/binding，core 不变。
+
+**B. servlet 本身是 connection 对象**
+
+```text
+MptpServlet<C, H, S>
+  ├─ owns DockBinding<C> / Listener<C>
+  ├─ owns S
+  ├─ accept loop
+  └─ handler dispatch
+```
+
+- 这时 servlet **确实需要** binding，因为它就是 acceptor；
+- 顶层 server 只接受新 smux connection，不持有这个 per-connection binding；
+- 你上一轮“servlet 绑定 connection”的想法对应这一种。
+
+两种都可行，但当前 `MptpServlet` 是“A 的 dispatcher + B 的 listen 包装”的混合体：
+`listen_async` 让它看起来像 B，`accept_async` / `serve_session_async` 又让它像 A。
+混合的后果是：connection ownership 和 accept 职责不清晰，per-connection 状态只能由
+handler 捕获，冲突域约束靠调用约定。
+
+### 11.3 建议
+
+- 如果目标是“server / connection 负责 accept，servlet 只负责 session”，选 **A**：
+  把 `listen_async` 从 `MptpServlet` 移出，或移到 `MptpConnection`；servlet 只保留
+  `serve_session_async`，必要时增加 `&S` 参数。
+- 如果目标是“servlet 就是一条连接的 server 侧代表”，选 **B**：让 `MptpServlet` 构造时
+  拥有 binding / listener / `S`，从此不存在“借用 dock binding”这个说法；server 顶层只
+  接受新 connection。
+- 无论 A 还是 B，**DockBinding 都不属于太阳系业务**，它只属于 connection/acceptor 层；
+  handler 不应该看到它，更不应该把它当作连接身份。
+
+这与上一节的结论一致：真正需要明确的是 connection scope 和 accept 职责的 owner，而不是
+继续让 `MptpServlet` 同时扮演 dispatcher 和 acceptor。
