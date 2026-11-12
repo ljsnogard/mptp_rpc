@@ -21,7 +21,7 @@ use mptp_smux::serving::config::TrConfig;
 use mptp_smux::serving::{K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler};
 use mptp_smux::{HeaderVal, ResponsePrefix, ServeError};
 
-use super::{MatchOutcome, RadixRouter, RouteParams, TrRouteMatcher};
+use super::{MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher};
 
 impl<C, A> TrServeHandler<C> for RadixRouter<C, A>
 where
@@ -65,7 +65,8 @@ where
 
     match router.match_route(method, &location) {
         MatchOutcome::Found { value: endpoint, params } => {
-            endpoint.handler().handle(method, session, params).await
+            let mut ctx = MptpContext::new_(method, &location, params, session);
+            endpoint.handler().handle(&mut ctx).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
             let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
@@ -85,7 +86,8 @@ where
         }
         MatchOutcome::Root => {
             let params = RouteParams::empty();
-            router.root().handle(method, session, params).await
+            let mut ctx = MptpContext::new_(method, &location, params, session);
+            router.root().handle(&mut ctx).await
         }
     }
 }
