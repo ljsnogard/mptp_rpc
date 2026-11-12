@@ -20,14 +20,22 @@
 //! mptp_wire / abs_mptp / smux_v1
 //! ```
 //!
-//! # 当前状态（round 1–6 / P0–P2 基本完成）
+//! # 当前状态（round 1–6 / P0–P2 + Phase A–C）
 //!
 //! 已落地：`Endpoint`（含类型化 [`EndpointMetadata`]）、[`TrEndpointHandler`]（收
 //! [`MptpContext`]）、[`TrMiddleware`] + [`Pipeline`]（线性“前置”中间件，按元数据短路）、
 //! [`ReqHandlerTarget`]（旧 `TrReqHandler` 适配）、`RouteParams`、[`TrRouteMatcher`] 与
-//! 默认实现 [`RadixRouter`]（复用 `matchit_route`），以及连接作用域状态 `S`（经
-//! [`MptpContext::state`] 注入）与请求级取消句柄 [`RequestCancel`]（经
-//! [`MptpContext::cancel`] 注入，复用 `cantok_rs` 的 `Copy` 令牌）。
+//! 默认实现 [`RadixRouter`]（复用 `matchit_route`，同一路径可挂多个方法不同的端点），以及：
+//!
+//! - 连接作用域状态 `S`（经 [`MptpContext::state`] 注入）；
+//! - **请求级运行期状态** `R`（经 [`MptpContext::request_state`] /
+//!   [`MptpContext::request_state_mut`] 访问，每请求 `Default` 新建）；
+//! - 请求级取消句柄 [`RequestCancel`]（经 [`MptpContext::cancel`] 注入，复用 `cantok_rs`
+//!   的 `Copy` 令牌）；
+//! - 请求 / 回复一级 helper（[`MptpContext::headers_mut`]、
+//!   [`MptpContext::response`]、[`MptpContext::req_body_async`]、
+//!   [`MptpContext::req_suffix_async`]）与「是否已回复」状态
+//!   [`MptpContext::reply_written`]。
 
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]
@@ -45,23 +53,21 @@ mod route_params_;
 mod router_;
 mod serve_handler_;
 
+/// 请求级取消句柄：直接复用 [`cantok_rs`] 的 `Copy` 令牌，其 `cancellation()` 返回具体
+/// future 而非 `Box<dyn Future>`，因此不带 `Send` / `'static` 擦除负担。
+pub use cantok_rs::CancellationToken as RequestCancel;
+pub use cantok_rs::{CancellationFuture, CancellationSource};
 pub use context_::MptpContext;
 pub use endpoint_::Endpoint;
 pub use handler_::{HandlerFuture, TrEndpointHandler, box_future_};
 pub use metadata_::EndpointMetadata;
 pub use middleware_::{MiddlewareFuture, Pipeline, TrMiddleware};
+/// 访问方法集合：来自 [`mptp_smux`]，本 crate 不重复定义。
+pub use mptp_smux::MethodSet;
 pub use req_handler_target_::ReqHandlerTarget;
 pub use route_param_::{RouteParamError, TrFromRouteParam};
 pub use route_params_::RouteParams;
 pub use router_::{MatchOutcome, RadixRouter, TrRouteMatcher};
-
-/// 请求级取消句柄：直接复用 [`cantok_rs`] 的 `Copy` 令牌，其 `cancellation()` 返回具体
-/// future 而非 `Box<dyn Future>`，因此不带 `Send` / `'static` 擦除负担。
-pub use cantok_rs::CancellationToken as RequestCancel;
-pub use cantok_rs::{CancellationFuture, CancellationSource};
-
-/// 访问方法集合：来自 [`mptp_smux`]，本 crate 不重复定义。
-pub use mptp_smux::MethodSet;
 
 /// 本 crate 依赖的外部 crate 转出，供下游不必逐条声明版本。
 ///

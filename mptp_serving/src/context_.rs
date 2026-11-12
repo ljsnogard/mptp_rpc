@@ -28,9 +28,13 @@ use super::{RequestCancel, route_params_::RouteParams};
 
 /// 一次请求的上下文。
 ///
-/// `'f` 是请求生命周期：会话借用、位置借用、路由参数与连接状态借用都活到 `'f`。`S` 是
-/// 连接作用域状态，缺省为 `()`。
-pub struct MptpContext<'f, C, S = ()>
+/// `'f` 是请求生命周期：会话借用、位置借用、路由参数、连接状态与请求级状态借用都活到
+/// `'f`。`S` 是连接作用域状态，`R` 是**请求级运行期状态**（中间件写、处理器读），两者
+/// 缺省都是 `()`。
+///
+/// `R` 与端点元数据分工明确：元数据是**装配期声明**（鉴权策略、超时……），`R` 是**本请求
+/// 的运行期事实**（已通过鉴权、主体是谁、配额余量……）。它由装配者定义，框架不解释它。
+pub struct MptpContext<'f, C, S = (), R = ()>
 where
     C: TrConfig,
 {
@@ -52,15 +56,22 @@ where
     /// 连接作用域状态（共享借用）。
     state_: &'f S,
 
+    /// 请求级运行期状态（可变借用）：中间件 stash、处理器读。
+    request_state_: &'f mut R,
+
     /// 请求级取消句柄（`Copy` 令牌，借用连接持有的取消源）。
     cancel_: RequestCancel<'f>,
 }
 
-impl<'f, C, S> MptpContext<'f, C, S>
+impl<'f, C, S, R> MptpContext<'f, C, S, R>
 where
     C: TrConfig,
 {
-    /// 由「方法 + 位置 + 路由参数 + 会话 + 状态 + 取消句柄」构造。
+    /// 由「方法 + 位置 + 路由参数 + 会话 + 连接状态 + 请求级状态 + 取消句柄」构造。
+    ///
+    // 这是 crate 内唯一的装配点：全部输入就是一次请求的全部借用，拆成结构体只会把同一组
+    // 借用再包一层，因此显式允许超参数。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_(
         arena: &'f Bump,
         method: AccessMethod,
@@ -68,6 +79,7 @@ where
         route: RouteParams<'f>,
         session: &'f mut ServingSession<C>,
         state: &'f S,
+        request_state: &'f mut R,
         cancel: RequestCancel<'f>,
     ) -> Self {
         MptpContext {
@@ -77,6 +89,7 @@ where
             route_: route,
             session_: session,
             state_: state,
+            request_state_: request_state,
             cancel_: cancel,
         }
     }
@@ -193,6 +206,21 @@ where
     /// 连接作用域状态（共享借用）。
     pub fn state(&self) -> &S {
         self.state_
+    }
+
+    /// 请求级运行期状态（只读）。
+    ///
+    /// 处理器用它读取中间件 stash 的请求事实（例如鉴权通过后的主体、配额余量）。
+    pub fn request_state(&self) -> &R {
+        self.request_state_
+    }
+
+    /// 请求级运行期状态（可变）。
+    ///
+    /// 中间件用它写入本请求的运行期事实；处理器通常只读。状态随请求结束丢弃，不跨请求
+    /// 共享，也不写回端点元数据。
+    pub fn request_state_mut(&mut self) -> &mut R {
+        self.request_state_
     }
 
     /// 请求级取消句柄（`Copy`）。
