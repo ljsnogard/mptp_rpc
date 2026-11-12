@@ -21,6 +21,7 @@
 //! `rpc_router_trie` crate were removed; backpressure belongs inside a handler or target,
 //! not in a second routing algorithm.
 
+mod body_;
 mod cancel_future_;
 mod ctx_;
 mod rpc_router_;
@@ -32,6 +33,7 @@ pub use config::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfi
 pub use ctx_::RpcCallCtx;
 pub use router_::{Router, RouterCtx, RouterError, TrPathHandler, TrPathRouter, TrPathRouterMut};
 pub use rpc_router_::{RpcRouter, RpcServiceCtx};
+pub use body_::{decode_body_async, write_ok_async, write_status_async};
 #[doc(hidden)]
 pub use cancel_future_::{EitherMayCancel, MapErrMayCancel, ReadyMayCancel};
 #[doc(hidden)]

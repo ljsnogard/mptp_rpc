@@ -44,6 +44,12 @@ pub struct SceneError {
     pub detail_: &'static str,
 }
 
+impl core::fmt::Display for SceneError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.detail_)
+    }
+}
+
 /// 场景服务：一个 controller。
 pub struct SceneService {
     /// 下一个行星标识。
