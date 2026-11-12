@@ -8,16 +8,13 @@
 //! An endpoint describes what will run (pattern + method set + metadata + terminal handler);
 //! it is not the execution itself. Metadata is a typed marker collection read by middleware.
 
-use alloc::alloc::Global;
-use alloc::sync::Arc;
-use core::any::Any;
+use alloc::{alloc::Global, sync::Arc, vec::Vec};
+use core::{alloc::Allocator, any::Any};
 
 use abs_mptp::spec::access_method::AccessMethod;
-use mptp_smux::serving::config::TrConfig;
-use mptp_smux::MethodSet;
+use mptp_smux::{MethodSet, serving::config::TrConfig};
 
-use super::handler_::TrEndpointHandler;
-use super::metadata_::EndpointMetadata;
+use super::{handler_::TrEndpointHandler, metadata_::EndpointMetadata};
 
 /// 一个路由目标：`pattern` + 方法集合 + 元数据 + 终端处理器。
 ///
@@ -91,5 +88,59 @@ where
     {
         self.metadata_.insert(value);
         self
+    }
+}
+
+/// 同一个路径模式上的端点集合：一条路径可以挂多个端点，各自声明不同的方法集合。
+///
+/// 设计稿 §6.7 的 `feeds/{id}` 同时挂 `VIEW` + `PULL` 就落在这里：匹配时按插入顺序取
+/// **第一个**接受该方法的端点；`405` 的 `Allow` 取集合内所有端点方法集合的并集。
+/// 集合在装配期构建、请求路径只读。
+///
+/// `A` 是集合内 `Vec` 的分配器，由 [`RadixRouter`](super::RadixRouter) 传入，与它的子
+/// router 列表共用同一个分配器策略。
+///
+/// 装配约定：**同路径同方法**不做冲突检测，先插入的端点先命中；装配者应当让同一路径上的
+/// 方法集合互不相交。
+pub(crate) struct EndpointSet<C, S = (), A = Global>
+where
+    C: TrConfig + 'static,
+    A: Allocator,
+{
+    /// 按插入顺序保存的端点。
+    entries_: Vec<Endpoint<C, S>, A>,
+}
+
+impl<C, S, A> EndpointSet<C, S, A>
+where
+    C: TrConfig + 'static,
+    A: Allocator,
+{
+    /// 用指定分配器造一个空集合。
+    pub(crate) fn new_in(alloc: A) -> Self {
+        EndpointSet {
+            entries_: Vec::new_in(alloc),
+        }
+    }
+
+    /// 追加一个端点（同路径的新端点排在已有端点之后）。
+    pub(crate) fn push(&mut self, endpoint: Endpoint<C, S>) {
+        self.entries_.push(endpoint);
+    }
+
+    /// 取第一个接受 `method` 的端点；都不接受时返回 `None`。
+    pub(crate) fn select(&self, method: AccessMethod) -> Option<&Endpoint<C, S>> {
+        self.entries_
+            .iter()
+            .find(|endpoint| endpoint.accepts(method))
+    }
+
+    /// 集合内所有端点方法集合的并集（`405` 的 `Allow`）。
+    pub(crate) fn allowed(&self) -> MethodSet {
+        self.entries_
+            .iter()
+            .fold(MethodSet::NONE, |allowed, endpoint| {
+                allowed.union(endpoint.methods())
+            })
     }
 }

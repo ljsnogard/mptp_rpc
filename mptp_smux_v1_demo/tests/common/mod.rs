@@ -161,6 +161,12 @@ impl SceneFixture {
                             },
                         )
                         .expect("装配测试路由");
+                    let router = router
+                        .view("test/multi", TestMultiView)
+                        .expect("装配测试路由");
+                    let router = router
+                        .pull("test/multi", TestMultiPull)
+                        .expect("装配测试路由");
                     let servlet = Rc::new(MptpServlet::<ServingCfg, _>::new(router));
                     let _cleanup = ConnCleanup_(ctx.clone());
                     let _ = serve_connection_(shared, servlet, ctx, task_scope).await;
@@ -402,6 +408,50 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
             probe.body_remaining = remaining;
             probe.body_finished = finished;
             probe.done = true;
+            Ok(())
+        })
+    }
+}
+
+/// `View /test/multi`：同路径多方法测试的 View 侧（回复一个标记头）。
+///
+/// `View /test/multi`: the VIEW side of the same-path multi-method test.
+struct TestMultiView;
+
+impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestMultiView {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            let mut response = ctx.response(Status::Ok);
+            response.header("X-Multi-Route", HeaderVal::from_text("view"));
+            response.no_body_async().await?;
+            Ok(())
+        })
+    }
+}
+
+/// `Pull /test/multi`：同路径多方法测试的 Pull 侧（写一个事件后收尾）。
+///
+/// `Pull /test/multi`: the PULL side of the same-path multi-method test.
+struct TestMultiPull;
+
+impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for TestMultiPull {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            let event = PlanetEvent::Removed {
+                planet_id: 9u64,
+                version: 1u64,
+            };
+            let bytes = encode_to_vec_async_(&event)
+                .await
+                .map_err(|err| ServeError::Target {
+                    detail: err.to_string(),
+                })?;
+            let mut stream: SuffixStream<'_, C> =
+                ctx.response(Status::Ok).suffix_stream_async().await?;
+            stream.write_chunk_async(&bytes).await?;
+            let _ = stream.finish_async().await;
             Ok(())
         })
     }

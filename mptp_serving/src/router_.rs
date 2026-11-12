@@ -22,10 +22,10 @@ use core::alloc::Allocator;
 
 use abs_mptp::spec::access_method::AccessMethod;
 use matchit_route::Router as Trie;
-use mptp_smux::serving::config::TrConfig;
 use mptp_smux::MethodSet;
+use mptp_smux::serving::config::TrConfig;
 
-use super::endpoint_::Endpoint;
+use super::endpoint_::{Endpoint, EndpointSet};
 use super::handler_::TrEndpointHandler;
 use super::middleware_::{Pipeline, TrMiddleware};
 use super::route_params_::RouteParams;
@@ -67,29 +67,33 @@ where
     C: TrConfig,
 {
     /// 在「相对于本 router 根」的 `location` 上匹配。
-    fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C, S>;
+    fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str)
+    -> MatchOutcome<'f, C, S>;
 }
 
 /// 默认实现：分层 router。
 ///
-/// `C` 是服务端配置类型，`A` 是子 router 列表的分配器（缺省 [`Global]），`S` 是连接作用域
-/// 状态（缺省 `()`）。当前是**装配期**构建（消费式 `bind` / `bind_router`，无运行期增删）；
+/// `C` 是服务端配置类型，`A` 是子 router 列表与同路径端点集合的分配器（缺省 [`Global`]），
+/// `S` 是连接作用域状态（缺省 `()`）。当前是**装配期**构建（消费式 `bind` / `bind_router`，无运行期增删）；
 /// 运行期增删需要 no_std 读多写少锁，属后续 round。
 pub struct RadixRouter<C, A = Global, S = ()>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync,
+    A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
 {
     /// 本层根 endpoint：所有未命中的请求都由它兜底。
     root_: Arc<dyn TrEndpointHandler<C, S>>,
 
-    /// handler 规则：精确路径模式 → 端点。
-    trie_: Trie<Endpoint<C, S>>,
+    /// handler 规则：精确路径模式 → 同路径端点集合（一个路径可挂多个方法）。
+    trie_: Trie<EndpointSet<C, S, Arc<A>>>,
 
     /// 子 router 规则：静态前缀 → 子 router 匹配器。
+    ///
+    /// 用 `Arc<A>` 而不是 `A` 作分配器：同路径追加端点时要从这里克隆分配器给新集合，
+    /// 而 `A: Allocator` 本身并不要求 `Clone`。
     #[allow(clippy::type_complexity)]
-    routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C, S>>), A>,
+    routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C, S>>), Arc<A>>,
 
     /// 请求路径上的中间件链（装配期构建，请求路径只读）。
     pipeline_: Pipeline<C, S>,
@@ -110,7 +114,7 @@ where
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(Global),
+            routers_: Vec::new_in(Arc::new(Global)),
             pipeline_: Pipeline::new(),
             state_: Arc::new(()),
             cancel_source_: Arc::new(CancellationSource::new()),
@@ -121,14 +125,14 @@ where
 impl<C, A> RadixRouter<C, A, ()>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync,
+    A: Allocator + Send + Sync + 'static,
 {
     /// 用根 handler 与显式分配器构造（无连接状态）。
     pub fn new_in(root: Arc<dyn TrEndpointHandler<C, ()>>, alloc: A) -> Self {
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(alloc),
+            routers_: Vec::new_in(Arc::new(alloc)),
             pipeline_: Pipeline::new(),
             state_: Arc::new(()),
             cancel_source_: Arc::new(CancellationSource::new()),
@@ -146,7 +150,7 @@ where
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(Global),
+            routers_: Vec::new_in(Arc::new(Global)),
             pipeline_: Pipeline::new(),
             state_: state,
             cancel_source_: Arc::new(CancellationSource::new()),
@@ -157,7 +161,7 @@ where
 impl<C, A, S> RadixRouter<C, A, S>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync,
+    A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
 {
     /// 用根 handler、连接状态与显式分配器构造。
@@ -169,7 +173,7 @@ where
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(alloc),
+            routers_: Vec::new_in(Arc::new(alloc)),
             pipeline_: Pipeline::new(),
             state_: state,
             cancel_source_: Arc::new(CancellationSource::new()),
@@ -199,17 +203,17 @@ where
     /// 绑定一条 handler 规则：`pattern` + 方法集合 + 终端处理器。
     ///
     /// 消费式构建；`pattern` 是相对本 router 根的路径模式（支持 `{name}` / `{*rest}`）。
-    /// 同路径同方法冲突时返回 [`matchit_route::InsertError`]。
+    /// 同一 `pattern` 可以绑定多次：每次追加一个端点，匹配时按插入顺序取第一个接受该方法的
+    /// 端点（设计稿 §6.7 的 `feeds/{id}` 同时挂 `VIEW` + `PULL`）。
+    /// **同路径同方法不做冲突检测**，先插入的端点先命中；装配者应让同路径的方法集合互不相交。
     pub fn bind(
-        mut self,
+        self,
         pattern: &'static str,
         methods: MethodSet,
         handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         let endpoint = Endpoint::new(pattern, methods, Arc::new(handler));
-        let normalized = normalize_(endpoint.pattern());
-        self.trie_.insert(normalized, endpoint)?;
-        Result::Ok(self)
+        self.bind_endpoint(endpoint)
     }
 
     /// 直接绑定一个已经构造好的端点。
@@ -218,12 +222,23 @@ where
     /// [`Endpoint::with_metadata`](super::Endpoint::with_metadata) 挂上元数据的
     /// [`Endpoint`]，供「先造端点、追加元数据、再登记进路径树」的装配路径使用（RPC 宏生成
     /// 的端点正是这种形状）。`pattern` / `methods` 取自端点自身。
+    ///
+    /// 同 `pattern` 的多次绑定会合并到同一个端点集合（见 [`bind`](Self::bind) 的方法选择
+    /// 约定），因此一条路径可以同时挂多个不同方法集合的端点。
     pub fn bind_endpoint(
         mut self,
         endpoint: Endpoint<C, S>,
     ) -> Result<Self, matchit_route::InsertError> {
         let normalized = normalize_(endpoint.pattern());
-        self.trie_.insert(normalized, endpoint)?;
+        // 同路径已有端点时取出集合追加；没有则用本 router 的分配器新建集合。
+        // 先 `remove` 再 `insert` 是 `matchit_route` 目前唯一的「按路由模式取回值」路径，
+        // 移除后马上插回同一路由，因此不会破坏其它路由。
+        let mut set = match self.trie_.remove(normalized) {
+            Option::Some(set) => set,
+            Option::None => EndpointSet::new_in(self.routers_.allocator().clone()),
+        };
+        set.push(endpoint);
+        self.trie_.insert(normalized, set)?;
         Result::Ok(self)
     }
 
@@ -328,12 +343,21 @@ where
 impl<C, A, S> TrRouteMatcher<C, S> for RadixRouter<C, A, S>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync,
+    A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
 {
-    fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C, S> {
-        // 1. 本层 handler 规则：路径 + 方法精确命中。
-        match match_method_(&self.trie_, method, location, Endpoint::methods) {
+    fn match_route<'f>(
+        &'f self,
+        method: AccessMethod,
+        location: &'f str,
+    ) -> MatchOutcome<'f, C, S> {
+        // 1. 本层 handler 规则：路径 + 方法精确命中（同路径多端点按方法选一个）。
+        match match_method_(
+            &self.trie_,
+            location,
+            |set| set.select(method),
+            |set| set.allowed(),
+        ) {
             Matched::Root => {}
             other => return other,
         }
@@ -354,23 +378,23 @@ where
 ///
 /// 与 `C` / `S` 无关，因此可以在单测里用简单值类型（如 `&'static str`）验证；生产路径由
 /// [`RadixRouter::match_route`] 以 `V = Endpoint<C, S>` 调用。
-fn match_method_<'f, V>(
+fn match_method_<'f, V, E>(
     trie: &'f Trie<V>,
-    method: AccessMethod,
     location: &'f str,
-    methods_of: fn(&V) -> MethodSet,
-) -> Matched<'f, V> {
+    select: impl Fn(&'f V) -> Option<&'f E>,
+    allowed: impl Fn(&'f V) -> MethodSet,
+) -> Matched<'f, E> {
     match trie.at(normalize_(location)) {
         Result::Ok(matched) => {
             let matchit_route::Match { value, params } = matched;
-            let allowed = methods_of(value);
-            if allowed.contains(method) {
-                Matched::Found {
-                    value,
+            match select(value) {
+                Option::Some(endpoint) => Matched::Found {
+                    value: endpoint,
                     params: RouteParams::new_(params),
-                }
-            } else {
-                Matched::MethodNotAllowed { allowed }
+                },
+                Option::None => Matched::MethodNotAllowed {
+                    allowed: allowed(value),
+                },
             }
         }
         Result::Err(_) => Matched::Root,
@@ -406,17 +430,22 @@ mod tests_ {
     /// 测试路径 + 方法都命中时返回 `Found` 与零拷贝参数。
     /// Test that a matching path and method return `Found` with zero-copy params.
     ///
-    /// - 手段：登记 `feeds/{id}` 并用 `View` 匹配 `feeds/42`。
+    /// - 手段：登记 `feeds/{id}`，选择闭包按 `View` 命中并用 `feeds/42` 匹配。
     /// - 判断：结果是 `Found`，值为 `"feed"`，参数 `id == "42"`。
     ///
-    /// - Means: register `feeds/{id}` and match `feeds/42` with `View`.
+    /// - Means: register `feeds/{id}`, let the selector accept `View`, match `feeds/42`.
     /// - Verdict: the result is `Found`, the value is `"feed"` and `id == "42"`.
     #[test]
     fn found_with_params_() {
         let mut trie = Trie::new();
         trie.insert("feeds/{id}", "feed").expect("登记规则");
 
-        let matched = match_method_(&trie, AccessMethod::View, "feeds/42", |_| MethodSet::VIEW);
+        let matched = match_method_(
+            &trie,
+            "feeds/42",
+            |_: &&'static str| Option::Some(&"feed"),
+            |_: &&'static str| MethodSet::VIEW,
+        );
         match matched {
             Matched::Found { value, params } => {
                 assert_eq!(*value, "feed");
@@ -429,17 +458,22 @@ mod tests_ {
     /// 测试路径命中但方法不允许时返回 `MethodNotAllowed` 与允许集合。
     /// Test that a path hit with a disallowed method reports `MethodNotAllowed`.
     ///
-    /// - 手段：登记 `echo`（只允许 `View`），用 `Call` 匹配。
+    /// - 手段：登记 `echo`（允许集合 `View`），选择闭包返回 `None`。
     /// - 判断：结果是 `MethodNotAllowed { allowed: VIEW }`。
     ///
-    /// - Means: register `echo` for `View` only and match it with `Call`.
+    /// - Means: register `echo` with an allowed set of `View` and let the selector reject.
     /// - Verdict: the result is `MethodNotAllowed { allowed: VIEW }`.
     #[test]
     fn method_not_allowed_() {
         let mut trie = Trie::new();
         trie.insert("echo", "echo").expect("登记规则");
 
-        let matched = match_method_(&trie, AccessMethod::Call, "echo", |_| MethodSet::VIEW);
+        let matched = match_method_(
+            &trie,
+            "echo",
+            |_: &&'static str| Option::None::<&&'static str>,
+            |_: &&'static str| MethodSet::VIEW,
+        );
         match matched {
             Matched::MethodNotAllowed { allowed } => assert_eq!(allowed, MethodSet::VIEW),
             _ => panic!("应当 MethodNotAllowed，实际命中了其它分支"),
@@ -457,8 +491,133 @@ mod tests_ {
     #[test]
     fn root_fallback_() {
         let trie = Trie::<&'static str>::new();
-        let matched = match_method_(&trie, AccessMethod::View, "nowhere", |_| MethodSet::ALL);
+        let matched = match_method_(
+            &trie,
+            "nowhere",
+            |_: &&'static str| Option::None::<&&'static str>,
+            |_: &&'static str| MethodSet::ALL,
+        );
         assert!(matches!(matched, Matched::Root));
+    }
+
+    /// 测试用端点值：只关心名字与方法集合，用于纯匹配逻辑测试。
+    #[derive(Clone, Copy, Debug)]
+    struct TestValue {
+        /// 端点名字。
+        name_: &'static str,
+
+        /// 本端点接受的方法集合。
+        methods_: MethodSet,
+    }
+
+    /// 测试同一路径上的多个端点按方法各选其一（设计稿 §6.7 的 VIEW + PULL）。
+    /// Test that multiple endpoints on one path are selected by method.
+    ///
+    /// - 手段：同一条 `feeds/{id}` 上挂 `view`（VIEW）与 `pull`（PULL）两个值，分别用
+    ///   `View` / `Pull` 调 `match_method_`，选择闭包按方法集合命中。
+    /// - 判断：两次都返回 `Found`，选中值的名字分别是 `view` / `pull`——同路径不再被
+    ///   「一个端点」限制。
+    ///
+    /// - Means: put `view` (VIEW) and `pull` (PULL) on one `feeds/{id}` and match with
+    ///   `View` / `Pull`, selecting by the endpoint method set.
+    /// - Verdict: both return `Found` with the corresponding value name.
+    #[test]
+    fn same_path_selects_by_method_() {
+        let mut trie = Trie::new();
+        trie.insert(
+            "feeds/{id}",
+            alloc::vec![
+                TestValue {
+                    name_: "view",
+                    methods_: MethodSet::VIEW,
+                },
+                TestValue {
+                    name_: "pull",
+                    methods_: MethodSet::PULL,
+                },
+            ],
+        )
+        .expect("登记规则");
+
+        let view = match_method_(
+            &trie,
+            "feeds/42",
+            |set| {
+                set.iter()
+                    .find(|value| value.methods_.contains(AccessMethod::View))
+            },
+            |set| {
+                set.iter()
+                    .fold(MethodSet::NONE, |acc, value| acc.union(value.methods_))
+            },
+        );
+        match view {
+            Matched::Found { value, params } => {
+                assert_eq!(value.name_, "view");
+                assert_eq!(params.get("id"), Option::Some("42"));
+            }
+            _ => panic!("View 应当命中 view 端点"),
+        }
+
+        let pull = match_method_(
+            &trie,
+            "feeds/42",
+            |set| {
+                set.iter()
+                    .find(|value| value.methods_.contains(AccessMethod::Pull))
+            },
+            |set| {
+                set.iter()
+                    .fold(MethodSet::NONE, |acc, value| acc.union(value.methods_))
+            },
+        );
+        match pull {
+            Matched::Found { value, .. } => assert_eq!(value.name_, "pull"),
+            _ => panic!("Pull 应当命中 pull 端点"),
+        }
+    }
+
+    /// 测试同路径 405 的 `Allow` 是集合内所有端点方法的并集。
+    /// Test that the 405 `Allow` set is the union of every endpoint on the path.
+    ///
+    /// - 手段：同一条 `feeds/{id}` 上挂 VIEW 与 PULL，用 `Call` 匹配，选择闭包全部拒绝。
+    /// - 判断：`MethodNotAllowed { allowed }` 等于 `VIEW | PULL`——不是第一个端点的方法。
+    ///
+    /// - Means: put VIEW and PULL on one path, match with `Call`, and reject in selection.
+    /// - Verdict: `allowed` equals `VIEW | PULL`, not just the first endpoint's set.
+    #[test]
+    fn allowed_is_union_on_405_() {
+        let mut trie = Trie::new();
+        trie.insert(
+            "feeds/{id}",
+            alloc::vec![
+                TestValue {
+                    name_: "view",
+                    methods_: MethodSet::VIEW,
+                },
+                TestValue {
+                    name_: "pull",
+                    methods_: MethodSet::PULL,
+                },
+            ],
+        )
+        .expect("登记规则");
+
+        let matched = match_method_(
+            &trie,
+            "feeds/42",
+            |_: &Vec<TestValue>| Option::None::<&TestValue>,
+            |set| {
+                set.iter()
+                    .fold(MethodSet::NONE, |acc, value| acc.union(value.methods_))
+            },
+        );
+        match matched {
+            Matched::MethodNotAllowed { allowed } => {
+                assert_eq!(allowed, MethodSet::VIEW.union(MethodSet::PULL));
+            }
+            _ => panic!("应当 MethodNotAllowed，实际命中了其它分支"),
+        }
     }
 
     /// 测试路径规范化去掉了首尾斜杠。
@@ -485,7 +644,10 @@ mod tests_ {
     /// - Verdict: the first yields `goods`, the second `None`, the third an empty slice.
     #[test]
     fn strip_prefix_on_segment_boundary_() {
-        assert_eq!(strip_prefix_("api/v1", "/api/v1/goods"), Option::Some("goods"));
+        assert_eq!(
+            strip_prefix_("api/v1", "/api/v1/goods"),
+            Option::Some("goods")
+        );
         assert_eq!(strip_prefix_("api/v1", "/api/v10/goods"), Option::None);
         assert_eq!(strip_prefix_("api/v1", "/api/v1"), Option::Some(""));
     }
