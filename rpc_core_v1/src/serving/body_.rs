@@ -13,7 +13,7 @@
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use mp_denco::{MpDecoder, MpEncoder};
 use mptp_smux::serving::config::TrConfig;
-use mptp_smux::serving::ServingSession;
+use mptp_smux::serving::{ServingSession, SuffixStream};
 use mptp_smux::ServeError;
 
 use crate::x_deps::abs_cancel::{NonCancellableToken, TrMayCancel};
@@ -98,6 +98,25 @@ where
         .response(status)
         .sized_async(&mut src, len)
         .await?;
+    Result::Ok(())
+}
+
+/// 把一个业务值编码并作为后缀流的一个 chunk 写出（controller 形态 `Pull` 端点用）。
+///
+/// # Errors
+///
+/// MessagePack 编码失败返回 [`ServeError::Target`]；写 chunk 失败返回
+/// [`ServeError::Transport`]。
+pub async fn write_stream_item_async<'a, C, T>(
+    stream: &mut SuffixStream<'a, C>,
+    value: &T,
+) -> Result<(), ServeError>
+where
+    C: TrConfig,
+    T: ?Sized + TrEncodable,
+{
+    let bytes = encode_value_async_(value).await?;
+    stream.write_chunk_async(bytes.as_slice()).await?;
     Result::Ok(())
 }
 

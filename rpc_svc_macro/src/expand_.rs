@@ -499,6 +499,7 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
     let steps = model
         .methods_
         .iter()
+        .filter(|method| !matches!(method.endpoint_.method_, MethodKind_::Pull))
         .map(|method| endpoint_step_fn_(self_ty, method))
         .collect::<syn::Result<Vec<_>>>()?;
     let handlers = model
@@ -523,7 +524,9 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
             use super::*;
             use ::mptp_serving::{Endpoint, MethodSet, MptpContext, RadixRouter, TrEndpointHandler};
             use ::mptp_serving::x_deps::mptp_smux::{ServeError, serving::config::TrConfig};
-            use ::rpc_core_v1::serving::{TrReplyError, decode_body_async, write_ok_async, write_status_async};
+            use ::rpc_core_v1::serving::{TrReplyError, decode_body_async, write_ok_async, write_status_async, write_stream_item_async};
+            use ::rpc_core_v1::x_deps::abs_async_iter::TrAsyncIterator;
+            use ::rpc_core_v1::x_deps::abs_mptp::spec::Status;
 
             #(#steps)*
             #(#handlers)*
@@ -663,6 +666,9 @@ fn handler_impl_(
     self_ident: &syn::Ident,
     method: &EndpointMethodModel_,
 ) -> syn::Result<::zyn::TokenStream> {
+    if matches!(method.endpoint_.method_, MethodKind_::Pull) {
+        return pull_handler_impl_(self_ident, method);
+    }
     let handler_ident = handler_ident_(self_ident, &method.ident_);
     let step_async_ident = step_async_ident_(self_ident, &method.ident_);
     let params = method_params_(method)?;
@@ -755,6 +761,111 @@ fn install_into_(self_ident: &syn::Ident, model: &ControllerModel_) -> ::zyn::To
     }
 }
 
+/// 生成一个 `Pull` 端点的流处理器：解码路径参数 → 调方法取迭代器 → 逐项写后缀流。
+fn pull_handler_impl_(
+    self_ident: &syn::Ident,
+    method: &EndpointMethodModel_,
+) -> syn::Result<::zyn::TokenStream> {
+    let handler_ident = handler_ident_(self_ident, &method.ident_);
+    let method_ident = &method.ident_;
+    stream_item_ty_(method)?;
+    let params = method_params_(method)?;
+
+    let mut decode_stmts = Vec::new();
+    let mut call_args = Vec::new();
+    for (ident, ty) in &params {
+        let key = ident.to_string();
+        decode_stmts.push(quote! {
+            let #ident: #ty = match ctx.route().get_typed(#key) {
+                Option::Some(Result::Ok(value)) => value,
+                _ => {
+                    ctx.session_mut().response(Status::BadRequest).no_body_async().await?;
+                    return Result::Ok(());
+                }
+            };
+        });
+        call_args.push(ident.clone());
+    }
+
+    Result::Ok(quote! {
+        #[doc(hidden)]
+        impl<C: TrConfig, S> TrEndpointHandler<C, S> for #handler_ident {
+            fn handle<'a, 'f>(
+                &'a self,
+                ctx: &'a mut MptpContext<'f, C, S>,
+            ) -> ::core::pin::Pin<
+                ::std::boxed::Box<
+                    dyn ::core::future::Future<Output = Result<(), ServeError>> + 'a
+                >
+            > {
+                ::std::boxed::Box::pin(async move {
+                    let cancel = ctx.cancel().child_token();
+                    #(#decode_stmts)*
+                    let mut iter: _ = self.svc_.#method_ident(#(#call_args),*);
+                    let mut stream = ctx
+                        .session_mut()
+                        .response(Status::Ok)
+                        .suffix_stream_async()
+                        .may_cancel_with(cancel.child_token())
+                        .await?;
+                    loop {
+                        match iter.next_async().may_cancel_with(cancel.child_token()).await {
+                            Result::Ok(item) => {
+                                write_stream_item_async(&mut stream, &item).await?;
+                            }
+                            Result::Err(_) => break,
+                        }
+                    }
+                    let _ = stream.finish_async().await;
+                    Result::Ok(())
+                })
+            }
+        }
+    })
+}
+
+/// 从 `impl TrAsyncIterator<Item = T, Err = E>` 返回类型里取 item 类型 `T`。
+fn stream_item_ty_(method: &EndpointMethodModel_) -> syn::Result<Type> {
+    let ReturnType::Type(_, ty) = &method.sig_.output else {
+        return Result::Err(syn::Error::new(
+            method.sig_.ident.span(),
+            "`Pull` 端点必须返回 `impl TrAsyncIterator<Item = T, Err = E>`",
+        ));
+    };
+    let Type::ImplTrait(impl_trait) = &**ty else {
+        return Result::Err(syn::Error::new(
+            ty.span(),
+            "`Pull` 端点必须返回 `impl TrAsyncIterator<Item = T, Err = E>`",
+        ));
+    };
+    for bound in &impl_trait.bounds {
+        let TypeParamBound::Trait(trait_bound) = bound else {
+            continue;
+        };
+        let Some(segment) = trait_bound.path.segments.last() else {
+            continue;
+        };
+        if segment.ident != "TrAsyncIterator" {
+            continue;
+        }
+        let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+            continue;
+        };
+        for arg in &args.args {
+            let syn::GenericArgument::AssocType(assoc) = arg else {
+                continue;
+            };
+            if assoc.ident == "Item" {
+                return Result::Ok(assoc.ty.clone());
+            }
+        }
+    }
+    Result::Err(syn::Error::new(
+        method.sig_.ident.span(),
+        "`Pull` 端点必须返回 `impl TrAsyncIterator<Item = T, Err = E>`",
+    ))
+}
+
 /// 访问方法种类 → [`MethodSet`] 表达式。
 fn method_set_expr_(kind: MethodKind_) -> ::zyn::TokenStream {
     match kind {
@@ -788,6 +899,7 @@ fn client_proxy_(
     let methods = model
         .methods_
         .iter()
+        .filter(|method| !matches!(method.endpoint_.method_, MethodKind_::Pull))
         .map(|method| controller_client_method_(self_ident, interface, method))
         .collect::<syn::Result<Vec<_>>>()?;
 

@@ -660,11 +660,12 @@ pub(crate) fn analyze_controller_(
                  请把借用放到参数上（`&self` + `&str` 之类）",
             ));
         }
-        if method.sig.asyncness.is_none() {
+        if method.sig.asyncness.is_none() && !matches!(endpoint.method_, MethodKind_::Pull) {
             return Result::Err(syn::Error::new(
                 method.sig.ident.span(),
                 "`#[rpc(interface = \"...\")]` 的端点方法必须是 `async fn`（宏会把它重写成 \
-                 `gen_may_cancel_future`）",
+                 `gen_may_cancel_future`）；`Pull` 端点用普通 `fn` 返回 \
+                 `impl TrAsyncIterator`",
             ));
         }
         // 剥离端点声明属性；其余属性（文档、`#[cfg]` 等）保留。
