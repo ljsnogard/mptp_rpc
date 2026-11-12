@@ -66,6 +66,9 @@
 #![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
+// 过渡期：`serving::Router` / `serving::RpcRouter` 已对下游标 `deprecated`，但本 crate
+// 自身的 impl 与单测仍引用它们；P4 删除这两类后一并移除本允许。
+#![allow(deprecated)]
 
 pub mod client;
 pub mod messaging;
