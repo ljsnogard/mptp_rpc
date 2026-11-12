@@ -288,6 +288,13 @@ pub trait TrEndpointHandler<C>: Send + Sync {
 
 业务代码里看不到 `MethodSet`、`EndpointMetadata`、中间件链、路径树。
 
+> **关于 future 的 `Send`（2026-11-12 修正）**：`HandlerFuture` / `MiddlewareFuture` **不要
+> 加 `+ Send`**。`gen_mcf2` 生成的带高阶类型的 future 无法被 Rust 编译器穿透解释，整条
+> `abs_buff` / `abs_denco` future 链天然 `!Send`，这是无解的。`Send` 边界应放在**分派层**：
+> `MptpServlet` 处理请求这一层可多线程分派，或把请求打包成 `Send` 对象经 `mpmc-chan` 交给
+> 另一条流水线；handler / 中间件在单条流水线上跑，future 无需 `Send`。handler / 中间件
+> 类型本身仍可 `Send + Sync`（`Arc<dyn TrEndpointHandler>` 装箱不受影响）。
+
 ### 6.7 路由树：复用 `matchit_route`，Salvo 式组织
 
 沿用 [`router-20261106-0112.md`](router-20261106-0112.md) 的分层 router：每个 router 以

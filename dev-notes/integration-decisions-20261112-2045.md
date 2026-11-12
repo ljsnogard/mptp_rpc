@@ -43,20 +43,28 @@ compio 单线程传输的 channel 半边是 `!Send`，无法挂到当前 handler
 倾向先按路径 1 做最小复刻（compio 场景价值高于抽象纯洁度），但要等 demo 迁移真正需要时再
 动手。
 
-### 2.1 补充（2026-11-12）：`Send` 问题不止 compio
+### 2.1 补充（2026-11-12）：`Send` 问题不止 compio，且不可在 future 层解
 
 尝试把 `rpc_demo`（tokio，`Send` 传输）的旧 `RpcRouter` 经 `ReqHandlerTarget` 挂到
 `RadixRouter` 时**编译失败**：旧 `TrReqHandler` 的 future（`RouterHandleFuture`）不是
 `Send`，无法装箱成 `Box<dyn Future + Send>`。
 
-即：**即使 channel 半边是 `Send` 的，`abs_buff` / `abs_denco` 这条 IO·编解码 future 链
-本身不是 `Send`**，导致旧 handler future 整体 `!Send`。这意味着决策 B 的「非 `Send`
-handler 变体」不只是 compio 需要——任何直接吃 `abs_buff` / `abs_denco` 的 handler 都可能
-撞上 `!Send`，而框架的 `Send`-by-design 与之冲突。
+**根因（团队确认）**：`gen_mcf2` 生成的**带高阶类型的 future** 无法被 Rust 编译器穿透解释，
+因此整条 `abs_buff` / `abs_denco` future 链上的 `!Send` **在 future 层无解**。
 
-下一步要先定位这条链里具体是哪个 future 不 `Send`（`read_async` / `write_response_prefix_async`
-/ denco encode 之一），再决定：是让那条 future `Send`、还是给框架加非 `Send` 变体、还是让
-`TrEndpointHandler` 的 future 去掉 `Send` 约束。
+**因此设计要改**：不要要求调用链上每个 future 都 `Send`，而是把 `Send` 边界放到**分派层**：
+
+1. **让 `MptpServlet` 处理请求这一层是 `Send`、可多线程分派**；或
+2. **把请求打包成 `Send` 对象，经 `mpmc-chan` 分派给另一条流水线**（`rpc_demo` 现有的
+   `RpcJob` + 队列 worker 就是这种形态，不是要消灭的东西）。
+
+落到框架上：
+
+- `TrEndpointHandler::handle` / `TrMiddleware::before` 的 future **去掉 `+ Send`**（handler /
+  中间件在单条流水线上跑，不需要 `Send`）；
+- `Send` 边界上移到「请求分派」：servlet 或更高层把请求打包成 `Send` 的 job，交给
+  `mpmc-chan` 队列 / 多线程 worker；
+- `ReqHandlerTarget` 不再要求旧 handler future `Send`，旧 handler 可原样接入。
 
 ## 3. 决策 C：`MptpConnection` 状态 owner
 
