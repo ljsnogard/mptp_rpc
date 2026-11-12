@@ -220,3 +220,115 @@ new transport-neutral mux trait, a separate session-driver crate, and a decision
 whether `Dock` is an MPTP addressing concept or a smux implementation detail. The right
 stability test is: add a second binding without changing `mptp_wire`, the protocol traits
 or the session driver.
+
+## 10. 补充：servlet 是否应该绑定 connection
+
+### 10.1 先纠正一个前提：当前 demo 不是“单 session 串行”
+
+当前实现并不要求一条 connection 同时只有一个活跃 session：
+
+- `serve_connection_async_` 在 accept 循环里对每条子流单独
+  `scope.spawn_local(servlet_for_session.serve_session_async(session))`
+  （[`server_.rs`](../mptp_smux_v1_demo/src/scene/server_.rs)）；
+- `MptpServlet::serve_session_async(&self, ...)` 只借用 `&self`，多个 session 任务共享
+  同一个 `Rc<MptpServlet>`；
+- 每条 `ServingSession` 自己持有 `SessionCore` 的 tx/rx，body / suffix 进度是 session
+  私有的；
+- 集成测试 `multiple_subscriptions_one_connection_` 在**同一条连接**上同时持有两个
+  `Pull`，并分别收到各自的事件。
+
+所以“冲突域”不是由串行化换来的；当前 demo 的 per-connection 状态（`ConnectionCtx`）
+可以被同一连接的多个并发 session 共享，靠的是 `Rc<RefCell<...>>` / `Cell` + 不在 await
+期间持有借用，而不是靠“一次只跑一个 session”。
+
+### 10.2 但你的判断仍然成立：绑定关系是约定，不是类型保证
+
+`MptpServlet` 目前只有 handler：
+
+```rust
+pub struct MptpServlet<C, H> {
+    handler_: H,
+    _use_c_: PhantomData<fn() -> C>,
+}
+```
+
+它不持有 connection / binding，也不持有 per-connection state。`server_.rs` 通过“每个
+TCP 连接新建一个 `SceneHandler` + 一个 `MptpServlet`”来保证隔离；`SceneHandler` 捕获
+`Rc<ConnectionCtx>`。这意味着：
+
+- 一条连接一个 servlet 是**调用约定**，不是 `MptpServlet` 的类型不变量；
+- 如果把同一个 servlet（或同一个 handler）复用到两条连接，handler 里的 per-connection
+  状态就会混在一起，冲突域扩大到这些连接，甚至整个 server；
+- 更麻烦的是，`handle_async` 只拿到 `method + ServingSession`，没有任何“这条 session
+  属于哪条连接”的上下文；如果 handler 不捕获状态，它根本无法区分连接。
+
+这确实是设计上的一个缺口。**servlet 文档说“一个 servlet 只服务一条连接”，但构造函数
+没有把它表达出来。**
+
+### 10.3 当前状态归属
+
+| 状态 | 当前归属 | 冲突域 |
+| --- | --- | --- |
+| 请求体 / 后缀进度、响应状态 | `ServingSession` | 单 session |
+| join 身份、own planet、保活、连接级取消 | `ConnectionCtx`（被 handler 捕获） | 单连接（实际）/ 可能被错误扩大（类型上） |
+| 目录、行星注册表、订阅 hub | `PlanetRegistry` / `SceneHub`（server 共享） | server |
+| 路由 / 方法分派 | `SceneHandler` | 连接（因为 handler 每连接一个） |
+
+前两行是合理的分层；问题在于第二行的 owner 是 handler，而不是 servlet/connection 对象。
+第三行是**有意共享**的 server 状态，不能也不应该被降为 per-connection；它靠短借用 +
+单线程避免交错，而不是靠隔离。因此“冲突域扩展到整个 server”要分两种：
+
+- 如果你指的是 per-connection 状态被共享，那么这是真实的 API 风险；
+- 如果你指的是目录 / hub，那它们本来就是 server 级共享资源，换成 connection-bound
+  servlet 也不会消失。
+
+### 10.4 如果让 servlet 绑定 connection，应该绑定什么
+
+建议把“绑定”拆成三件事，而不是只给 `MptpServlet` 加一个 connection 字段：
+
+1. **拥有 binding / listener**：`MptpServlet` 不再接收外部 `&mut DockBinding`，而是在
+   构造时持有一个 `DockBinding<C>`（或 connection handle）。这样它不可能被复用到
+   另一条连接，`listen_async` 也不需要调用者再传 binding。
+2. **拥有泛型连接状态 `S`**：`S` 由绑定/应用提供，`mptp_smux` 不解释它。servlet 暴露
+   `state()`，server loop 用它做保活 / 清理；handler 通过新入口拿到 `&S`。
+3. **保持 session 并发**：`serve_session_async(&self)` 仍然只借用 `&self`；传给 handler
+   的必须是共享 `&S`（`S` 内部用 `RefCell` / `Cell` / 原子），不能是 `&mut S`，否则
+   同一连接的多个 session 会互相阻塞，甚至无法同时存在。
+
+示意：
+
+```rust
+pub struct MptpServlet<C, H, S = ()> {
+    handler_: H,
+    state_: S,
+    binding_: DockBinding<C>,
+    ...
+}
+
+impl<C, H, S> MptpServlet<C, H, S> {
+    pub fn new(handler: H, state: S, binding: DockBinding<C>) -> Self;
+    pub fn state(&self) -> &S { &self.state_ }
+}
+```
+
+如果不想破坏现有 handler trait，可以分两步走：
+
+- **先加 `MptpConnection<C, H, S>`**：它 own binding + `MptpServlet` + `S`，只把
+  `state()` 暴露给 server loop；handler 暂时仍可捕获 `Rc<S>`。这不改变 `handle_async`
+  签名，但已经把连接/状态的生命周期收进一个对象。
+- **再讨论 `TrServeHandlerWithState`**：给 handler 传 `&S`。这是公共 API 变更，需要
+  明确 GAT / 取消 / 并发约束后再做。
+
+### 10.5 结论
+
+- 你说“servlet 应该绑定 connection”**方向是对的**：当前的一连接一 servlet 是构造约定，
+  类型没有保证；一旦误用，per-connection 状态会互相污染。
+- 但“当前设计成立的前提是单 session 串行”**不成立**：demo 已经支持同一连接上的并发
+  session；真正的问题是状态 owner 和类型约束，而不是并发模型。
+- 更准确的目标不是“把 connection 塞进 servlet”，而是：**让 connection-scoped 状态
+  有明确的 owner、生命周期和类型边界**。`MptpConnection<C,H,S>` 或
+  `MptpServlet<C,H,S>` 都可以；关键是 `S` 泛型、共享访问、不把 server 级资源误降为
+  connection 级，也不把 handler 变成隐式的连接状态容器。
+- 这与 `mptp_quic` 的讨论是同一个问题：传输中立的 core 需要一个连接对象；smux 和
+  QUIC 只是提供不同的 binding/connection 类型和状态。先把 connection scope 做对，
+  再谈 transport swap，否则每个绑定都会复制一套“隐式连接状态”约定。
