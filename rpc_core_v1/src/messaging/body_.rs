@@ -17,14 +17,19 @@ use core::mem::MaybeUninit;
 
 use abs_buff::{
     Demand, TrBuffRead, TrBuffWrite,
-    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrConsumerState},
+    buffer::{TrBuffSegmRef, TrBuffSegmView, TrConsumerState},
     error::{ReadErrTag, TrTaggedError},
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
-use mptp_wire::{chunked::ChunkedReader, limited::LimitedReader};
+use mptp_wire::limited::LimitedReader;
 use buffex::ring::Ring;
 use mp_denco::{MpDecoder, MpEncoder};
+
+#[cfg(test)]
+use abs_buff::buffer::TrBuffSegmMut;
+#[cfg(test)]
+use mptp_wire::chunked::ChunkedReader;
 
 use crate::x_deps::{abs_buff, abs_cancel};
 use super::error_::{RpcError, RpcResult};
@@ -77,6 +82,7 @@ where
 }
 
 /// 按请求头的体声明（定长 / 分块）直接从接收半边解码，不经过整段 `Vec`。
+#[cfg(test)]
 pub(crate) async fn decode_body_from_async_<V, R, K>(
     rx: &mut R,
     chunked: bool,
@@ -100,6 +106,7 @@ where
 /// 把一段已经在内存里的字节直接搬进发送半边。
 ///
 /// 不经过 `std::io` 适配层：借写段、把源字节搬进去、段回收时结算进度。
+#[cfg(test)]
 pub(crate) async fn write_body_async_<T, K>(
     tx: &mut T,
     bytes: &[u8],

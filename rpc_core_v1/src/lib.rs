@@ -1,74 +1,37 @@
 //! `rpc_core_v1`：`smux_v1` 之上的 MPTP RPC 核心库。
 //!
-//! # 当前阶段：Phase 1（宏所需的最小运行时）
+//! # 当前阶段：controller 形态的 RPC 运行时
 //!
-//! 本 crate 正在从「MPTP 的 rmp-serde 实现 + 七种 access method 的双端形状」重构为
-//! **RPC 语义层**。当前已经落地 `#[rpc(service = "...")]` 宏所依赖的最小运行时：
+//! 本 crate 为 `#[rpc(interface = "...")]` controller 形态提供运行时底座：
 //!
 //! - 客户端 / 服务端配置（连接、垛口、ring 工厂、分配约定）；
 //! - [`crate::messaging::RpcError`] / [`crate::messaging::RpcResult`] 与业务状态码映射；
-//! - [`crate::messaging::TrRpcInterface`] 与 `/{interface}/{service}` 路径拼装；
-//! - 客户端极简代理 [`crate::client::ClientProxy`]、[`crate::client::TrRpcClientExt`] 与通用 unary 调用；
-//! - 服务端一次调用的上下文 [`crate::serving::RpcCallCtx`]：解码请求、写回复、收尾；
-//! - interface 级内联 router [`crate::serving::RpcRouter`]：用户用 `add_service` 装具体
-//!   service 实现，命中后直接 dispatch；`#[rpc(service_of(...))]` 为 impl 类型补上
-//!   `abs_rpc_serv::service::TrRpcService`；
-//! - service 路径匹配统一使用 `matchit_route`；队列版旧契约与 `rpc_router_trie` 已移除；
-//! - body 的 MessagePack 流式编解码：ring 边编码边发送，定长 / 分块帧都可解码。
+//! - 客户端通用调用 [`crate::client::call_endpoint_async`]（controller 形态代理的方法糖）；
+//! - 服务端 body 编解码辅助 [`crate::serving`]：请求体解码、回复体 / 后缀流写出、
+//!   业务错误 → 状态映射（[`crate::serving::TrReplyError`]）；
+//! - 常用类型与宏集中在 [`preludes`]：`use rpc_core_v1::preludes::*;` 即可覆盖协议、
+//!   客户端与服务端的大部分入口。
 //!
-//! `#[rpc(service = "...")]` 只生成 trait 常量、body enum、客户端代理与服务端 dispatch；
-//! 它不再生成 worker 或 interface worker 组。服务端的组织由使用者显式调用
-//! `RpcRouter::add_service` 与顶层 `crate::serving::Router` 完成。
-//! 线上格式由 `mptp_wire` 拥有，本 crate 不再重复实现。
-//!
-//! # 已实现的契约
-//!
-//! - 路径只由 **interface + service** 组成，方法名**不出现在 path 上**；
-//! - 一个 service 的多个关联函数组织进一个 **body enum**；变体名直接用函数名，字段直接用
-//!   参数名，不再额外生成参数结构体；
-//! - service trait 的 `SERVICE_PATH` 由宏注入；客户端方法由宏对统一的 [`crate::client::ClientProxy`] 生成；
-//! - 服务端 dispatch 由宏生成 `match`，一次调用的解码 / 回复 / 收尾由 [`crate::serving::RpcCallCtx`] 承担；
-//! - 常用类型与宏集中在 [`preludes`]：`use rpc_core_v1::preludes::*;` 即可覆盖协议、客户端
-//!   与服务端的大部分入口。
-//!
-//! # 分层位置
-//!
-//! ```text
-//! ┌───────────────────────────────────────────────────────────────┐
-//! │ 本 crate（Phase 1）：RPC 语义 + 配置 + 分配约定               │
-//! ├───────────────────────────────────────────────────────────────┤
-//! │ mptp_smux：开流 → 交出 ring → 收发前缀；MptpServlet            │
-//! ├───────────────────────────────────────────────────────────────┤
-//! │ abs_mptp：协议形状（前缀 trait、访问方法、标准头、状态码、体）│
-//! ├───────────────────────────────────────────────────────────────┤
-//! │ abs_smux / smux_v1：多流连接契约与它的现成实现                │
-//! └───────────────────────────────────────────────────────────────┘
-//! ```
-//!
-//! [`crate::serving::RpcRouter`] 就在本 crate；它和 `crate::serving::Router` 都把
-//! 路径匹配委托给 `matchit_route`，项目里只有这一套路径匹配算法。需要 worker / 背压时，
-//! 在 handler 或 target 内部实现，不再拆出第二种 router。
+//! 服务端的路由与处理器由 `mptp_serving` 的 [`RadixRouter`](mptp_serving::RadixRouter) 承担；
+//! `#[rpc]` 宏（`rpc_svc_macro`）为每个端点生成 [`TrEndpointHandler`](mptp_serving::TrEndpointHandler)
+//! 并登记进路由表。线上格式由 `mptp_wire` 拥有，本 crate 不再重复实现。
 //!
 //! # 为什么两端在同一个库里
 //!
 //! MPTP 是**双向互相提供服务**的协议：一条连接的两端都可以发请求、也都可以提供服务。因此
-//! 本 crate 必须同时给出客户端与服务端的形状。Phase 1 之后，这条理由仍然成立：客户端有
-//! 通用 unary 调用，服务端有一次调用的解码 / 回复 / 收尾上下文。
+//! 本 crate 必须同时给出客户端与服务端的形状：客户端有通用 unary / endpoint 调用，服务端
+//! 有 body 编解码辅助。
 //!
 //! # `rpc_core_v1`: the RPC core on top of `smux_v1`
 //!
-//! Phase 1 provides the runtime behind `#[rpc]`: the unified error type, interface path
-//! composition, the minimal client proxy with unary calls, the per-call serving context,
-//! the interface-level [`crate::serving::RpcRouter`], and MessagePack body IO. Path matching
-//! is delegated to `matchit_route`; the wire format belongs to [`mptp_smux`], and body
-//! framing belongs to `abs_mptp`.
+//! The crate provides the runtime behind `#[rpc]`: the unified error type, the client
+//! endpoint call, and the serving body helpers. Routing and endpoint handling live in
+//! `mptp_serving`; the wire format belongs to [`mptp_smux`], and body framing belongs to
+//! `abs_mptp`.
 
 #![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
-// 过渡期：`serving::Router` / `serving::RpcRouter` 已对下游标 `deprecated`，但本 crate
-// 自身的 impl 与单测仍引用它们；P4 删除这两类后一并移除本允许。
-#![allow(deprecated)]
 
 pub mod client;
 pub mod messaging;
@@ -96,5 +59,4 @@ pub mod x_deps {
     pub use mptp_smux;
     pub use mptp_smux::x_deps::{abs_mm, abs_mptp, abs_smux};
     pub use mptp_wire;
-    pub use tlist;
 }

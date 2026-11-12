@@ -7,9 +7,8 @@
 //! /{interface}/{service}
 //! ```
 //!
-//! interface 的路径由用户手写（或由 `#[rpc(path = "...")]` 宏生成）；service 的路径
-//! 由 `#[rpc(service = "...")]` 注入 trait 的关联常量 [`TrRpcInterface::PATH`] 同级的
-//! `SERVICE_PATH`。客户端只持有一个 `MptpClient`，interface 由零大小类型参数携带。
+//! interface 的路径由使用者在实现 [`TrRpcInterface::PATH`] 时手写。客户端只持有一个
+//! `MptpClient`，interface 由零大小类型参数携带。
 //!
 //! # `interface_`: interface description and path composition
 //!
