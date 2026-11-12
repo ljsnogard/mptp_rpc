@@ -21,6 +21,7 @@ use mptp_smux::serving::config::TrConfig;
 use mptp_smux::serving::ServingSession;
 
 use super::route_params_::RouteParams;
+use super::RequestCancel;
 
 /// 一次请求的上下文。
 ///
@@ -44,19 +45,23 @@ where
 
     /// 连接作用域状态（共享借用）。
     state_: &'f S,
+
+    /// 请求级取消句柄（`Copy` 令牌，借用连接持有的取消源）。
+    cancel_: RequestCancel<'f>,
 }
 
 impl<'f, C, S> MptpContext<'f, C, S>
 where
     C: TrConfig,
 {
-    /// 由「方法 + 位置 + 路由参数 + 会话 + 状态」构造。
+    /// 由「方法 + 位置 + 路由参数 + 会话 + 状态 + 取消句柄」构造。
     pub(crate) fn new_(
         method: AccessMethod,
         location: &'f str,
         route: RouteParams<'f>,
         session: &'f mut ServingSession<C>,
         state: &'f S,
+        cancel: RequestCancel<'f>,
     ) -> Self {
         MptpContext {
             method_: method,
@@ -64,6 +69,7 @@ where
             route_: route,
             session_: session,
             state_: state,
+            cancel_: cancel,
         }
     }
 
@@ -103,5 +109,12 @@ where
     /// 连接作用域状态（共享借用）。
     pub fn state(&self) -> &S {
         self.state_
+    }
+
+    /// 请求级取消句柄（`Copy`）。
+    ///
+    /// 处理器 / 中间件用它派生子令牌，交给需要取消的 future（`may_cancel_with`）。
+    pub fn cancel(&self) -> RequestCancel<'f> {
+        self.cancel_
     }
 }

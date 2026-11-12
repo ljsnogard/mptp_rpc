@@ -26,8 +26,8 @@
 //! [`MptpContext`]）、[`TrMiddleware`] + [`Pipeline`]（线性“前置”中间件，按元数据短路）、
 //! [`ReqHandlerTarget`]（旧 `TrReqHandler` 适配）、`RouteParams`、[`TrRouteMatcher`] 与
 //! 默认实现 [`RadixRouter`]（复用 `matchit_route`），以及连接作用域状态 `S`（经
-//! [`MptpContext::state`] 注入），以及对象安全的取消句柄 [`RequestCancel`]（请求级取消
-//! 令牌进 `MptpContext` 属 P3 的下一步）。
+//! [`MptpContext::state`] 注入）与请求级取消句柄 [`RequestCancel`]（经
+//! [`MptpContext::cancel`] 注入，复用 `cantok_rs` 的 `Copy` 令牌）。
 
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]
@@ -40,7 +40,6 @@ mod handler_;
 mod metadata_;
 mod middleware_;
 mod req_handler_target_;
-mod request_cancel_;
 mod route_param_;
 mod route_params_;
 mod router_;
@@ -52,10 +51,14 @@ pub use handler_::TrEndpointHandler;
 pub use metadata_::EndpointMetadata;
 pub use middleware_::{Pipeline, TrMiddleware};
 pub use req_handler_target_::ReqHandlerTarget;
-pub use request_cancel_::RequestCancel;
 pub use route_param_::{RouteParamError, TrFromRouteParam};
 pub use route_params_::RouteParams;
 pub use router_::{MatchOutcome, RadixRouter, TrRouteMatcher};
+
+/// 请求级取消句柄：直接复用 [`cantok_rs`] 的 `Copy` 令牌，其 `cancellation()` 返回具体
+/// future 而非 `Box<dyn Future>`，因此不带 `Send` / `'static` 擦除负担。
+pub use cantok_rs::CancellationToken as RequestCancel;
+pub use cantok_rs::{CancellationFuture, CancellationSource};
 
 /// 访问方法集合：来自 [`mptp_smux`]，本 crate 不重复定义。
 pub use mptp_smux::MethodSet;
@@ -66,6 +69,50 @@ pub use mptp_smux::MethodSet;
 pub mod x_deps {
     pub use abs_cancel;
     pub use abs_mptp;
+    pub use cantok_rs;
     pub use matchit_route;
     pub use mptp_smux;
+}
+
+#[cfg(test)]
+mod tests_ {
+    use core::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
+    use abs_cancel::TrCancellationToken;
+
+    use crate::{CancellationSource, RequestCancel};
+
+    /// 测试 re-export 的 `RequestCancel` 是 `Copy`，取消 future 与底层 source 共享信号。
+    /// Test that the re-exported `RequestCancel` is `Copy` and its future shares the source.
+    ///
+    /// - 手段：从 source 派生令牌、断言 `Copy`、poll 取消 future 后再触发 `source.cancel()`。
+    /// - 判断：取消前 future 为 `Pending`；取消后 `is_cancelled` 为 `true` 且 future `Ready`。
+    ///
+    /// - Means: derive a token, assert `Copy`, poll its cancellation future, then cancel.
+    /// - Verdict: the future is `Pending` before cancellation and `Ready` after it.
+    #[test]
+    fn request_cancel_is_copy_and_shares_signal_() {
+        fn assert_copy_<T: Copy>() {}
+        assert_copy_::<RequestCancel<'static>>();
+
+        fn assert_token_<T: TrCancellationToken>() {}
+        assert_token_::<RequestCancel<'static>>();
+
+        let source = CancellationSource::new();
+        let token: RequestCancel<'_> = source.child_token();
+        assert!(!token.is_cancelled());
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut wait = pin!(token.cancellation());
+        assert!(matches!(wait.as_mut().poll(&mut cx), Poll::Pending));
+
+        assert!(source.cancel());
+        assert!(token.is_cancelled());
+        assert!(matches!(wait.as_mut().poll(&mut cx), Poll::Ready(())));
+    }
 }
