@@ -33,8 +33,12 @@ use bevy::{
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use mptp_smux_v1_demo::scene::{
-    PlanetDescriptor, PlanetDirectory, PlanetId,
+    PlanetDescriptor, PlanetDirectory, PlanetId, PlanetParams, PlanetTheme,
     net_::{NetCommand, NetEvent, NetHandle, spawn_net_thread_},
+    protocol_::{
+        K_ORBIT_RADIUS_MAX, K_ORBIT_RADIUS_MIN, K_ORBIT_SPEED_MAX, K_ORBIT_SPEED_MIN,
+        K_PLANET_RADIUS_MAX, K_PLANET_RADIUS_MIN, K_SPIN_SPEED_MAX, K_SPIN_SPEED_MIN,
+    },
 };
 
 #[path = "scene-client/mod.rs"]
@@ -65,30 +69,11 @@ struct SceneState {
     /// 是否已经执行过「默认订阅全部」。
     auto_subscribed: bool,
 
-    /// 自己的滑杆值。
-    speeds: SelfSpeeds,
+    /// 自己行星的最新可变参数（速度、半径、颜色、纹理主题）。
+    my_params: PlanetParams,
 
     /// 最近一次网络错误 / 连接状态。
     status: String,
-}
-
-/// 自己的速度滑杆值。
-#[derive(Clone, Copy, Debug)]
-struct SelfSpeeds {
-    /// 公转速度。
-    orbit: f32,
-
-    /// 自转速度。
-    spin: f32,
-}
-
-impl Default for SelfSpeeds {
-    fn default() -> Self {
-        SelfSpeeds {
-            orbit: 0.6f32,
-            spin: 1.2f32,
-        }
-    }
 }
 
 /// 观察模式。
@@ -178,11 +163,23 @@ struct NetResource(NetHandle);
 #[derive(Component)]
 struct SunLight;
 
-/// 行星可视化标记。
+/// 行星可视化标记，同时缓存当前外观，避免每帧重建纹理。
 #[derive(Component)]
 struct PlanetVisual {
     /// 行星标识。
     id: PlanetId,
+
+    /// 生成当前纹理时使用的颜色。
+    color_: u32,
+
+    /// 生成当前纹理时使用的主题。
+    theme_: PlanetTheme,
+
+    /// 当前网格缩放（行星半径）。
+    planet_radius_: f32,
+
+    /// 当前表面纹理句柄；颜色 / 主题变化时替换并释放旧纹理。
+    texture_: Handle<Image>,
 }
 
 /// 共享网格资源。
@@ -324,10 +321,7 @@ fn drain_net_events_(mut state: ResMut<SceneState>, net: Res<NetResource>) {
     while let Ok(event) = net.0.event_rx_.try_recv() {
         match event {
             NetEvent::Joined { descriptor } => {
-                state.speeds = SelfSpeeds {
-                    orbit: descriptor.orbit_speed,
-                    spin: descriptor.spin_speed,
-                };
+                state.my_params = descriptor.params;
                 state.my_planet = Some(descriptor.clone());
                 state.planets.insert(descriptor.id, descriptor.clone());
                 if state.subscriptions.insert(descriptor.id) {
@@ -357,14 +351,26 @@ fn drain_net_events_(mut state: ResMut<SceneState>, net: Res<NetResource>) {
                 }
             }
             NetEvent::PlanetEvent { planet_id, event } => match event {
-                mptp_smux_v1_demo::scene::PlanetEvent::Snapshot(planet)
-                | mptp_smux_v1_demo::scene::PlanetEvent::Updated(planet) => {
-                    state.planets.insert(planet_id, planet.clone());
-                    if state
+                mptp_smux_v1_demo::scene::PlanetEvent::Snapshot(planet) => {
+                    let is_mine = state
                         .my_planet
                         .as_ref()
-                        .is_some_and(|mine| mine.id == planet_id)
-                    {
+                        .is_some_and(|mine| mine.id == planet_id);
+                    state.planets.insert(planet_id, planet.clone());
+                    if is_mine {
+                        state.my_params = planet.params;
+                        state.my_planet = Some(planet);
+                    }
+                }
+                mptp_smux_v1_demo::scene::PlanetEvent::Updated(planet) => {
+                    let is_mine = state
+                        .my_planet
+                        .as_ref()
+                        .is_some_and(|mine| mine.id == planet_id);
+                    state.planets.insert(planet_id, planet.clone());
+                    // 自己拖动滑杆时本地值才是最新意图；不要用服务端回显覆盖它，
+                    // 否则滑杆会在网络往返期间回跳。服务端清洗范围与 UI 范围一致。
+                    if is_mine {
                         state.my_planet = Some(planet);
                     }
                 }
@@ -397,23 +403,55 @@ fn drain_net_events_(mut state: ResMut<SceneState>, net: Res<NetResource>) {
     }
 }
 
-/// 让可视化实体与「已订阅且已知」的行星集合保持一致。
+/// 让可视化实体与「已订阅且已知」的行星保持一致；外观变化时原地更新材质与缩放。
 fn sync_planet_entities_(
     mut commands: Commands,
     state: Res<SceneState>,
     assets: Res<PlanetAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    visuals: Query<(Entity, &PlanetVisual)>,
+    mut visuals: Query<(
+        Entity,
+        &mut PlanetVisual,
+        &mut Transform,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
 ) {
     let mut existing = BTreeSet::new();
-    for (entity, visual) in &visuals {
+    for (entity, mut visual, mut transform, material_handle) in &mut visuals {
         let visible =
             state.subscriptions.contains(&visual.id) && state.planets.contains_key(&visual.id);
-        if visible {
-            existing.insert(visual.id);
-        } else {
+        if !visible {
+            let old_texture = std::mem::take(&mut visual.texture_);
+            let _ = images.remove(&old_texture);
             commands.entity(entity).despawn();
+            continue;
+        }
+        existing.insert(visual.id);
+
+        let Some(planet) = state.planets.get(&visual.id) else {
+            continue;
+        };
+        let theme = PlanetTheme::from_wire_(planet.params.texture_theme);
+        if visual.color_ != planet.params.color || visual.theme_ != theme {
+            let base = color_of_(planet.params.color).to_srgba();
+            let texture = images.add(planet_surface_image(
+                planet.id,
+                theme,
+                [base.red, base.green, base.blue],
+            ));
+            let old_texture = std::mem::replace(&mut visual.texture_, texture.clone());
+            if let Some(mut material) = materials.get_mut(&material_handle.0) {
+                material.base_color_texture = Some(texture);
+                material.emissive = theme_emissive_(theme);
+            }
+            let _ = images.remove(&old_texture);
+            visual.color_ = planet.params.color;
+            visual.theme_ = theme;
+        }
+        if visual.planet_radius_ != planet.params.planet_radius {
+            transform.scale = Vec3::splat(planet.params.planet_radius);
+            visual.planet_radius_ = planet.params.planet_radius;
         }
     }
 
@@ -421,30 +459,43 @@ fn sync_planet_entities_(
         if !state.subscriptions.contains(id) || existing.contains(id) {
             continue;
         }
-        let radius = radius_of_(planet.id);
-        let base = color_of_(planet.color).to_srgba();
-        let surface = images.add(planet_surface_image(
+        let theme = PlanetTheme::from_wire_(planet.params.texture_theme);
+        let base = color_of_(planet.params.color).to_srgba();
+        let texture = images.add(planet_surface_image(
             planet.id,
+            theme,
             [base.red, base.green, base.blue],
         ));
         commands.spawn((
             Mesh3d(assets.unit_sphere.clone()),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::WHITE,
-                base_color_texture: Some(surface),
-                // 行星表面主要靠太阳的点光 / 平行光照亮，自发光只留一点点，
-                // 免得背光面完全看不见纹理。
-                emissive: LinearRgba::rgb(0.04f32, 0.04f32, 0.045f32),
+                base_color_texture: Some(texture.clone()),
+                emissive: theme_emissive_(theme),
                 perceptual_roughness: 0.88f32,
                 metallic: 0.0f32,
                 // 太阳点光很亮，岩石行星不该有大片镜面高光。
                 reflectance: 0.05f32,
                 ..default()
             })),
-            Transform::from_xyz(radius, 0.0f32, 0.0f32)
-                .with_scale(Vec3::splat(0.55f32 + radius * 0.03f32)),
-            PlanetVisual { id: *id },
+            Transform::from_xyz(planet.params.orbit_radius, 0.0f32, 0.0f32)
+                .with_scale(Vec3::splat(planet.params.planet_radius)),
+            PlanetVisual {
+                id: *id,
+                color_: planet.params.color,
+                theme_: theme,
+                planet_radius_: planet.params.planet_radius,
+                texture_: texture,
+            },
         ));
+    }
+}
+
+/// 不同纹理主题的基础自发光；熔岩主题在夜面保留一点余烬光。
+fn theme_emissive_(theme: PlanetTheme) -> LinearRgba {
+    match theme {
+        PlanetTheme::Lava => LinearRgba::rgb(0.45f32, 0.08f32, 0.01f32),
+        _ => LinearRgba::rgb(0.04f32, 0.04f32, 0.045f32),
     }
 }
 
@@ -459,10 +510,10 @@ fn update_orbits_(
         let Some(planet) = state.planets.get(&visual.id) else {
             continue;
         };
-        let radius = radius_of_(planet.id);
-        let angle = planet.orbit_speed * now + (planet.id as f32) * 0.7f32;
+        let radius = planet.params.orbit_radius;
+        let angle = planet.params.orbit_speed * now + (planet.id as f32) * 0.7f32;
         transform.translation = Vec3::new(angle.cos() * radius, 0.0f32, angle.sin() * radius);
-        transform.rotate_local_y(planet.spin_speed * time.delta_secs());
+        transform.rotate_local_y(planet.params.spin_speed * time.delta_secs());
     }
 }
 
@@ -572,21 +623,82 @@ fn scene_ui_(
         }
         ui.separator();
 
-        ui.heading("自己的速度");
-        let mut orbit = state.speeds.orbit;
-        let mut spin = state.speeds.spin;
-        let orbit_changed = ui
-            .add(egui::Slider::new(&mut orbit, 0.0f32..=3.0f32).text("公转速度"))
-            .changed();
-        let spin_changed = ui
-            .add(egui::Slider::new(&mut spin, 0.0f32..=6.0f32).text("自转速度"))
-            .changed();
-        if orbit_changed || spin_changed {
-            state.speeds = SelfSpeeds { orbit, spin };
-            let _ = net.0.cmd_tx_.try_send(NetCommand::UpdateSelf {
-                orbit_speed: orbit,
-                spin_speed: spin,
+        let mut params = state.my_params;
+        let mut params_changed = false;
+        ui.add_enabled_ui(state.my_planet.is_some(), |ui| {
+            ui.heading("行星参数");
+            params_changed |= ui
+                .add(
+                    egui::Slider::new(
+                        &mut params.orbit_speed,
+                        K_ORBIT_SPEED_MIN..=K_ORBIT_SPEED_MAX,
+                    )
+                    .text("公转速度"),
+                )
+                .changed();
+            params_changed |= ui
+                .add(
+                    egui::Slider::new(&mut params.spin_speed, K_SPIN_SPEED_MIN..=K_SPIN_SPEED_MAX)
+                        .text("自转速度"),
+                )
+                .changed();
+            params_changed |= ui
+                .add(
+                    egui::Slider::new(
+                        &mut params.orbit_radius,
+                        K_ORBIT_RADIUS_MIN..=K_ORBIT_RADIUS_MAX,
+                    )
+                    .text("轨道半径"),
+                )
+                .changed();
+            params_changed |= ui
+                .add(
+                    egui::Slider::new(
+                        &mut params.planet_radius,
+                        K_PLANET_RADIUS_MIN..=K_PLANET_RADIUS_MAX,
+                    )
+                    .text("行星半径"),
+                )
+                .changed();
+
+            let mut rgb = [
+                ((params.color >> 16) & 0xFFu32) as u8,
+                ((params.color >> 8) & 0xFFu32) as u8,
+                (params.color & 0xFFu32) as u8,
+            ];
+            ui.horizontal(|ui| {
+                ui.label("行星颜色");
+                if egui::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+                    params.color =
+                        (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+                    params_changed = true;
+                }
             });
+
+            let mut theme = PlanetTheme::from_wire_(params.texture_theme);
+            let mut theme_changed = false;
+            egui::ComboBox::from_label("纹理主题")
+                .selected_text(theme_label_(theme))
+                .show_ui(ui, |ui| {
+                    for candidate in PlanetTheme::ALL {
+                        if ui
+                            .selectable_value(&mut theme, candidate, theme_label_(candidate))
+                            .clicked()
+                        {
+                            theme_changed = true;
+                        }
+                    }
+                });
+            if theme_changed {
+                params.texture_theme = theme.wire_();
+                params_changed = true;
+            }
+
+            ui.small("修改会通过服务器广播给所有订阅者");
+        });
+        if params_changed {
+            state.my_params = params;
+            let _ = net.0.cmd_tx_.try_send(NetCommand::UpdateSelf { params });
         }
 
         ui.separator();
@@ -687,9 +799,16 @@ fn scene_ui_(
     Ok(())
 }
 
-/// 行星轨道半径（纯客户端显示选择）。
-fn radius_of_(planet_id: PlanetId) -> f32 {
-    4.0f32 + ((planet_id % 6u64) as f32) * 1.8f32
+/// 纹理主题的中文界面名称。
+fn theme_label_(theme: PlanetTheme) -> &'static str {
+    match theme {
+        PlanetTheme::Terran => "类地",
+        PlanetTheme::Ocean => "海洋",
+        PlanetTheme::Desert => "沙漠",
+        PlanetTheme::Ice => "冰封",
+        PlanetTheme::Lava => "熔岩",
+        PlanetTheme::Gas => "气态",
+    }
 }
 
 /// 把服务端的 `u32` 颜色解释成 RGB。

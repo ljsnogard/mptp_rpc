@@ -17,8 +17,7 @@ use anyhow::{Result, anyhow, bail};
 use compio::net::TcpListener;
 use flume::Receiver;
 use mptp_smux_v1_demo::scene::{
-    PlanetDescriptor, PlanetEvent, SceneClient,
-    protocol_::planet_uri_,
+    PlanetDescriptor, PlanetEvent, PlanetTheme, SceneClient, protocol_::planet_uri_,
     server_::serve_on_listener_async_,
 };
 
@@ -97,14 +96,21 @@ async fn smoke_async_() -> Result<()> {
     require(snapshot.version >= 1u64, "快照版本应当有效")?;
     println!("smoke：收到 B 快照 v{}", snapshot.version);
 
-    // 更新广播。
-    let ack = b.update_async_(1.1f32, 1.2f32).await?;
+    // 更新广播：速度与外观参数一起走完整的 PlanetParams。
+    let mut params = b_planet.params;
+    params.orbit_speed = 1.1f32;
+    params.spin_speed = 1.2f32;
+    params.orbit_radius = 8.5f32;
+    params.planet_radius = 1.1f32;
+    params.color = 0x33_66_CCu32;
+    params.texture_theme = PlanetTheme::Lava.wire_();
+    let ack = b.update_async_(params).await?;
     let updated = expect_updated_(&events_rx, b_planet.id).await?;
     require(
         updated.version == ack.version,
         "更新事件版本应当等于 ack 版本",
     )?;
-    require(updated.orbit_speed == 1.1f32, "公转速度应当同步")?;
+    require(updated.params.orbit_speed == 1.1f32, "公转速度应当同步")?;
 
     // 退订：显式清理提示 + 丢弃 Pull。
     let removed = a.unsubscribe_async_(b_planet.id).await?;
@@ -114,7 +120,9 @@ async fn smoke_async_() -> Result<()> {
     compio::time::sleep(Duration::from_millis(100u64)).await;
 
     // 退订后 B 的更新不再到达。
-    b.update_async_(2.1f32, 2.2f32).await?;
+    params.orbit_speed = 2.1f32;
+    params.spin_speed = 2.2f32;
+    b.update_async_(params).await?;
     match compio::time::timeout(K_QUIET, events_rx.recv_async()).await {
         Err(_) => {}
         Ok(Ok(event)) => bail!("退订后仍收到事件：{event:?}"),
@@ -127,7 +135,7 @@ async fn smoke_async_() -> Result<()> {
     let fresh = expect_snapshot_(&events_rx, b_planet.id).await?;
     println!("smoke：重新订阅快照 v{}", fresh.version);
     require(fresh.version == 3u64, "重新订阅应拿到最新版本 3")?;
-    require(fresh.orbit_speed == 2.1f32, "重新订阅应拿到最新速度")?;
+    require(fresh.params.orbit_speed == 2.1f32, "重新订阅应拿到最新速度")?;
 
     // B 断开：A 的订阅收到 Removed，服务端删除行星。
     println!("smoke：丢弃 B 的连接，等待 Removed");
@@ -144,9 +152,7 @@ async fn smoke_async_() -> Result<()> {
     let deadline = std::time::Instant::now() + K_TIMEOUT;
     loop {
         let directory = a.view_async_().await?;
-        if directory.planets.len() == 1usize
-            && directory.planets[0].id == a_planet.id
-        {
+        if directory.planets.len() == 1usize && directory.planets[0].id == a_planet.id {
             break;
         }
         if std::time::Instant::now() > deadline {

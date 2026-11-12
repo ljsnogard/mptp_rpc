@@ -16,13 +16,7 @@
 
 #![allow(dead_code)]
 
-use std::{
-    cell::RefCell,
-    future::Future,
-    net::SocketAddr,
-    rc::Rc,
-    time::Duration,
-};
+use std::{cell::RefCell, future::Future, net::SocketAddr, rc::Rc, time::Duration};
 
 use abs_art_facade::{TrJoinHandle, TrLocalScope};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
@@ -39,13 +33,13 @@ use mptp_smux::{
 };
 use mptp_smux_v1_demo::scene::{
     ClientCfg, ConnectionCtx, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId,
-    PlanetRegistry, SceneHandler, SceneHub, ServingCfg, UpdateAck,
+    PlanetParams, PlanetRegistry, SceneHandler, SceneHub, ServingCfg, UpdateAck,
     cfg_::Dock,
     conn_::{accept_conn_async_, dial_async_, share_conn_},
     protocol_::{
         JoinRequest, K_HDR_DIRECTORY_VERSION, K_HDR_PLANET_COUNT, K_SCENE_JOIN, K_SCENE_PLANETS,
-        K_SCENE_UNSUBSCRIBE, K_SCENE_UPDATE, UnsubscribeAck, UnsubscribeRequest, UpdateRequest, decode_value_async_, encode_to_vec_async_, header_u64_,
-        planet_uri_,
+        K_SCENE_UNSUBSCRIBE, K_SCENE_UPDATE, UnsubscribeAck, UnsubscribeRequest, UpdateRequest,
+        decode_value_async_, encode_to_vec_async_, header_u64_, planet_uri_,
     },
 };
 
@@ -129,8 +123,7 @@ impl SceneFixture {
                     let shared = share_conn_(conn);
                     let ctx = Rc::new(ConnectionCtx::new_(connection_id, registry, hub));
                     let handler = FixtureHandler::new_(SceneHandler::new_(ctx.clone()));
-                    let servlet =
-                        Rc::new(MptpServlet::<ServingCfg, FixtureHandler>::new(handler));
+                    let servlet = Rc::new(MptpServlet::<ServingCfg, FixtureHandler>::new(handler));
                     let _cleanup = ConnCleanup_(ctx.clone());
                     let _ = serve_connection_(shared, servlet, ctx, task_scope).await;
                 });
@@ -271,11 +264,12 @@ where
                     planet_id: index,
                     version: index,
                 };
-                let bytes = encode_to_vec_async_(&event)
-                    .await
-                    .map_err(|err| ServeError::Target {
-                        detail: err.to_string(),
-                    })?;
+                let bytes =
+                    encode_to_vec_async_(&event)
+                        .await
+                        .map_err(|err| ServeError::Target {
+                            detail: err.to_string(),
+                        })?;
                 stream
                     .write_chunk_async(&bytes)
                     .may_cancel_with(cancel.child_token())
@@ -292,10 +286,13 @@ where
                 id: 7u64,
                 owner: 1u64,
                 name: String::from("split-event"),
-                color: 0x12_34_56u32,
                 stream_uri: planet_uri_(7u64),
-                orbit_speed: 0.5f32,
-                spin_speed: 0.25f32,
+                params: PlanetParams {
+                    orbit_speed: 0.5f32,
+                    spin_speed: 0.25f32,
+                    color: 0x12_34_56u32,
+                    ..PlanetParams::default()
+                },
                 version: 3u64,
             });
             let bytes = encode_to_vec_async_(&event)
@@ -323,11 +320,13 @@ where
                 .await;
             Ok(())
         }
-        _ => handler
-            .scene_
-            .handle_async(method, session)
-            .may_cancel_with(cancel)
-            .await,
+        _ => {
+            handler
+                .scene_
+                .handle_async(method, session)
+                .may_cancel_with(cancel)
+                .await
+        }
     }
 }
 
@@ -391,10 +390,8 @@ impl SceneTestClient {
     ///
     /// 请求失败、状态非 200 或回复体解码失败时返回错误。
     pub async fn view_async_(&self) -> Result<PlanetDirectory> {
-        let mut resp = with_timeout_(async {
-            self.client_.view(K_SCENE_PLANETS).send_async().await
-        })
-        .await?;
+        let mut resp =
+            with_timeout_(async { self.client_.view(K_SCENE_PLANETS).send_async().await }).await?;
         ensure_ok_(&resp, K_SCENE_PLANETS)?;
         let mut view = resp.body_async().await?;
         let directory = decode_value_async_::<PlanetDirectory, _>(&mut view).await?;
@@ -407,10 +404,8 @@ impl SceneTestClient {
     ///
     /// 请求失败、状态非 200 或头缺失 / 非法时返回错误。
     pub async fn head_async_(&self) -> Result<(u64, u64)> {
-        let resp = with_timeout_(async {
-            self.client_.head(K_SCENE_PLANETS).send_async().await
-        })
-        .await?;
+        let resp =
+            with_timeout_(async { self.client_.head(K_SCENE_PLANETS).send_async().await }).await?;
         ensure_ok_(&resp, K_SCENE_PLANETS)?;
         let headers = resp.headers().ok_or_else(|| anyhow!("Head 回复没有头表"))?;
         let count = header_u64_(headers, K_HDR_PLANET_COUNT)
@@ -420,20 +415,13 @@ impl SceneTestClient {
         Ok((count, version))
     }
 
-    /// 修改自己的速度。
+    /// 用完整参数更新自己的行星。
     ///
     /// # Errors
     ///
     /// 请求失败、状态非 200 或回复体解码失败时返回错误。
-    pub async fn update_async_(
-        &self,
-        orbit_speed: f32,
-        spin_speed: f32,
-    ) -> Result<UpdateAck> {
-        let request = UpdateRequest {
-            orbit_speed,
-            spin_speed,
-        };
+    pub async fn update_async_(&self, params: PlanetParams) -> Result<UpdateAck> {
+        let request = UpdateRequest { params };
         let body = encode_to_vec_async_(&request).await?;
         let mut resp = with_timeout_(async {
             self.client_
@@ -465,15 +453,8 @@ impl SceneTestClient {
     /// # Errors
     ///
     /// 请求失败或状态非 200 时返回错误。
-    pub async fn pull_with_capacity_async_(
-        &self,
-        uri: &str,
-        capacity: usize,
-    ) -> Result<ScenePull> {
-        let mut resp = with_timeout_(async {
-            self.client_.pull(uri).send_async().await
-        })
-        .await?;
+    pub async fn pull_with_capacity_async_(&self, uri: &str, capacity: usize) -> Result<ScenePull> {
+        let mut resp = with_timeout_(async { self.client_.pull(uri).send_async().await }).await?;
         ensure_ok_(&resp, uri)?;
         let (tx, rx) = flume::bounded::<PlanetEvent>(capacity);
         let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
@@ -509,10 +490,7 @@ impl SceneTestClient {
     ///
     /// 请求本身失败时返回错误；状态码由调用者判断。
     pub async fn pull_status_async_(&self, uri: &str) -> Result<Status> {
-        let resp = with_timeout_(async {
-            self.client_.pull(uri).send_async().await
-        })
-        .await?;
+        let resp = with_timeout_(async { self.client_.pull(uri).send_async().await }).await?;
         Ok(resp.status())
     }
 
@@ -522,10 +500,7 @@ impl SceneTestClient {
     ///
     /// 请求本身失败时返回错误。
     pub async fn post_allow_async_(&self, uri: &str) -> Result<(Status, Option<String>)> {
-        let resp = with_timeout_(async {
-            self.client_.post(uri).send_async().await
-        })
-        .await?;
+        let resp = with_timeout_(async { self.client_.post(uri).send_async().await }).await?;
         let allow = resp
             .headers()
             .and_then(|headers| headers.try_get(mptp_smux::serving::K_TMP_ALLOW_HEADER_KEY))
@@ -672,3 +647,14 @@ pub async fn connect_and_join_(
     Ok((client, descriptor))
 }
 
+/// 在保持其它外观参数不变的前提下，构造一组新的速度参数。
+pub fn params_with_speeds_(
+    planet: &PlanetDescriptor,
+    orbit_speed: f32,
+    spin_speed: f32,
+) -> PlanetParams {
+    let mut params = planet.params;
+    params.orbit_speed = orbit_speed;
+    params.spin_speed = spin_speed;
+    params
+}

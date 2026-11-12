@@ -11,19 +11,16 @@
 //! Only plain data crosses the boundary. The network thread owns `SceneClient`, every
 //! pull task and the compio runtime; the Bevy thread only sends commands and drains events.
 
-use std::{
-    net::SocketAddr,
-    thread,
-};
+use std::{net::SocketAddr, thread};
 
 use abs_art_facade::TrLocalScope;
 use abs_mptp::spec::Status;
 use anyhow::{Result, anyhow};
 use flume::{Receiver, Sender};
 use mptp_smux::client::MptpClient;
+
 use crate::scene::{
-    ClientCfg,
-    PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId, SceneClient,
+    ClientCfg, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId, PlanetParams, SceneClient,
     protocol_::decode_value_async_,
 };
 
@@ -45,13 +42,10 @@ pub enum NetCommand {
         planet_id: PlanetId,
     },
 
-    /// 修改自己的公转 / 自转速度。
+    /// 用完整参数更新自己的行星。
     UpdateSelf {
-        /// 公转速度。
-        orbit_speed: f32,
-
-        /// 自转速度。
-        spin_speed: f32,
+        /// 新的完整参数。
+        params: PlanetParams,
     },
 
     /// 主动刷新目录。
@@ -122,11 +116,7 @@ impl Drop for NetHandle {
 /// # Errors
 ///
 /// 线程创建失败时返回错误（连接失败通过 [`NetEvent::Error`] 上报）。
-pub fn spawn_net_thread_(
-    addr: SocketAddr,
-    name: String,
-    color: u32,
-) -> Result<NetHandle> {
+pub fn spawn_net_thread_(addr: SocketAddr, name: String, color: u32) -> Result<NetHandle> {
     let (cmd_tx, cmd_rx) = flume::bounded::<NetCommand>(64usize);
     let (event_tx, event_rx) = flume::bounded::<NetEvent>(256usize);
 
@@ -196,25 +186,22 @@ async fn net_main_(
     }
 
     if let Result::Ok(directory) = client.view_async_().await {
-        let _ = event_tx
-            .send_async(NetEvent::Directory { directory })
-            .await;
+        let _ = event_tx.send_async(NetEvent::Directory { directory }).await;
     }
 
-    let mut pulls: std::collections::BTreeMap<PlanetId, PullTask_> = std::collections::BTreeMap::new();
+    let mut pulls: std::collections::BTreeMap<PlanetId, PullTask_> =
+        std::collections::BTreeMap::new();
 
     loop {
-        let command = match compio::time::timeout(
-            std::time::Duration::from_secs(1u64),
-            cmd_rx.recv_async(),
-        )
-        .await
-        {
-            Ok(Ok(command)) => Some(command),
-            Ok(Err(_)) => break,
-            // 每秒刷新一次目录；它同时是连接级保活请求。
-            Err(_) => None,
-        };
+        let command =
+            match compio::time::timeout(std::time::Duration::from_secs(1u64), cmd_rx.recv_async())
+                .await
+            {
+                Ok(Ok(command)) => Some(command),
+                Ok(Err(_)) => break,
+                // 每秒刷新一次目录；它同时是连接级保活请求。
+                Err(_) => None,
+            };
 
         match command {
             Some(NetCommand::Shutdown) => break,
@@ -228,11 +215,8 @@ async fn net_main_(
                     break;
                 }
             }
-            Some(NetCommand::UpdateSelf {
-                orbit_speed,
-                spin_speed,
-            }) => {
-                if let Result::Err(err) = client.update_async_(orbit_speed, spin_speed).await {
+            Some(NetCommand::UpdateSelf { params }) => {
+                if let Result::Err(err) = client.update_async_(params).await {
                     let _ = event_tx
                         .send_async(NetEvent::Error(format!("update 失败：{err:#}")))
                         .await;
@@ -242,7 +226,8 @@ async fn net_main_(
                 if pulls.contains_key(&planet_id) {
                     continue;
                 }
-                match spawn_pull_(client.client_().clone(), uri, planet_id, event_tx.clone()).await {
+                match spawn_pull_(client.client_().clone(), uri, planet_id, event_tx.clone()).await
+                {
                     Result::Ok(task) => {
                         pulls.insert(planet_id, task);
                     }
@@ -321,4 +306,3 @@ async fn spawn_pull_(
     });
     Ok(PullTask_ { handle_: handle })
 }
-

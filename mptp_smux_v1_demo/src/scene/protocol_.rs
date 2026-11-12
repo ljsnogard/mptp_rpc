@@ -19,8 +19,8 @@ use std::sync::Arc;
 use abs_buff::TrBuffRead;
 use abs_cancel::NonCancellableToken;
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
-use mptp_wire::HeaderKey;
 use mp_denco::{MpDecoder, MpEncoder};
+use mptp_wire::HeaderKey;
 
 /// 一颗行星的稳定标识。
 pub type PlanetId = u64;
@@ -68,6 +68,205 @@ pub fn parse_planet_uri_(uri: &str) -> Option<PlanetId> {
     uri.strip_prefix(K_PLANET_URI_PREFIX)?.parse().ok()
 }
 
+/// 公转速度下限（弧度 / 秒）。
+pub const K_ORBIT_SPEED_MIN: f32 = 0.0f32;
+
+/// 公转速度上限（弧度 / 秒）。
+pub const K_ORBIT_SPEED_MAX: f32 = 3.0f32;
+
+/// 自转速度下限（弧度 / 秒）。
+pub const K_SPIN_SPEED_MIN: f32 = 0.0f32;
+
+/// 自转速度上限（弧度 / 秒）。
+pub const K_SPIN_SPEED_MAX: f32 = 6.0f32;
+
+/// 轨道半径下限（世界单位）。太阳半径 2.2 + 行星最大半径 1.6 仍小于 4.0。
+pub const K_ORBIT_RADIUS_MIN: f32 = 4.0f32;
+
+/// 轨道半径上限（世界单位）。
+pub const K_ORBIT_RADIUS_MAX: f32 = 30.0f32;
+
+/// 行星自身半径下限（世界单位）。
+pub const K_PLANET_RADIUS_MIN: f32 = 0.2f32;
+
+/// 行星自身半径上限（世界单位）；与太阳半径相加仍小于轨道半径下限。
+pub const K_PLANET_RADIUS_MAX: f32 = 1.6f32;
+
+/// 缺省公转速度（弧度 / 秒）。
+pub const K_DEFAULT_ORBIT_SPEED: f32 = 0.6f32;
+
+/// 缺省自转速度（弧度 / 秒）。
+pub const K_DEFAULT_SPIN_SPEED: f32 = 1.2f32;
+
+/// 缺省轨道半径（世界单位）；实际分配时还会按行星标识错开。
+pub const K_DEFAULT_ORBIT_RADIUS: f32 = 6.0f32;
+
+/// 缺省行星半径（世界单位）。
+pub const K_DEFAULT_PLANET_RADIUS: f32 = 0.8f32;
+
+/// 行星表面纹理主题。
+///
+/// **线上是开放的 `u32`**（见 [`PlanetParams::texture_theme`]），这里只列出当前客户端
+/// 认识的主题。未知编号由客户端回退到 [`PlanetTheme::Terran`]，这样服务端 / 旧客户端
+/// 不会因为新增主题而无法解码。主题只影响客户端渲染，服务端只负责原样存储和广播。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlanetTheme {
+    /// 类地：海洋、大陆、云带与极冠。
+    #[default]
+    Terran,
+
+    /// 海洋：更高的海平面、更多云。
+    Ocean,
+
+    /// 沙漠：干燥地表与沙丘条带。
+    Desert,
+
+    /// 冰封：高反照率的冰原与裂纹。
+    Ice,
+
+    /// 熔岩：暗色岩壳与高温裂缝。
+    Lava,
+
+    /// 气态：明显的纬向条带。
+    Gas,
+}
+
+impl PlanetTheme {
+    /// 当前客户端支持的全部主题，顺序用于 UI 选择器。
+    pub const ALL: [PlanetTheme; 6] = [
+        PlanetTheme::Terran,
+        PlanetTheme::Ocean,
+        PlanetTheme::Desert,
+        PlanetTheme::Ice,
+        PlanetTheme::Lava,
+        PlanetTheme::Gas,
+    ];
+
+    /// 转成线上编号。
+    pub const fn wire_(self) -> u32 {
+        match self {
+            PlanetTheme::Terran => 0u32,
+            PlanetTheme::Ocean => 1u32,
+            PlanetTheme::Desert => 2u32,
+            PlanetTheme::Ice => 3u32,
+            PlanetTheme::Lava => 4u32,
+            PlanetTheme::Gas => 5u32,
+        }
+    }
+
+    /// 从线上编号解析；未知编号回退到 [`PlanetTheme::Terran`]。
+    pub const fn from_wire_(wire: u32) -> PlanetTheme {
+        match wire {
+            1u32 => PlanetTheme::Ocean,
+            2u32 => PlanetTheme::Desert,
+            3u32 => PlanetTheme::Ice,
+            4u32 => PlanetTheme::Lava,
+            5u32 => PlanetTheme::Gas,
+            _ => PlanetTheme::Terran,
+        }
+    }
+}
+
+/// 行星的可变业务参数：拥有者可以实时修改，随 [`PlanetDescriptor`] 一起广播。
+///
+/// 把可变参数集中在一个值对象里，是为了让后续新增旋钮只改这里，而不必同时改
+/// `PlanetDescriptor`、`UpdateRequest`、`UpdateAck` 与每个调用点。新增字段时：
+///
+/// - 服务端 `PlanetParams::default` / [`Self::sanitized_`] 给出缺省值与支持范围；
+/// - 客户端 UI 增加对应控件；
+/// - `mptp_smux` 的传输层完全不需要改。
+#[derive(Clone, Copy, Debug, PartialEq, denco_macro::TrDecodable, denco_macro::TrEncodable)]
+pub struct PlanetParams {
+    /// 公转速度（弧度 / 秒）。
+    pub orbit_speed: f32,
+
+    /// 自转速度（弧度 / 秒）。
+    pub spin_speed: f32,
+
+    /// 轨道半径（世界单位，行星中心到太阳中心的距离）。
+    pub orbit_radius: f32,
+
+    /// 行星自身半径（世界单位）。
+    pub planet_radius: f32,
+
+    /// 展示颜色，低 24 位是 RGB。
+    pub color: u32,
+
+    /// 表面纹理主题；线上是开放编号，见 [`PlanetTheme`]。
+    pub texture_theme: u32,
+}
+
+impl Default for PlanetParams {
+    fn default() -> Self {
+        PlanetParams {
+            orbit_speed: K_DEFAULT_ORBIT_SPEED,
+            spin_speed: K_DEFAULT_SPIN_SPEED,
+            orbit_radius: K_DEFAULT_ORBIT_RADIUS,
+            planet_radius: K_DEFAULT_PLANET_RADIUS,
+            color: 0u32,
+            texture_theme: PlanetTheme::Terran.wire_(),
+        }
+    }
+}
+
+impl PlanetParams {
+    /// 把连续量夹紧到服务端支持的范围内，并清洗非有限值与颜色高位。
+    ///
+    /// 离散量（纹理主题）不做夹紧：线上编号是开放集合，服务端不解释主题语义。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use mptp_smux_v1_demo::scene::PlanetParams;
+    /// let params = PlanetParams {
+    ///     orbit_radius: 999.0f32,
+    ///     planet_radius: -1.0f32,
+    ///     ..Default::default()
+    /// }.sanitized_();
+    /// assert!(params.orbit_radius <= 30.0f32);
+    /// assert_eq!(params.planet_radius, 0.2f32);
+    /// ```
+    pub fn sanitized_(self) -> PlanetParams {
+        PlanetParams {
+            orbit_speed: clamp_finite_(
+                self.orbit_speed,
+                K_ORBIT_SPEED_MIN,
+                K_ORBIT_SPEED_MAX,
+                K_DEFAULT_ORBIT_SPEED,
+            ),
+            spin_speed: clamp_finite_(
+                self.spin_speed,
+                K_SPIN_SPEED_MIN,
+                K_SPIN_SPEED_MAX,
+                K_DEFAULT_SPIN_SPEED,
+            ),
+            orbit_radius: clamp_finite_(
+                self.orbit_radius,
+                K_ORBIT_RADIUS_MIN,
+                K_ORBIT_RADIUS_MAX,
+                K_DEFAULT_ORBIT_RADIUS,
+            ),
+            planet_radius: clamp_finite_(
+                self.planet_radius,
+                K_PLANET_RADIUS_MIN,
+                K_PLANET_RADIUS_MAX,
+                K_DEFAULT_PLANET_RADIUS,
+            ),
+            color: self.color & 0x00FF_FFFFu32,
+            texture_theme: self.texture_theme,
+        }
+    }
+}
+
+/// 非有限值回退到 `fallback`，有限值夹紧到 `min..=max`。
+fn clamp_finite_(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
+    }
+}
+
 /// 行星的完整状态：目录项与快照 / 更新事件共用。
 #[derive(Clone, Debug, PartialEq, denco_macro::TrDecodable, denco_macro::TrEncodable)]
 pub struct PlanetDescriptor {
@@ -80,17 +279,11 @@ pub struct PlanetDescriptor {
     /// 显示名。
     pub name: String,
 
-    /// 展示颜色（客户端自己解释为 RGB）。
-    pub color: u32,
-
     /// 该行星数据流的 URI。
     pub stream_uri: String,
 
-    /// 公转速度（弧度 / 秒）。
-    pub orbit_speed: f32,
-
-    /// 自转速度（弧度 / 秒）。
-    pub spin_speed: f32,
+    /// 可变业务参数。
+    pub params: PlanetParams,
 
     /// 该行星状态的版本，每次更新递增。
     pub version: u64,
@@ -117,13 +310,15 @@ pub struct JoinRequest {
 }
 
 /// `Call /scene/update` 的请求体；连接即身份，不带 client id。
+///
+/// 请求携带**完整**的 [`PlanetParams`]，不是字段补丁。新增参数时只需扩展
+/// `PlanetParams` 的默认值与 UI，不需要改 `PlanetEvent` / `UpdateRequest` /
+/// `UpdateAck` 的包装结构；但 denco 是结构化编码，旧客户端仍需重新构建才能编码新字段，
+/// 不承诺跨版本的旧请求体兼容。
 #[derive(Clone, Debug, PartialEq, denco_macro::TrDecodable, denco_macro::TrEncodable)]
 pub struct UpdateRequest {
-    /// 新的公转速度。
-    pub orbit_speed: f32,
-
-    /// 新的自转速度。
-    pub spin_speed: f32,
+    /// 新的完整参数。
+    pub params: PlanetParams,
 }
 
 /// `Call /scene/update` 的回复体。
@@ -135,11 +330,8 @@ pub struct UpdateAck {
     /// 更新后的状态版本。
     pub version: u64,
 
-    /// 更新后的公转速度。
-    pub orbit_speed: f32,
-
-    /// 更新后的自转速度。
-    pub spin_speed: f32,
+    /// 服务端清洗后实际生效的完整参数。
+    pub params: PlanetParams,
 }
 
 /// `Call /scene/unsubscribe` 的请求体。
@@ -278,4 +470,60 @@ pub fn header_u64_(headers: &mptp_wire::Headers, key: HeaderKey) -> Option<u64> 
         .as_text()
         .and_then(|text| text.trim().parse::<u64>().ok())
         .or_else(|| value.as_num().map(u64::from))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 测试参数清洗会把连续量夹到支持范围，并对非有限值回退到默认值。
+    /// Test that sanitizing clamps continuous values and falls back for non-finite ones.
+    ///
+    /// - 手段：构造一个速度 / 半径越界或非有限、颜色带高位的 `PlanetParams`。
+    /// - 判断：速度与半径落在公开范围内；`NaN` / 无穷回退到缺省值；颜色只剩低 24 位；
+    ///   纹理主题作为开放编号不被改写。
+    ///
+    /// - Means: build a `PlanetParams` whose speeds / radii are out of range or non-finite,
+    ///   with extra high bits in the color.
+    /// - Verdict: speeds and radii stay within the public range, non-finite values fall back
+    ///   to defaults, color keeps only its low 24 bits, and the open theme id is untouched.
+    #[test]
+    fn sanitized_params_respect_supported_ranges_() {
+        let wild = PlanetParams {
+            orbit_speed: f32::NAN,
+            spin_speed: 99.0f32,
+            orbit_radius: -5.0f32,
+            planet_radius: f32::INFINITY,
+            color: 0xAB12_3456u32,
+            texture_theme: 99u32,
+        };
+        let clean = wild.sanitized_();
+
+        assert_eq!(clean.orbit_speed, K_DEFAULT_ORBIT_SPEED);
+        assert_eq!(clean.spin_speed, K_SPIN_SPEED_MAX);
+        assert_eq!(clean.orbit_radius, K_ORBIT_RADIUS_MIN);
+        assert_eq!(clean.planet_radius, K_DEFAULT_PLANET_RADIUS);
+        assert_eq!(clean.color, 0x0012_3456u32);
+        assert_eq!(clean.texture_theme, 99u32);
+    }
+
+    /// 测试纹理主题的线上编号往返，并验证未知编号回退到类地主题。
+    /// Test the texture-theme wire round trip and the unknown-id fallback.
+    ///
+    /// - 手段：遍历 `PlanetTheme::ALL` 做 `from_wire_(wire_())`，再解析一个未知编号。
+    /// - 判断：已知主题全部还原；未知编号得到 `Terran`。
+    ///
+    /// - Means: round-trip every theme in `PlanetTheme::ALL` and parse one unknown id.
+    /// - Verdict: known themes round-trip and an unknown id yields `Terran`.
+    #[test]
+    fn theme_wire_roundtrip_() {
+        for theme in PlanetTheme::ALL {
+            assert_eq!(PlanetTheme::from_wire_(theme.wire_()), theme);
+        }
+        assert_eq!(
+            PlanetTheme::from_wire_(999u32),
+            PlanetTheme::Terran,
+            "未知主题应回退到类地主题"
+        );
+    }
 }

@@ -15,12 +15,12 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    K_QUIET_WINDOW, SceneFixture, SceneTestClient, connect_and_join_, wait_subscribers_,
-    with_timeout_,
+    K_QUIET_WINDOW, SceneFixture, SceneTestClient, connect_and_join_, params_with_speeds_,
+    wait_subscribers_, with_timeout_,
 };
 use mptp_smux_v1_demo::scene::{
-    PlanetDescriptor, PlanetEvent, PlanetId,
-    protocol_::{K_SCENE_PLANETS, planet_uri_},
+    PlanetDescriptor, PlanetEvent, PlanetId, PlanetParams, PlanetTheme,
+    protocol_::{K_ORBIT_RADIUS_MAX, K_ORBIT_RADIUS_MIN, K_SCENE_PLANETS, planet_uri_},
 };
 
 /// 期待事件是某个行星的快照。
@@ -62,15 +62,17 @@ async fn suffix_stream_writes_chunks_() {
     let client = SceneTestClient::connect_async_(fixture.addr_())
         .await
         .expect("连接夹具");
-    let mut pull = client.pull_async_("/test/chunks").await.expect("订阅 chunks");
+    let mut pull = client
+        .pull_async_("/test/chunks")
+        .await
+        .expect("订阅 chunks");
 
     for expected in 1u64..=3u64 {
-        let event = with_timeout_(pull.next_event_async_()).await.expect("读事件");
+        let event = with_timeout_(pull.next_event_async_())
+            .await
+            .expect("读事件");
         match event {
-            PlanetEvent::Removed {
-                planet_id,
-                version,
-            } => {
+            PlanetEvent::Removed { planet_id, version } => {
                 assert_eq!(planet_id, expected);
                 assert_eq!(version, expected);
             }
@@ -100,12 +102,14 @@ async fn object_split_across_chunks_() {
         .expect("连接夹具");
     let mut pull = client.pull_async_("/test/split").await.expect("订阅 split");
 
-    let event = with_timeout_(pull.next_event_async_()).await.expect("读事件");
+    let event = with_timeout_(pull.next_event_async_())
+        .await
+        .expect("读事件");
     let planet = expect_updated_(event, 7u64);
     assert_eq!(planet.name, "split-event");
-    assert_eq!(planet.color, 0x12_34_56u32);
-    assert_eq!(planet.orbit_speed, 0.5f32);
-    assert_eq!(planet.spin_speed, 0.25f32);
+    assert_eq!(planet.params.color, 0x12_34_56u32);
+    assert_eq!(planet.params.orbit_speed, 0.5f32);
+    assert_eq!(planet.params.spin_speed, 0.25f32);
     assert_eq!(planet.version, 3u64);
 }
 
@@ -136,7 +140,11 @@ async fn infinite_stream_stays_open_() {
     let mut last_version = snapshot.version;
     for round in 0..5u32 {
         let ack = b
-            .update_async_(0.1f32 + round as f32, 0.2f32 + round as f32)
+            .update_async_(params_with_speeds_(
+                &b_planet,
+                round as f32 * 0.1f32,
+                round as f32 * 0.2f32,
+            ))
             .await
             .expect("B 更新");
         let event = with_timeout_(pull.next_event_async_()).await.expect("更新");
@@ -198,7 +206,12 @@ async fn join_returns_own_descriptor_() {
     assert_eq!(planet.stream_uri, planet_uri_(planet.id));
     assert!(planet.owner > 0u64);
     assert_eq!(planet.name, "solo");
-    assert_eq!(planet.color, 0x00FF00u32);
+    assert_eq!(planet.params.color, 0x00FF00u32);
+    assert_eq!(planet.params.texture_theme, PlanetTheme::Terran.wire_());
+    assert!(
+        (K_ORBIT_RADIUS_MIN..=K_ORBIT_RADIUS_MAX).contains(&planet.params.orbit_radius),
+        "初始轨道半径应在支持范围内"
+    );
 
     let directory = client.view_async_().await.expect("View");
     let found = directory
@@ -233,14 +246,65 @@ async fn pull_sends_snapshot_then_updates_() {
     );
     assert_eq!(snapshot.version, 1u64);
 
-    let ack = b.update_async_(1.5f32, 2.5f32).await.expect("B 更新");
+    let ack = b
+        .update_async_(params_with_speeds_(&b_planet, 1.5f32, 2.5f32))
+        .await
+        .expect("B 更新");
     let updated = expect_updated_(
         with_timeout_(pull.next_event_async_()).await.expect("更新"),
         b_planet.id,
     );
     assert_eq!(updated.version, ack.version);
-    assert_eq!(updated.orbit_speed, 1.5f32);
-    assert_eq!(updated.spin_speed, 2.5f32);
+    assert_eq!(updated.params.orbit_speed, 1.5f32);
+    assert_eq!(updated.params.spin_speed, 2.5f32);
+}
+
+/// 测试轨道半径、行星半径、颜色与纹理主题的完整参数更新会广播给订阅者。
+/// Test that a full parameter update (radii, color, theme) is broadcast to subscribers.
+///
+/// - 手段：A 订阅 B 并读快照；B 一次性提交新的轨道半径、行星半径、颜色和纹理主题。
+/// - 判断：A 收到 `Updated`，其完整 `params` 等于提交值，也等于 `UpdateAck.params`，
+///   且版本在快照基础上加一。
+///
+/// - Means: A pulls B and reads the snapshot; B submits new orbit radius, planet radius,
+///   color and texture theme in one update.
+/// - Verdict: A receives an `Updated` whose full params equal the submitted and ack params,
+///   with the version one above the snapshot.
+#[compio::test]
+async fn update_broadcasts_visual_params_() {
+    let fixture = SceneFixture::start_async_().await.expect("启动夹具");
+    let (a, _a_planet) = connect_and_join_(&fixture, "a", 1u32)
+        .await
+        .expect("A join");
+    let (b, b_planet) = connect_and_join_(&fixture, "b", 2u32)
+        .await
+        .expect("B join");
+    let mut pull = a.pull_async_(&b_planet.stream_uri).await.expect("订阅 B");
+    let snapshot = expect_snapshot_(
+        with_timeout_(pull.next_event_async_())
+            .await
+            .expect("B 快照"),
+        b_planet.id,
+    );
+
+    let params = PlanetParams {
+        orbit_radius: 9.5f32,
+        planet_radius: 1.25f32,
+        color: 0x12_34_56u32,
+        texture_theme: PlanetTheme::Lava.wire_(),
+        ..snapshot.params
+    };
+    let ack = b.update_async_(params).await.expect("B 更新外观");
+    let updated = expect_updated_(
+        with_timeout_(pull.next_event_async_())
+            .await
+            .expect("B 外观更新"),
+        b_planet.id,
+    );
+
+    assert_eq!(updated.version, snapshot.version + 1u64);
+    assert_eq!(updated.params, ack.params);
+    assert_eq!(updated.params, params);
 }
 
 /// 测试选择性订阅：只订阅 B 时，C 的更新不会到达。
@@ -266,21 +330,32 @@ async fn selective_subscription_() {
 
     let mut pull = a.pull_async_(&b_planet.stream_uri).await.expect("订阅 B");
     expect_snapshot_(
-        with_timeout_(pull.next_event_async_()).await.expect("B 快照"),
+        with_timeout_(pull.next_event_async_())
+            .await
+            .expect("B 快照"),
         b_planet.id,
     );
 
-    b.update_async_(0.3f32, 0.4f32).await.expect("B 更新");
-    let event = with_timeout_(pull.next_event_async_()).await.expect("B 更新事件");
+    b.update_async_(params_with_speeds_(&b_planet, 0.3f32, 0.4f32))
+        .await
+        .expect("B 更新");
+    let event = with_timeout_(pull.next_event_async_())
+        .await
+        .expect("B 更新事件");
     expect_updated_(event, b_planet.id);
 
-    c.update_async_(0.5f32, 0.6f32).await.expect("C 更新");
+    c.update_async_(params_with_speeds_(&c_planet, 0.5f32, 0.6f32))
+        .await
+        .expect("C 更新");
     let quiet = pull
         .next_event_within_async_(K_QUIET_WINDOW)
         .await
         .expect("等待窗口");
     assert!(quiet.is_none(), "未订阅的 C 不应到达：{quiet:?}");
-    assert_eq!(fixture.hub_().borrow().subscriber_count_(c_planet.id), 0usize);
+    assert_eq!(
+        fixture.hub_().borrow().subscriber_count_(c_planet.id),
+        0usize
+    );
 }
 
 /// 测试丢弃 `Pull` 会话后，服务端订阅者归零且后续事件不再到达。
@@ -306,13 +381,18 @@ async fn unsubscribe_stops_events_() {
         with_timeout_(pull.next_event_async_()).await.expect("快照"),
         b_planet.id,
     );
-    assert_eq!(fixture.hub_().borrow().subscriber_count_(b_planet.id), 1usize);
+    assert_eq!(
+        fixture.hub_().borrow().subscriber_count_(b_planet.id),
+        1usize
+    );
 
     pull.unsubscribe_async_().await.expect("退订");
     drop(pull);
     wait_subscribers_(&fixture, b_planet.id, 0usize).await;
 
-    b.update_async_(0.1f32, 0.2f32).await.expect("B 更新");
+    b.update_async_(params_with_speeds_(&b_planet, 0.1f32, 0.2f32))
+        .await
+        .expect("B 更新");
     let directory = a.view_async_().await.expect("退订后连接仍可用");
     assert_eq!(directory.planets.len(), 2usize);
 }
@@ -338,22 +418,29 @@ async fn resubscribe_gets_fresh_snapshot_() {
 
     let mut first = a.pull_async_(&b_planet.stream_uri).await.expect("首次订阅");
     expect_snapshot_(
-        with_timeout_(first.next_event_async_()).await.expect("快照"),
+        with_timeout_(first.next_event_async_())
+            .await
+            .expect("快照"),
         b_planet.id,
     );
     first.unsubscribe_async_().await.expect("首次退订");
     drop(first);
     wait_subscribers_(&fixture, b_planet.id, 0usize).await;
 
-    let ack = b.update_async_(3.5f32, 4.5f32).await.expect("B 更新");
+    let ack = b
+        .update_async_(params_with_speeds_(&b_planet, 2.5f32, 4.5f32))
+        .await
+        .expect("B 更新");
     let mut second = a.pull_async_(&b_planet.stream_uri).await.expect("重新订阅");
     let snapshot = expect_snapshot_(
-        with_timeout_(second.next_event_async_()).await.expect("新快照"),
+        with_timeout_(second.next_event_async_())
+            .await
+            .expect("新快照"),
         b_planet.id,
     );
     assert_eq!(snapshot.version, ack.version);
-    assert_eq!(snapshot.orbit_speed, 3.5f32);
-    assert_eq!(snapshot.spin_speed, 4.5f32);
+    assert_eq!(snapshot.params.orbit_speed, 2.5f32);
+    assert_eq!(snapshot.params.spin_speed, 4.5f32);
 }
 
 /// 测试同一连接可以同时持有多个 `Pull`，各自独立。
@@ -380,27 +467,39 @@ async fn multiple_subscriptions_one_connection_() {
     let mut pull_b = a.pull_async_(&b_planet.stream_uri).await.expect("订阅 B");
     let mut pull_c = a.pull_async_(&c_planet.stream_uri).await.expect("订阅 C");
     expect_snapshot_(
-        with_timeout_(pull_b.next_event_async_()).await.expect("B 快照"),
+        with_timeout_(pull_b.next_event_async_())
+            .await
+            .expect("B 快照"),
         b_planet.id,
     );
     expect_snapshot_(
-        with_timeout_(pull_c.next_event_async_()).await.expect("C 快照"),
+        with_timeout_(pull_c.next_event_async_())
+            .await
+            .expect("C 快照"),
         c_planet.id,
     );
 
-    b.update_async_(0.7f32, 0.8f32).await.expect("B 更新");
-    c.update_async_(0.9f32, 1.0f32).await.expect("C 更新");
+    b.update_async_(params_with_speeds_(&b_planet, 0.7f32, 0.8f32))
+        .await
+        .expect("B 更新");
+    c.update_async_(params_with_speeds_(&c_planet, 0.9f32, 1.0f32))
+        .await
+        .expect("C 更新");
 
     let updated_b = expect_updated_(
-        with_timeout_(pull_b.next_event_async_()).await.expect("B 更新"),
+        with_timeout_(pull_b.next_event_async_())
+            .await
+            .expect("B 更新"),
         b_planet.id,
     );
     let updated_c = expect_updated_(
-        with_timeout_(pull_c.next_event_async_()).await.expect("C 更新"),
+        with_timeout_(pull_c.next_event_async_())
+            .await
+            .expect("C 更新"),
         c_planet.id,
     );
-    assert_eq!(updated_b.orbit_speed, 0.7f32);
-    assert_eq!(updated_c.orbit_speed, 0.9f32);
+    assert_eq!(updated_b.params.orbit_speed, 0.7f32);
+    assert_eq!(updated_c.params.orbit_speed, 0.9f32);
 }
 
 /// 测试两个客户端 join 后可以互相订阅并看到对方。
@@ -425,11 +524,15 @@ async fn two_clients_see_each_other_() {
     let mut b_pull_a = b.pull_async_(&a_planet.stream_uri).await.expect("B 订阅 A");
 
     let seen_by_a = expect_snapshot_(
-        with_timeout_(a_pull_b.next_event_async_()).await.expect("A 看 B"),
+        with_timeout_(a_pull_b.next_event_async_())
+            .await
+            .expect("A 看 B"),
         b_planet.id,
     );
     let seen_by_b = expect_snapshot_(
-        with_timeout_(b_pull_a.next_event_async_()).await.expect("B 看 A"),
+        with_timeout_(b_pull_a.next_event_async_())
+            .await
+            .expect("B 看 A"),
         a_planet.id,
     );
     assert_eq!(seen_by_a.name, "b");
@@ -507,21 +610,32 @@ async fn subscription_cleanup_() {
     let mut pull_a = a.pull_async_(&b_planet.stream_uri).await.expect("A 订阅");
     let mut pull_c = c.pull_async_(&b_planet.stream_uri).await.expect("C 订阅");
     expect_snapshot_(
-        with_timeout_(pull_a.next_event_async_()).await.expect("A 快照"),
+        with_timeout_(pull_a.next_event_async_())
+            .await
+            .expect("A 快照"),
         b_planet.id,
     );
     expect_snapshot_(
-        with_timeout_(pull_c.next_event_async_()).await.expect("C 快照"),
+        with_timeout_(pull_c.next_event_async_())
+            .await
+            .expect("C 快照"),
         b_planet.id,
     );
-    assert_eq!(fixture.hub_().borrow().subscriber_count_(b_planet.id), 2usize);
+    assert_eq!(
+        fixture.hub_().borrow().subscriber_count_(b_planet.id),
+        2usize
+    );
 
     pull_a.unsubscribe_async_().await.expect("A 退订");
     drop(pull_a);
     wait_subscribers_(&fixture, b_planet.id, 1usize).await;
 
-    b.update_async_(0.11f32, 0.12f32).await.expect("B 更新");
-    let event = with_timeout_(pull_c.next_event_async_()).await.expect("C 更新");
+    b.update_async_(params_with_speeds_(&b_planet, 0.11f32, 0.12f32))
+        .await
+        .expect("B 更新");
+    let event = with_timeout_(pull_c.next_event_async_())
+        .await
+        .expect("C 更新");
     expect_updated_(event, b_planet.id);
 
     pull_c.unsubscribe_async_().await.expect("C 退订");
@@ -566,14 +680,20 @@ async fn slow_subscriber_does_not_block_others_() {
         .expect("C 正常订阅");
     // 先让两条订阅都建立并收到快照。
     expect_snapshot_(
-        with_timeout_(fast.next_event_async_()).await.expect("C 快照"),
+        with_timeout_(fast.next_event_async_())
+            .await
+            .expect("C 快照"),
         b_planet.id,
     );
 
     for round in 0..240u32 {
-        b.update_async_(round as f32 * 0.01f32, round as f32 * 0.02f32)
-            .await
-            .expect("B 更新");
+        b.update_async_(params_with_speeds_(
+            &b_planet,
+            round as f32 * 0.01f32,
+            round as f32 * 0.02f32,
+        ))
+        .await
+        .expect("B 更新");
     }
 
     // A 的慢订阅最终被移除，只剩 C。
@@ -593,7 +713,10 @@ async fn slow_subscriber_does_not_block_others_() {
     // C 仍然在读：至少再收到一条 Updated。
     let mut updated = 0usize;
     for _ in 0..32usize {
-        match fast.next_event_within_async_(Duration::from_millis(200u64)).await {
+        match fast
+            .next_event_within_async_(Duration::from_millis(200u64))
+            .await
+        {
             Ok(Some(PlanetEvent::Updated(planet))) => {
                 assert_eq!(planet.id, b_planet.id);
                 updated += 1usize;

@@ -17,17 +17,13 @@
 //! Each subscription has a bounded queue and its own cancel trigger; `broadcast_` only
 //! uses `try_send`, so a slow subscriber is dropped without blocking the others.
 
-use std::{
-    cell::RefCell,
-    collections::BTreeMap,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 
 use crate::scene::{
     cancel_::{SceneCancelToken, SceneCanceller, cancel_pair_},
     protocol_::{
-        ClientId, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId, planet_uri_,
+        ClientId, K_ORBIT_RADIUS_MIN, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId,
+        PlanetParams, planet_uri_,
     },
 };
 
@@ -79,10 +75,12 @@ impl PlanetRegistry {
             id,
             owner,
             name,
-            color,
             stream_uri: planet_uri_(id),
-            orbit_speed: 0.6f32,
-            spin_speed: 1.2f32,
+            params: PlanetParams {
+                color,
+                orbit_radius: default_orbit_radius_(id),
+                ..PlanetParams::default()
+            },
             version: 1u64,
         };
         self.planets_.insert(id, descriptor.clone());
@@ -90,16 +88,16 @@ impl PlanetRegistry {
         descriptor
     }
 
-    /// 修改行星速度并递增该行星的版本；行星不存在时返回 `None`。
+    /// 用完整参数替换行星参数并递增该行星的版本；行星不存在时返回 `None`。
+    ///
+    /// 连续量会先经过 [`PlanetParams::sanitized_`] 夹紧；开放编号（纹理主题）原样保留。
     pub fn update_planet_(
         &mut self,
         planet_id: PlanetId,
-        orbit_speed: f32,
-        spin_speed: f32,
+        params: PlanetParams,
     ) -> Option<PlanetDescriptor> {
         let planet = self.planets_.get_mut(&planet_id)?;
-        planet.orbit_speed = orbit_speed;
-        planet.spin_speed = spin_speed;
+        planet.params = params.sanitized_();
         planet.version = planet.version.saturating_add(1u64);
         Some(planet.clone())
     }
@@ -133,6 +131,11 @@ impl PlanetRegistry {
             planets: self.planets_.values().cloned().collect(),
         }
     }
+}
+
+/// 按行星标识给一个错开的初始轨道半径，保持画面里行星不会完全重叠。
+fn default_orbit_radius_(planet_id: PlanetId) -> f32 {
+    K_ORBIT_RADIUS_MIN + ((planet_id % 6u64) as f32) * 1.8f32
 }
 
 impl Default for PlanetRegistry {
@@ -221,9 +224,7 @@ impl SceneHub {
 
     /// 某颗行星当前的订阅者数量（测试 / 诊断用）。
     pub fn subscriber_count_(&self, planet_id: PlanetId) -> usize {
-        self.streams_
-            .get(&planet_id)
-            .map_or(0usize, BTreeMap::len)
+        self.streams_.get(&planet_id).map_or(0usize, BTreeMap::len)
     }
 
     /// 全部行星的订阅者总数（测试 / 诊断用）。

@@ -10,9 +10,9 @@
 //!
 //! # Procedural planet surface
 //!
-//! Textures are generated from a deterministic multi-octave value noise (continents,
-//! oceans, polar caps, cloud bands) so planet rotation is visible. The longitude axis
-//! wraps, matching the UV sphere's seam.
+//! Textures are generated from a deterministic multi-octave value noise; the selected
+//! [`PlanetTheme`] maps that noise to continents, oceans, dunes, ice, lava or gas bands.
+//! The longitude axis wraps, matching the UV sphere's seam.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -21,6 +21,7 @@ use bevy::{
     prelude::{Transform, Vec3},
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
+use mptp_smux_v1_demo::scene::PlanetTheme;
 
 /// 纹理宽度（经度方向）。
 const K_TEXTURE_WIDTH: u32 = 512;
@@ -36,12 +37,12 @@ const K_SURFACE_MAX_PITCH: f32 = 1.30f32;
 
 /// 为某颗行星生成表面纹理。
 ///
-/// `planet_id` 用于确定噪声种子；`base` 是行星主色的 sRGB 分量。
-pub(crate) fn planet_surface_image(planet_id: u64, base: [f32; 3]) -> Image {
+/// `planet_id` 用于确定噪声种子；`theme` 决定纹理主题；`base` 是行星主色的 sRGB 分量。
+pub(crate) fn planet_surface_image(planet_id: u64, theme: PlanetTheme, base: [f32; 3]) -> Image {
     let seed = (planet_id as u32)
         .wrapping_mul(0x9E37_79B9)
         .wrapping_add(0x5A17_3C2D);
-    surface_image_(seed, base, K_TEXTURE_WIDTH, K_TEXTURE_HEIGHT)
+    surface_image_(seed, theme, base, K_TEXTURE_WIDTH, K_TEXTURE_HEIGHT)
 }
 
 /// 从行星表面的某一点朝切向看出去，构造「地表视角」相机变换。
@@ -79,7 +80,7 @@ pub(crate) fn orbit_camera_transform_(planet: &Transform, distance: f32) -> Tran
 }
 
 /// 生成指定尺寸的表面纹理（测试用小尺寸复用同一算法）。
-fn surface_image_(seed: u32, base: [f32; 3], width: u32, height: u32) -> Image {
+fn surface_image_(seed: u32, theme: PlanetTheme, base: [f32; 3], width: u32, height: u32) -> Image {
     let mut data = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         let v = (y as f32 + 0.5f32) / height as f32;
@@ -87,53 +88,7 @@ fn surface_image_(seed: u32, base: [f32; 3], width: u32, height: u32) -> Image {
         for x in 0..width {
             let u = (x as f32 + 0.5f32) / width as f32;
             let elevation = fbm_(seed, u, v);
-            let land = smoothstep_(0.46f32, 0.56f32, elevation);
-
-            // 海洋偏深蓝，陆地用行星主色提亮，形成明显反差。
-            let ocean = [0.035f32, 0.085f32, 0.20f32];
-            let ground = [
-                base[0] * 0.78f32 + 0.14f32,
-                base[1] * 0.78f32 + 0.14f32,
-                base[2] * 0.78f32 + 0.14f32,
-            ];
-            let mut rgb = [
-                lerp_(ocean[0], ground[0], land),
-                lerp_(ocean[1], ground[1], land),
-                lerp_(ocean[2], ground[2], land),
-            ];
-
-            // 陆地内部按高度做明暗分层。
-            let relief = ((elevation - 0.52f32).max(0.0f32) * 1.8f32).min(0.35f32);
-            rgb = [
-                (rgb[0] * (1.0f32 + relief)).clamp(0.0f32, 1.0f32),
-                (rgb[1] * (1.0f32 + relief)).clamp(0.0f32, 1.0f32),
-                (rgb[2] * (1.0f32 + relief)).clamp(0.0f32, 1.0f32),
-            ];
-
-            // 云带：另一层噪声的高值区，稍微偏白。
-            let cloud = smoothstep_(
-                0.60f32,
-                0.72f32,
-                fbm_(
-                    seed ^ 0x00A5_5A5A,
-                    (u * 2.0f32).fract(),
-                    (v * 1.0f32 + 0.17f32).fract(),
-                ),
-            ) * 0.55f32;
-            rgb = [
-                lerp_(rgb[0], 0.93f32, cloud),
-                lerp_(rgb[1], 0.95f32, cloud),
-                lerp_(rgb[2], 0.97f32, cloud),
-            ];
-
-            // 极冠。
-            let pole = smoothstep_(0.80f32, 0.97f32, latitude);
-            rgb = [
-                lerp_(rgb[0], 0.96f32, pole),
-                lerp_(rgb[1], 0.97f32, pole),
-                lerp_(rgb[2], 0.98f32, pole),
-            ];
-
+            let rgb = surface_pixel_(theme, seed, base, u, v, elevation, latitude);
             // 细微颗粒，避免色块过于平整。
             let grain = 0.96f32 + 0.08f32 * hash01_(seed ^ 0x5EED_1234, x as i32, y as i32);
             data.extend_from_slice(&[
@@ -156,6 +111,139 @@ fn surface_image_(seed: u32, base: [f32; 3], width: u32, height: u32) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     )
+}
+
+/// 按主题把一个噪声采样映射成 sRGB 颜色。
+fn surface_pixel_(
+    theme: PlanetTheme,
+    seed: u32,
+    base: [f32; 3],
+    u: f32,
+    v: f32,
+    elevation: f32,
+    latitude: f32,
+) -> [f32; 3] {
+    match theme {
+        PlanetTheme::Terran => {
+            let land = smoothstep_(0.46f32, 0.56f32, elevation);
+            let ocean = [0.035f32, 0.085f32, 0.20f32];
+            let ground = [
+                base[0] * 0.78f32 + 0.14f32,
+                base[1] * 0.78f32 + 0.14f32,
+                base[2] * 0.78f32 + 0.14f32,
+            ];
+            let mut rgb = mix3_(ocean, ground, land);
+            let relief = ((elevation - 0.52f32).max(0.0f32) * 1.8f32).min(0.35f32);
+            rgb = scale3_(rgb, 1.0f32 + relief);
+            rgb = mix3_(
+                rgb,
+                [0.93f32, 0.95f32, 0.97f32],
+                cloud_cover_(seed, u, v, 0.55f32),
+            );
+            let pole = smoothstep_(0.80f32, 0.97f32, latitude);
+            mix3_(rgb, [0.96f32, 0.97f32, 0.98f32], pole)
+        }
+        PlanetTheme::Ocean => {
+            let land = smoothstep_(0.60f32, 0.68f32, elevation);
+            let ocean = [0.02f32, 0.09f32, 0.30f32];
+            let ground = [
+                base[0] * 0.62f32 + 0.16f32,
+                base[1] * 0.62f32 + 0.16f32,
+                base[2] * 0.62f32 + 0.16f32,
+            ];
+            let mut rgb = mix3_(ocean, ground, land);
+            rgb = scale3_(rgb, 1.0f32 + (elevation - 0.55f32).max(0.0f32) * 1.4f32);
+            rgb = mix3_(
+                rgb,
+                [0.94f32, 0.96f32, 0.98f32],
+                cloud_cover_(seed, u, v, 0.72f32),
+            );
+            let pole = smoothstep_(0.82f32, 0.98f32, latitude);
+            mix3_(rgb, [0.95f32, 0.97f32, 0.99f32], pole)
+        }
+        PlanetTheme::Desert => {
+            let sand = [0.78f32, 0.62f32, 0.38f32];
+            let tint = mix3_(base, sand, 0.72f32);
+            let dune = ((v * 42.0f32 + elevation * 7.0f32).sin() * 0.5f32 + 0.5f32) * 0.06f32;
+            let shade = 0.62f32 + 0.46f32 * elevation + dune;
+            let mut rgb = scale3_(tint, shade);
+            let pole = smoothstep_(0.88f32, 0.99f32, latitude) * 0.35f32;
+            rgb = mix3_(rgb, [0.92f32, 0.90f32, 0.84f32], pole);
+            rgb
+        }
+        PlanetTheme::Ice => {
+            let deep = [0.07f32, 0.13f32, 0.23f32];
+            let ice = [0.82f32, 0.90f32, 0.97f32];
+            let mix = 0.15f32 + (elevation * 1.25f32).min(1.0f32) * 0.80f32;
+            let mut rgb = mix3_(deep, ice, mix);
+            rgb = mix3_(rgb, base, 0.10f32);
+            let crack = 1.0f32 - smoothstep_(0.0f32, 0.035f32, (elevation - 0.5f32).abs());
+            rgb = mix3_(rgb, [0.30f32, 0.42f32, 0.54f32], crack * 0.55f32);
+            let pole = smoothstep_(0.72f32, 0.96f32, latitude);
+            mix3_(rgb, [0.93f32, 0.96f32, 1.0f32], pole)
+        }
+        PlanetTheme::Lava => {
+            let rock = [
+                base[0] * 0.16f32 + 0.03f32,
+                base[1] * 0.12f32 + 0.02f32,
+                base[2] * 0.10f32 + 0.02f32,
+            ];
+            let lines = (elevation * 8.0f32).fract();
+            let crack = (1.0f32 - smoothstep_(0.0f32, 0.07f32, (lines - 0.5f32).abs()))
+                * smoothstep_(0.35f32, 0.62f32, elevation);
+            let hot = [1.0f32, 0.32f32, 0.04f32];
+            let mut rgb = mix3_(rock, hot, crack * 0.92f32);
+            let ember = smoothstep_(0.62f32, 0.80f32, fbm_(seed ^ 0x000C_0FFE, u, v)) * 0.25f32;
+            rgb = mix3_(rgb, [0.85f32, 0.18f32, 0.03f32], ember);
+            rgb
+        }
+        PlanetTheme::Gas => {
+            let band = (v * 22.0f32 + elevation * 3.0f32).sin() * 0.5f32 + 0.5f32;
+            let dark = scale3_(base, 0.55f32);
+            let light = mix3_(scale3_(base, 1.25f32), [0.95f32, 0.92f32, 0.85f32], 0.35f32);
+            let mut rgb = mix3_(dark, light, band);
+            let storm = smoothstep_(
+                0.62f32,
+                0.78f32,
+                fbm_(seed ^ 0x00B0_0B00, u, (v * 1.7f32 + 0.23f32).fract()),
+            ) * 0.45f32;
+            rgb = mix3_(rgb, [0.96f32, 0.93f32, 0.86f32], storm);
+            let pole = smoothstep_(0.88f32, 0.99f32, latitude) * 0.22f32;
+            mix3_(rgb, [0.58f32, 0.58f32, 0.62f32], pole)
+        }
+    }
+}
+
+/// 云带：另一层噪声的高值区，按主题缩放。
+fn cloud_cover_(seed: u32, u: f32, v: f32, amount: f32) -> f32 {
+    smoothstep_(
+        0.60f32,
+        0.72f32,
+        fbm_(
+            seed ^ 0x00A5_5A5A,
+            (u * 2.0f32).fract(),
+            (v + 0.17f32).fract(),
+        ),
+    ) * amount
+}
+
+/// 三分量线性插值。
+fn mix3_(from: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
+    let t = t.clamp(0.0f32, 1.0f32);
+    [
+        lerp_(from[0], to[0], t),
+        lerp_(from[1], to[1], t),
+        lerp_(from[2], to[2], t),
+    ]
+}
+
+/// 三分量缩放并夹紧到 `0.0..=1.0`。
+fn scale3_(rgb: [f32; 3], scale: f32) -> [f32; 3] {
+    [
+        (rgb[0] * scale).clamp(0.0f32, 1.0f32),
+        (rgb[1] * scale).clamp(0.0f32, 1.0f32),
+        (rgb[2] * scale).clamp(0.0f32, 1.0f32),
+    ]
 }
 
 /// 多倍频值噪声，返回 `0.0..=1.0`。
@@ -232,15 +320,28 @@ mod tests {
     /// 测试表面纹理生成是确定性的，并且尺寸 / 通道数符合 UV 球纹理要求。
     /// Test that surface texture generation is deterministic and has the expected size / channels.
     ///
-    /// - 手段：用同一个种子和主色调用两次 32x16 的 `surface_image_`。
+    /// - 手段：用同一个种子、主题和主色调用两次 32x16 的 `surface_image_`。
     /// - 判断：两张图的像素字节完全相同，长度都是 `32 * 16 * 4`，尺寸字段一致。
     ///
-    /// - Means: call the 32x16 `surface_image_` twice with the same seed and base color.
+    /// - Means: call the 32x16 `surface_image_` twice with the same seed, theme and base color.
     /// - Verdict: the pixel bytes are identical and both are `32 * 16 * 4` bytes with matching extents.
     #[test]
     fn surface_image_is_deterministic_() {
-        let first = surface_image_(0x1234_5678u32, [0.2f32, 0.8f32, 0.3f32], 32u32, 16u32);
-        let second = surface_image_(0x1234_5678u32, [0.2f32, 0.8f32, 0.3f32], 32u32, 16u32);
+        let theme = PlanetTheme::Terran;
+        let first = surface_image_(
+            0x1234_5678u32,
+            theme,
+            [0.2f32, 0.8f32, 0.3f32],
+            32u32,
+            16u32,
+        );
+        let second = surface_image_(
+            0x1234_5678u32,
+            theme,
+            [0.2f32, 0.8f32, 0.3f32],
+            32u32,
+            16u32,
+        );
 
         let first_data = first.data.as_ref().expect("纹理应包含像素数据");
         let second_data = second.data.as_ref().expect("纹理应包含像素数据");
@@ -261,16 +362,42 @@ mod tests {
     ///   oceans / clouds produce visible surface features.
     #[test]
     fn surface_image_has_visible_features_() {
-        let image = surface_image_(0xDEAD_BEEFu32, [0.7f32, 0.3f32, 0.2f32], 64u32, 32u32);
+        let image = surface_image_(
+            0xDEAD_BEEFu32,
+            PlanetTheme::Terran,
+            [0.7f32, 0.3f32, 0.2f32],
+            64u32,
+            32u32,
+        );
         let data = image.data.as_ref().expect("纹理应包含像素数据");
         let mut colors = std::collections::BTreeSet::new();
-        for pixel in data.chunks_exact(4usize) {
+        for pixel in data.chunks(4usize) {
             colors.insert([pixel[0], pixel[1], pixel[2]]);
         }
         assert!(
             colors.len() > 64usize,
             "表面颜色种类过少（{}），自转可能仍然看不出来",
             colors.len()
+        );
+    }
+
+    /// 测试不同纹理主题在同一噪声种子下产生不同像素，主题选择确实影响渲染。
+    /// Test that different texture themes produce different pixels for the same seed.
+    ///
+    /// - 手段：用同一个种子分别生成 64x32 的类地与熔岩纹理。
+    /// - 判断：两张纹理的像素字节不相等，说明主题不是被忽略的 UI 字段。
+    ///
+    /// - Means: generate 64x32 Terran and Lava textures from the same seed.
+    /// - Verdict: the pixel bytes differ, so the theme is not an ignored UI field.
+    #[test]
+    fn themes_produce_different_surfaces_() {
+        let base = [0.7f32, 0.3f32, 0.2f32];
+        let terran = surface_image_(0x0BAD_F00Du32, PlanetTheme::Terran, base, 64u32, 32u32);
+        let lava = surface_image_(0x0BAD_F00Du32, PlanetTheme::Lava, base, 64u32, 32u32);
+        assert_ne!(
+            terran.data.as_ref().expect("类地纹理应包含像素"),
+            lava.data.as_ref().expect("熔岩纹理应包含像素"),
+            "不同主题应当产生不同纹理"
         );
     }
 

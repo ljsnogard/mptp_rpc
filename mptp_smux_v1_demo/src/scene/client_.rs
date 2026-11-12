@@ -8,12 +8,7 @@
 //! Only business assembly; transport stays inside `MptpClient`. A background task decodes
 //! each denco event and forwards it to the caller's queue, dropping idle heartbeats.
 
-use std::{
-    cell::RefCell,
-    net::SocketAddr,
-    rc::Rc,
-    time::Duration,
-};
+use std::{cell::RefCell, net::SocketAddr, rc::Rc, time::Duration};
 
 use abs_art_facade::TrLocalScope;
 use abs_cancel::TrCancellationToken;
@@ -21,10 +16,10 @@ use abs_mptp::spec::Status;
 use anyhow::{Result, bail};
 use flume::Sender;
 use mptp_smux::client::MptpClient;
+
 use crate::scene::{
-    ClientCfg,
+    ClientCfg, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetParams,
     cancel_::{SceneCancelToken, SceneCanceller, cancel_pair_},
-    PlanetDescriptor, PlanetDirectory, PlanetEvent,
     cfg_::SharedConn,
     conn_::{dial_async_, share_conn_},
     protocol_::{
@@ -117,20 +112,13 @@ impl SceneClient {
         Ok(decode_value_async_(&mut view).await?)
     }
 
-    /// 修改自己的速度。
+    /// 用完整参数更新自己的行星。
     ///
     /// # Errors
     ///
     /// 请求失败、状态非 200 或回复体解码失败时返回错误。
-    pub async fn update_async_(
-        &self,
-        orbit_speed: f32,
-        spin_speed: f32,
-    ) -> Result<UpdateAck> {
-        let request = UpdateRequest {
-            orbit_speed,
-            spin_speed,
-        };
+    pub async fn update_async_(&self, params: PlanetParams) -> Result<UpdateAck> {
+        let request = UpdateRequest { params };
         let body = encode_to_vec_async_(&request).await?;
         let mut resp = self
             .client_
@@ -170,11 +158,7 @@ impl SceneClient {
     /// # Errors
     ///
     /// 请求失败或状态非 200 时返回错误。
-    pub async fn pull_async_(
-        &self,
-        uri: &str,
-        events: Sender<PlanetEvent>,
-    ) -> Result<PullHandle> {
+    pub async fn pull_async_(&self, uri: &str, events: Sender<PlanetEvent>) -> Result<PullHandle> {
         let mut resp = self.client_.pull(uri).send_async().await?;
         ensure_ok_(&resp, uri)?;
         let scope = crate::scene::cfg_::compio_rt_().local_scope();
@@ -212,10 +196,7 @@ impl SceneClient {
 ///
 /// 服务端用它更新「最近请求时刻」，从而在客户端进程消失后 3 秒内认定连接已死并广播
 /// `Removed`。`Head` 同时是一次轻量的目录探活，不建立订阅。
-fn start_keepalive_(
-    client: Rc<MptpClient<ClientCfg>>,
-    token: SceneCancelToken,
-) -> PullHandle {
+fn start_keepalive_(client: Rc<MptpClient<ClientCfg>>, token: SceneCancelToken) -> PullHandle {
     let scope = crate::scene::cfg_::compio_rt_().local_scope();
     scope.spawn_local(async move {
         loop {
@@ -238,4 +219,3 @@ fn ensure_ok_(resp: &mptp_smux::client::Response<ClientCfg>, what: &str) -> Resu
     }
     Ok(())
 }
-

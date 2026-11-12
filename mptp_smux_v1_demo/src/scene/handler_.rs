@@ -13,11 +13,7 @@
 //! One handler per connection. Routing, 404 and dispatch live here; 405 is handled by the
 //! framework through `allowed_methods`. The planet stream is written with `SuffixStream`.
 
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
@@ -34,8 +30,8 @@ use crate::scene::{
     protocol_::{
         JoinRequest, K_HDR_DIRECTORY_VERSION, K_HDR_PLANET_COUNT, K_SCENE_JOIN, K_SCENE_PLANETS,
         K_SCENE_UNSUBSCRIBE, K_SCENE_UPDATE, PlanetEvent, PlanetId, UnsubscribeAck,
-        UnsubscribeRequest, UpdateAck, UpdateRequest,
-        decode_value_async_, encode_event_async_, encode_to_vec_async_, parse_planet_uri_,
+        UnsubscribeRequest, UpdateAck, UpdateRequest, decode_value_async_, encode_event_async_,
+        encode_to_vec_async_, parse_planet_uri_,
     },
     state_::{ConnectionCtx, K_SUB_QUEUE_CAP, SceneHub, SubId},
 };
@@ -62,7 +58,8 @@ impl TrServeHandler<ServingCfg> for SceneHandler {
     type Err = ServeError;
 
     fn allowed_methods(&self) -> MethodSet {
-        MethodSet::HEAD.union(MethodSet::VIEW)
+        MethodSet::HEAD
+            .union(MethodSet::VIEW)
             .union(MethodSet::PULL)
             .union(MethodSet::CALL)
     }
@@ -103,9 +100,7 @@ where
         (AccessMethod::Call, K_SCENE_UPDATE) => {
             update_async_(handler, session, cancel.child_token()).await
         }
-        (AccessMethod::Call, K_SCENE_UNSUBSCRIBE) => {
-            unsubscribe_async_(handler, session).await
-        }
+        (AccessMethod::Call, K_SCENE_UNSUBSCRIBE) => unsubscribe_async_(handler, session).await,
         (AccessMethod::View, K_SCENE_PLANETS) => view_async_(handler, session).await,
         (AccessMethod::Head, K_SCENE_PLANETS) => head_async_(handler, session).await,
         (AccessMethod::Pull, uri) if parse_planet_uri_(uri).is_some() => {
@@ -163,10 +158,7 @@ where
         })?;
     let len = body.len();
     let mut src: &mut [u8] = body.as_mut_slice();
-    session
-        .response(status)
-        .sized_async(&mut src, len)
-        .await?;
+    session.response(status).sized_async(&mut src, len).await?;
     Ok(())
 }
 
@@ -192,11 +184,11 @@ where
         return reply_status_async_(session, Status::new(409u16)).await;
     }
 
-    let descriptor = handler
-        .ctx_
-        .registry_()
-        .borrow_mut()
-        .allocate_planet_(handler.ctx_.connection_id_(), &request.name, request.color);
+    let descriptor = handler.ctx_.registry_().borrow_mut().allocate_planet_(
+        handler.ctx_.connection_id_(),
+        &request.name,
+        request.color,
+    );
     handler.ctx_.claim_own_planet_(descriptor.id);
 
     reply_value_async_(session, Status::Ok, &descriptor).await
@@ -224,7 +216,7 @@ where
         .ctx_
         .registry_()
         .borrow_mut()
-        .update_planet_(planet_id, request.orbit_speed, request.spin_speed)
+        .update_planet_(planet_id, request.params)
         .ok_or_else(|| ServeError::Target {
             detail: format!("行星 {planet_id} 已不存在"),
         })?;
@@ -234,13 +226,16 @@ where
         .map_err(|err| ServeError::Target {
             detail: err.to_string(),
         })?;
-    handler.ctx_.hub_().borrow_mut().broadcast_(planet_id, frame);
+    handler
+        .ctx_
+        .hub_()
+        .borrow_mut()
+        .broadcast_(planet_id, frame);
 
     let ack = UpdateAck {
         planet_id,
         version: updated.version,
-        orbit_speed: updated.orbit_speed,
-        spin_speed: updated.spin_speed,
+        params: updated.params,
     };
     reply_value_async_(session, Status::Ok, &ack).await
 }
@@ -264,10 +259,7 @@ async fn head_async_(
         (registry.planet_count_(), registry.directory_version_())
     };
     let mut builder = session.response(Status::Ok);
-    builder.header(
-        K_HDR_PLANET_COUNT,
-        HeaderVal::from_text(count.to_string()),
-    );
+    builder.header(K_HDR_PLANET_COUNT, HeaderVal::from_text(count.to_string()));
     builder.header(
         K_HDR_DIRECTORY_VERSION,
         HeaderVal::from_text(version.to_string()),
@@ -287,10 +279,11 @@ async fn unsubscribe_async_(
     let Some(request) = read_request_async_::<UnsubscribeRequest>(session).await? else {
         return reply_status_async_(session, Status::BadRequest).await;
     };
-    let removed = handler.ctx_.hub_().borrow_mut().unsubscribe_connection_(
-        request.planet_id,
-        handler.ctx_.connection_id_(),
-    );
+    let removed = handler
+        .ctx_
+        .hub_()
+        .borrow_mut()
+        .unsubscribe_connection_(request.planet_id, handler.ctx_.connection_id_());
     let ack = UnsubscribeAck {
         removed: u32::try_from(removed).unwrap_or(u32::MAX),
     };
@@ -345,11 +338,12 @@ where
     // 先登记订阅，再打开后缀流：登记与快照之间没有 await，因此不会漏掉更新。
     let (tx, rx) = flume::bounded::<Arc<[u8]>>(K_SUB_QUEUE_CAP);
     let (canceller, token) = cancel_pair_();
-    let sub_id = handler
-        .ctx_
-        .hub_()
-        .borrow_mut()
-        .subscribe_(planet_id, handler.ctx_.connection_id_(), tx, canceller);
+    let sub_id = handler.ctx_.hub_().borrow_mut().subscribe_(
+        planet_id,
+        handler.ctx_.connection_id_(),
+        tx,
+        canceller,
+    );
     let _guard = SubGuard_ {
         hub_: handler.ctx_.hub_().clone(),
         planet_id_: planet_id,
@@ -380,7 +374,9 @@ where
             Ok(Err(_)) => break,
             Err(_) => {
                 heartbeat = heartbeat.saturating_add(1u64);
-                let heartbeat_event = PlanetEvent::Heartbeat { sequence: heartbeat };
+                let heartbeat_event = PlanetEvent::Heartbeat {
+                    sequence: heartbeat,
+                };
                 match encode_event_async_(&heartbeat_event).await {
                     Ok(frame) => frame,
                     Err(_) => break,
