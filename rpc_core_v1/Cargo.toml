@@ -58,6 +58,9 @@ smux_v1 = { git = "https://gitee.com/lino_snsalias/smux_v1.rs.git", default-feat
 abs_art = { git = "https://gitee.com/lino_snsalias/abs_art.git" }
 buffex_tokio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 anyhow = "1"
+# 测试允许使用 std（含 `futures` 的 std 执行器 `block_on`）；库本体仍是 `#![no_std]`，
+# 这份 dev 依赖只在测试构建里把 `executor` / `std` 特性打开。
+futures = { version = "0.3", features = ["executor"] }
 # 集成测试自己写 step 函数时要直接用到取消令牌与生成宏；与主依赖同一个源。
 abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
