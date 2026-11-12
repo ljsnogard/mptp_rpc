@@ -30,9 +30,18 @@
   MPTP，`abs_art-facade` + compio，每进程最多两个业务线程，Bevy 客户端 feature-gated，
   `bevy_egui` 滑杆，denco 编解码，每客户端一条 MPTP 连接；订阅模型为 `View` 目录发现 +
   每行星 `Pull` 数据流，支持选择性订阅 / 退订 / 重新订阅；后缀流按 chunk 无限写入。
-  阶段 A 的 `SuffixStream` 与 15 项无 Bevy 集成测试已实施；记录了两条 smux 行为缺口
+  阶段 A 的 `SuffixStream` 与 16 项无 Bevy 集成测试已实施；记录了两条 smux 行为缺口
   （丢弃 `Response` 不可观察、对端消失时 `income_async` 不一定报错）及 demo 的业务层
-  对策。
+  对策。2026-11-12 追加中文字体、行星纹理、双视角相机、可调光照与 `PlanetParams`
+  广播的实施记录。
+- [`scene-param-evolution-20261112-1251.md`](scene-param-evolution-20261112-1251.md)：
+  以 demo 的需求变化为例，记录 `mptp_smux` 的传输不变量、场景业务契约的不变量，以及
+  `PlanetParams` 的可变范围、服务端清洗、开放纹理主题编号和后续需要新 API 的情形。
+- [`mptp-transport-neutrality-20261112-1344.md`](mptp-transport-neutrality-20261112-1344.md)：
+  讨论 `mptp_smux` 的设计原则能否零改动迁移到假设的 `mptp_quic`：结论是 MPTP 语义可
+  迁移，但当前 `abs_mptp` 依赖 `abs_smux`、`mptp_smux` 会话驱动与绑定合一、`Dock` 与
+  ring 内存模型仍绑定 smux；提出 `mptp_core` / `abs_mux` 的分层判据与第二个传输的
+  验证方式。
 - [`matchit-no_std-20261110-0520.md`](matchit-no_std-20261110-0520.md)：`matchit_route`
   的 no_std / bumpalo 移植：router 自有 arena、`T: 'static`、`Send` / `Sync` 的安全
   论证，以及第 3 步删除 `rpc_router_trie`、统一为一套路径匹配算法的计划。
