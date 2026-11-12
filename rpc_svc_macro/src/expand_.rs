@@ -32,7 +32,8 @@ use zyn::{
 use crate::{
     analyze_::cfg_attrs_,
     model_::{
-        ArgModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_, ServiceOfModel_,
+        ArgModel_, ControllerModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_,
+        ServiceOfModel_,
     },
 };
 
@@ -463,6 +464,18 @@ fn service_of_impl_(model: &ServiceOfModel_) -> ::zyn::TokenStream {
             }
         }
     }
+}
+
+/// 展开一个 controller impl 块。
+///
+/// 占位实现：先把方法上的 `#[rpc(...)]` 端点声明属性剥离、原样保留 impl。每个方法生成
+/// `TrEndpointHandler` 与 `install_into` 注册属 P1 后续 round，届时在本函数里补齐。
+pub(crate) fn expand_controller_(model: &ControllerModel_) -> syn::Result<zyn::Output> {
+    let impl_item = &model.impl_item_;
+
+    Result::Ok(zyn::zyn! {
+        {{ impl_item }}
+    })
 }
 
 #[cfg(test)]
