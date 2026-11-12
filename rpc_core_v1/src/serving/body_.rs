@@ -10,14 +10,23 @@
 //! use these helpers to decode the request body and write replies. Bodies are MessagePack;
 //! replies use the fixed-size (sized) path, matching the demo's simple approach.
 
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use mp_denco::{MpDecoder, MpEncoder};
-use mptp_smux::serving::config::TrConfig;
-use mptp_smux::serving::{ServingSession, SuffixStream};
-use mptp_smux::ServeError;
+use mptp_smux::{
+    ServeError,
+    serving::{ServingSession, SuffixStream, config::TrConfig},
+};
 
-use crate::x_deps::abs_cancel::{NonCancellableToken, TrMayCancel};
-use crate::x_deps::abs_mptp::spec::Status;
+use crate::x_deps::{
+    abs_cancel::{NonCancellableToken, TrMayCancel},
+    abs_mptp::spec::Status,
+};
 
 /// 编码暂存区容量：业务体超过它时明确失败而不是悄悄截断。
 const K_ENCODE_CAP_: usize = 64usize * 1024usize;
@@ -94,10 +103,7 @@ where
     let mut bytes = message.into_bytes();
     let len = bytes.len();
     let mut src: &mut [u8] = bytes.as_mut_slice();
-    session
-        .response(status)
-        .sized_async(&mut src, len)
-        .await?;
+    session.response(status).sized_async(&mut src, len).await?;
     Result::Ok(())
 }
 

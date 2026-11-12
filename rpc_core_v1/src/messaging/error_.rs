@@ -11,6 +11,10 @@
 //!
 //! [`Status`]: crate::x_deps::abs_mptp::spec::Status
 
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 use core::fmt;
 
 use crate::x_deps::abs_mptp::spec::Status;
@@ -162,7 +166,7 @@ impl fmt::Display for RpcError {
     }
 }
 
-impl std::error::Error for RpcError {}
+impl core::error::Error for RpcError {}
 
 /// 给状态码补一个便于阅读的名字。
 ///
@@ -195,6 +199,8 @@ impl StatusDebugName_ for Status {
 
 #[cfg(test)]
 mod tests_ {
+    use alloc::vec;
+
     use super::*;
 
     /// 测试错误到状态码的映射覆盖主要分支。

@@ -29,9 +29,12 @@
 //! `mptp_serving`; the wire format belongs to [`mptp_smux`], and body framing belongs to
 //! `abs_mptp`.
 
+#![no_std]
 #![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
+
+extern crate alloc;
 
 pub mod client;
 pub mod messaging;
