@@ -27,8 +27,10 @@ use super::context_::MptpContext;
 use super::endpoint_::Endpoint;
 
 /// 中间件 `before` 返回的 future。
+///
+/// 不带 `Send`：与 [`TrEndpointHandler`] 一致，future 链天然 `!Send`，`Send` 边界在分派层。
 pub type MiddlewareFuture<'f> =
-    Pin<Box<dyn Future<Output = Result<Option<Status>, ServeError>> + Send + 'f>>;
+    Pin<Box<dyn Future<Output = Result<Option<Status>, ServeError>> + 'f>>;
 
 /// 一个横切策略中间件。
 ///

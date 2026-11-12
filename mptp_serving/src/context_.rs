@@ -82,6 +82,14 @@ where
         &self.route_
     }
 
+    /// 请求头表（只读）。
+    ///
+    /// 处理器 / 中间件经它读取请求头（例如 `#[from_header]` 参数来源）；需要改写头表时用
+    /// [`session_mut`](Self::session_mut)。
+    pub fn headers(&self) -> &mptp_smux::Headers {
+        self.session_.headers()
+    }
+
     /// 只读会话视图。
     pub fn session(&self) -> &ServingSession<C> {
         self.session_

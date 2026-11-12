@@ -22,6 +22,10 @@ use super::context_::MptpContext;
 /// 对象安全：返回类型是擦除的 `Box<dyn Future>`，因此可以放进
 /// [`alloc::sync::Arc<dyn TrEndpointHandler>`](alloc::sync::Arc)。取消传播由会话内部的
 /// await 点自行处理；per-request 取消令牌在 P3 随 [`MptpContext`] 显式引入。
+///
+/// 注意：返回的 future **不带 `Send`**（见 integration-decisions 的 !Send 结论）——
+/// `gen_mcf2` 生成的带高阶类型的 future 无法被编译器穿透，future 链天然 `!Send`，`Send`
+/// 边界放在分派层，不在 handler / 中间件这一层。
 pub trait TrEndpointHandler<C, S = ()>: Send + Sync
 where
     C: TrConfig,
@@ -33,5 +37,5 @@ where
     fn handle<'a, 'f>(
         &'a self,
         ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>>;
 }
