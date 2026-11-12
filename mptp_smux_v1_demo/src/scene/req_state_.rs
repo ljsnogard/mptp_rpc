@@ -16,6 +16,13 @@ use mptp_smux::{HeaderKey, HeaderVal, serving::config::TrConfig};
 /// 请求头：测试 / 演示用的主体名（真实业务应换成令牌解析）。
 pub const K_HDR_PRINCIPAL: &str = "X-Scene-Principal";
 
+/// 组默认元数据：路由器对本层每个端点挂上的声明式标记。
+///
+/// 它由 `RadixRouter::with_group_metadata` 在绑定时继承进端点，端点自己不需要声明；
+/// 中间件 / 处理器经 `endpoint.metadata().get::<SceneGroupTag>()` 读取。
+#[derive(Clone, Copy, Debug)]
+pub struct SceneGroupTag(pub &'static str);
+
 /// 场景请求级运行期状态：中间件写、处理器读。
 ///
 /// 每请求一份、由框架 [`Default::default()`] 新建；请求结束即丢弃，不跨请求共享，
@@ -24,6 +31,9 @@ pub const K_HDR_PRINCIPAL: &str = "X-Scene-Principal";
 pub struct SceneRequestState {
     /// 本次请求的主体名；`None` 表示匿名请求。
     pub principal: Option<String>,
+
+    /// 端点从 router 继承到的组标记；`None` 表示该端点不在组内。
+    pub group: Option<&'static str>,
 }
 
 /// 鉴权中间件：把请求头里的主体名写进请求级状态。
@@ -38,7 +48,7 @@ where
 {
     fn call<'a, 'f>(
         &'a self,
-        _endpoint: &'a Endpoint<C, S, SceneRequestState>,
+        endpoint: &'a Endpoint<C, S, SceneRequestState>,
         ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
         next: &'a mut NextFn<'a, 'f, C, S, SceneRequestState>,
     ) -> MiddlewareFuture<'a> {
@@ -49,7 +59,11 @@ where
                 .try_get(HeaderKey::from_text(K_HDR_PRINCIPAL))
                 .and_then(HeaderVal::as_text)
                 .map(str::to_string);
-            ctx.request_state_mut().principal = principal;
+            // 组标记是 router 在绑定时继承进端点的元数据，端点自身没有声明。
+            let group = endpoint.metadata().get::<SceneGroupTag>().map(|tag| tag.0);
+            let state = ctx.request_state_mut();
+            state.principal = principal;
+            state.group = group;
             // 洋葱：写入请求级状态后把控制权交给下一环。
             next(ctx).await
         })

@@ -60,14 +60,15 @@ pub type NextFn<'a, 'f, C, S = (), R = ()> =
 ///
 /// `'a` 是本次借用，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，使管线在一次
 /// `.await` 之后能重新借用 `ctx`。
-pub trait TrMiddleware<C, S = (), R = ()>: Send + Sync
+pub trait TrMiddleware<C, S = (), R = (), M = Global>: Send + Sync
 where
     C: TrConfig,
+    M: Allocator,
 {
     /// 包裹一次请求处理：在调用 `next` 之前 / 之后做本中间件的事。
     fn call<'a, 'f>(
         &'a self,
-        endpoint: &'a Endpoint<C, S, R>,
+        endpoint: &'a Endpoint<C, S, R, M>,
         ctx: &'a mut MptpContext<'f, C, S, R>,
         next: &'a mut NextFn<'a, 'f, C, S, R>,
     ) -> MiddlewareFuture<'a>;
@@ -77,18 +78,20 @@ where
 ///
 /// `S` / `R` 与 router 的连接作用域状态、请求级状态一致；`A` 是中间件列表的分配器
 /// （缺省 [`Global`]）。装配期构建、请求路径只读。
-pub struct Pipeline<C, S = (), R = (), A = Global>
+pub struct Pipeline<C, S = (), R = (), A = Global, M = Global>
 where
     C: TrConfig + 'static,
     A: Allocator,
+    M: Allocator,
 {
     /// 按装配顺序排列的中间件。
-    middlewares_: Vec<Arc<dyn TrMiddleware<C, S, R>>, A>,
+    middlewares_: Vec<Arc<dyn TrMiddleware<C, S, R, M>>, A>,
 }
 
-impl<C, S, R> Pipeline<C, S, R, Global>
+impl<C, S, R, M> Pipeline<C, S, R, Global, M>
 where
     C: TrConfig + 'static,
+    M: Allocator,
 {
     /// 造一条空管线（中间件列表用全局分配器）。
     pub fn new() -> Self {
@@ -98,19 +101,21 @@ where
     }
 }
 
-impl<C, S, R> Default for Pipeline<C, S, R, Global>
+impl<C, S, R, M> Default for Pipeline<C, S, R, Global, M>
 where
     C: TrConfig + 'static,
+    M: Allocator,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C, S, R, A> Pipeline<C, S, R, A>
+impl<C, S, R, A, M> Pipeline<C, S, R, A, M>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync,
+    M: Allocator,
 {
     /// 用指定分配器造一条空管线。
     pub fn new_in(alloc: A) -> Self {
@@ -120,7 +125,7 @@ where
     }
 
     /// 追加一个中间件（装配顺序即执行顺序）。
-    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C, S, R> + 'static) -> Self {
+    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C, S, R, M> + 'static) -> Self {
         self.middlewares_.push(Arc::new(middleware));
         self
     }
@@ -131,7 +136,7 @@ where
     /// 中间件返回错误或处理器返回错误都按 [`ServeError`] 上抛，收尾仍由 servlet 兜底。
     pub async fn run<'a, 'f>(
         &'a self,
-        endpoint: &'a Endpoint<C, S, R>,
+        endpoint: &'a Endpoint<C, S, R, M>,
         ctx: &'a mut MptpContext<'f, C, S, R>,
     ) -> Result<(), ServeError> {
         // 只把 ctx 借给整条链一次：链跑完后还要用同一份 ctx 写短路回复。
@@ -154,7 +159,7 @@ where
     async fn run_from_<'a, 'f>(
         &'a self,
         index: usize,
-        endpoint: &'a Endpoint<C, S, R>,
+        endpoint: &'a Endpoint<C, S, R, M>,
         ctx: &'a mut MptpContext<'f, C, S, R>,
     ) -> Result<Option<Status>, ServeError> {
         let Some(middleware) = self.middlewares_.get(index) else {

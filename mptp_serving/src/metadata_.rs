@@ -13,11 +13,8 @@
 //! runtime state lives on the request context. The collection is an allocator-parameterised
 //! `Vec`; each marker is an `Arc<dyn Any>`.
 
-use alloc::alloc::Global;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::alloc::Allocator;
-use core::any::Any;
+use alloc::{alloc::Global, sync::Arc, vec::Vec};
+use core::{alloc::Allocator, any::Any};
 
 /// 一个端点上的类型化元数据集合。
 ///
@@ -52,12 +49,31 @@ where
         self.entries_.push(Arc::new(value));
     }
 
+    /// 继承一组默认标记：只补本集合里**没有的类型**，已有类型保持原值。
+    ///
+    /// 用于「router 组默认元数据 → 端点」的继承：先插入先命中，因此端点显式声明的标记
+    /// 覆盖组默认值。[`EndpointMetadata::get`] 按插入顺序取第一个同类型标记。
+    pub fn inherit(&mut self, parent: &EndpointMetadata<A>) {
+        for entry in parent.entries_.iter() {
+            let type_id = entry.as_ref().type_id();
+            let present = self
+                .entries_
+                .iter()
+                .any(|own| own.as_ref().type_id() == type_id);
+            if !present {
+                self.entries_.push(Arc::clone(entry));
+            }
+        }
+    }
+
     /// 按类型取标记；缺失返回 `None`。
     pub fn get<T>(&self) -> Option<&T>
     where
         T: Any + Send + Sync + 'static,
     {
-        self.entries_.iter().find_map(|entry| entry.downcast_ref::<T>())
+        self.entries_
+            .iter()
+            .find_map(|entry| entry.downcast_ref::<T>())
     }
 
     /// 是否没有标记。
@@ -100,9 +116,50 @@ mod tests_ {
         let mut metadata = EndpointMetadata::default();
         metadata.insert(Authorize { allow_: "admin" });
 
-        assert_eq!(metadata.get::<Authorize>().map(|m| m.allow_), Option::Some("admin"));
+        assert_eq!(
+            metadata.get::<Authorize>().map(|m| m.allow_),
+            Option::Some("admin")
+        );
         assert!(metadata.get::<u32>().is_none());
         assert_eq!(metadata.len(), 1usize);
+    }
+
+    /// 测试继承只补缺失的类型，端点自己的标记优先。
+    /// Test that inheritance only fills missing types and keeps the endpoint's own marker.
+    ///
+    /// - 手段：端点集合先插入 `Authorize { allow: "endpoint" }`，再继承父集合的
+    ///   `Authorize { allow: "group" }` 与 `Timeout`；父集合用另一个标记类型。
+    /// - 判断：`get::<Authorize>()` 仍是端点的值；父集合独有类型能被继承到；`len` 只增加
+    ///   缺失的那一个。
+    ///
+    /// - Means: insert an endpoint-owned `Authorize`, then inherit a parent `Authorize` and
+    ///   a parent-only `GroupTag`.
+    /// - Verdict: `Authorize` keeps the endpoint value, the group-only type appears, and
+    ///   `len` grows by exactly one.
+    #[test]
+    fn inherit_keeps_own_marker_() {
+        /// 父集合独有的标记。
+        #[derive(Debug)]
+        struct GroupTag(&'static str);
+
+        let mut endpoint = EndpointMetadata::default();
+        endpoint.insert(Authorize { allow_: "endpoint" });
+
+        let mut group = EndpointMetadata::default();
+        group.insert(Authorize { allow_: "group" });
+        group.insert(GroupTag("scene"));
+
+        endpoint.inherit(&group);
+
+        assert_eq!(
+            endpoint.get::<Authorize>().map(|m| m.allow_),
+            Option::Some("endpoint")
+        );
+        assert_eq!(
+            endpoint.get::<GroupTag>().map(|m| m.0),
+            Option::Some("scene")
+        );
+        assert_eq!(endpoint.len(), 2usize);
     }
 
     /// 测试空集合对任何类型都返回 `None`。

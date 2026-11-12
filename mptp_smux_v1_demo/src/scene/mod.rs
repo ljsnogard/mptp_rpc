@@ -21,5 +21,5 @@ pub use protocol_::{
     PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId, PlanetParams, PlanetTheme, UpdateAck,
     UpdateRequest,
 };
-pub use req_state_::{K_HDR_PRINCIPAL, PrincipalMiddleware, SceneRequestState};
+pub use req_state_::{K_HDR_PRINCIPAL, PrincipalMiddleware, SceneGroupTag, SceneRequestState};
 pub use state_::{ConnectionCtx, PlanetRegistry, SceneHub};

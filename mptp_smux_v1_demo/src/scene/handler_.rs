@@ -366,6 +366,7 @@ pub fn assemble_router(
     svc: Arc<SceneService>,
 ) -> Result<SceneRouter, mptp_serving::x_deps::matchit_route::InsertError> {
     let router = SceneRouter::new_with_request_state(Arc::new(SceneRoot));
+    let router = router.with_group_metadata(crate::scene::req_state_::SceneGroupTag("scene"));
     let router = router.use_middleware(crate::scene::req_state_::PrincipalMiddleware);
     let router = __rpc_controller_SceneService::install_into(router, svc.clone())?;
     let router = router
