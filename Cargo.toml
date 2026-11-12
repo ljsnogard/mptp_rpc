@@ -5,6 +5,7 @@ members = [
     "abs_mptp_smux",
     "abs_rpc_serv",
     "matchit_route",
+    "mptp_serving",
     "mptp_smux",
     "mptp_wire",
     "rpc_core_v1",

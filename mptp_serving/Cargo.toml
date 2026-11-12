@@ -1,0 +1,22 @@
+[package]
+edition = "2024"
+name = "mptp_serving"
+version = "0.1.0"
+
+description = "MPTP serving framework: endpoint, metadata, middleware and layered router."
+repository.workspace = true
+keywords = ["rpc", "router", "framework"]
+categories = ["no-std"]
+license.workspace = true
+
+[dependencies]
+# 协议形状：AccessMethod / Status。
+abs_mptp = { path = "../abs_mptp" }
+# 服务端会话与单一 handler 契约；本 crate 的分层 router 实现 `TrServeHandler`。
+mptp_smux = { path = "../mptp_smux" }
+# 路径树匹配：复用 matchit_route（no_std + bumpalo），不新造第二套匹配算法。
+matchit_route = { path = "../matchit_route" }
+
+[dev-dependencies]
+# 单元测试用 tokio 驱动会话；库本体不选运行时。
+tokio = { version = "1", features = ["macros", "rt"] }
