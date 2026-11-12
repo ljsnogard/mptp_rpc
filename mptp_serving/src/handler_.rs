@@ -22,7 +22,7 @@ use super::context_::MptpContext;
 /// 对象安全：返回类型是擦除的 `Box<dyn Future>`，因此可以放进
 /// [`alloc::sync::Arc<dyn TrEndpointHandler>`](alloc::sync::Arc)。取消传播由会话内部的
 /// await 点自行处理；per-request 取消令牌在 P3 随 [`MptpContext`] 显式引入。
-pub trait TrEndpointHandler<C>: Send + Sync
+pub trait TrEndpointHandler<C, S = ()>: Send + Sync
 where
     C: TrConfig,
 {
@@ -32,6 +32,6 @@ where
     /// 这样调用方可以在一次 `.await` 之后重新借用 `ctx`（中间件链的关键）。
     fn handle<'a, 'f>(
         &'a self,
-        ctx: &'a mut MptpContext<'f, C>,
+        ctx: &'a mut MptpContext<'f, C, S>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'a>>;
 }

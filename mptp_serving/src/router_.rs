@@ -5,11 +5,15 @@
 //! endpoint」。路径树复用 [`matchit_route`]（no_std + bumpalo）；方法维度由 [`MethodSet`]
 //! 表达。子 router 列表是**装配期构建、只读**的，用带分配器参数的 `Vec<T, A>` 存储。
 //!
+//! 连接作用域状态 `S`（每连接一份）由 router 以 `Arc<S>` 持有，匹配后经
+//! [`MptpContext::state`] 交给处理器 / 中间件（共享借用）。
+//!
 //! # `router_`: the layered router (P0)
 //!
 //! Each router owns a local table rooted at itself. Matching tries handler rules, then child
 //! routers (recursively), then the root endpoint. The trie is `matchit_route`; the child list
-//! is an allocator-parameterised `Vec` built at assembly time.
+//! is an allocator-parameterised `Vec` built at assembly time. `S` is per-connection state,
+//! held by the router as `Arc<S>` and handed to handlers/middleware as a shared `&S`.
 
 use alloc::alloc::Global;
 use alloc::sync::Arc;
@@ -28,7 +32,7 @@ use super::route_params_::RouteParams;
 
 /// 一次匹配的结果，泛型于端点值类型 `V`（便于纯逻辑单测）。
 ///
-/// 生产类型见 [`MatchOutcome`]（`V = Endpoint<C>`）。
+/// 生产类型见 [`MatchOutcome`]（`V = Endpoint<C, S>`）。
 #[doc(hidden)]
 pub enum Matched<'f, V> {
     /// 路径 + 方法都命中。
@@ -51,76 +55,127 @@ pub enum Matched<'f, V> {
 }
 
 /// 服务端路由的匹配结果。
-pub type MatchOutcome<'f, C> = Matched<'f, Endpoint<C>>;
+pub type MatchOutcome<'f, C, S = ()> = Matched<'f, Endpoint<C, S>>;
 
 /// 一个 router 的匹配契约。
 ///
 /// 对象安全：返回类型是具体类型 [`MatchOutcome`]，因此子 router 可以用
 /// [`alloc::sync::Arc<dyn TrRouteMatcher>`](alloc::sync::Arc) 擦除。
-pub trait TrRouteMatcher<C>: Send + Sync
+pub trait TrRouteMatcher<C, S = ()>: Send + Sync
 where
     C: TrConfig,
 {
     /// 在「相对于本 router 根」的 `location` 上匹配。
-    fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C>;
+    fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C, S>;
 }
 
 /// 默认实现：分层 router。
 ///
-/// `C` 是服务端配置类型，`A` 是子 router 列表的分配器（缺省 [`Global`]）。当前是**装配期**
-/// 构建（消费式 `bind` / `bind_router`，无运行期增删）；运行期增删需要 no_std 读多写少锁，
-/// 属后续 round。
-pub struct RadixRouter<C, A = Global>
+/// `C` 是服务端配置类型，`A` 是子 router 列表的分配器（缺省 [`Global]），`S` 是连接作用域
+/// 状态（缺省 `()`）。当前是**装配期**构建（消费式 `bind` / `bind_router`，无运行期增删）；
+/// 运行期增删需要 no_std 读多写少锁，属后续 round。
+pub struct RadixRouter<C, A = Global, S = ()>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync,
+    S: Send + Sync + 'static,
 {
     /// 本层根 endpoint：所有未命中的请求都由它兜底。
-    root_: Arc<dyn TrEndpointHandler<C>>,
+    root_: Arc<dyn TrEndpointHandler<C, S>>,
 
     /// handler 规则：精确路径模式 → 端点。
-    trie_: Trie<Endpoint<C>>,
+    trie_: Trie<Endpoint<C, S>>,
 
     /// 子 router 规则：静态前缀 → 子 router 匹配器。
-    routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C>>), A>,
+    #[allow(clippy::type_complexity)]
+    routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C, S>>), A>,
 
     /// 请求路径上的中间件链（装配期构建，请求路径只读）。
-    pipeline_: Pipeline<C>,
+    pipeline_: Pipeline<C, S>,
+
+    /// 连接作用域状态（每连接一份，跨 session 共享只读）。
+    state_: Arc<S>,
 }
 
-impl<C> RadixRouter<C, Global>
+impl<C> RadixRouter<C, Global, ()>
 where
     C: TrConfig + 'static,
 {
-    /// 用根 handler 构造一个空 router（使用全局分配器存子 router 列表）。
-    pub fn new(root: Arc<dyn TrEndpointHandler<C>>) -> Self {
+    /// 用根 handler 构造一个空 router（无连接状态，全局分配器）。
+    pub fn new(root: Arc<dyn TrEndpointHandler<C, ()>>) -> Self {
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
             routers_: Vec::new_in(Global),
             pipeline_: Pipeline::new(),
+            state_: Arc::new(()),
         }
     }
 }
 
-impl<C, A> RadixRouter<C, A>
+impl<C, A> RadixRouter<C, A, ()>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync,
 {
-    /// 用根 handler 与显式分配器构造。
-    pub fn new_in(root: Arc<dyn TrEndpointHandler<C>>, alloc: A) -> Self {
+    /// 用根 handler 与显式分配器构造（无连接状态）。
+    pub fn new_in(root: Arc<dyn TrEndpointHandler<C, ()>>, alloc: A) -> Self {
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
             routers_: Vec::new_in(alloc),
             pipeline_: Pipeline::new(),
+            state_: Arc::new(()),
+        }
+    }
+}
+
+impl<C, S> RadixRouter<C, Global, S>
+where
+    C: TrConfig + 'static,
+    S: Send + Sync + 'static,
+{
+    /// 用根 handler 与连接状态构造（全局分配器）。
+    pub fn new_with_state(root: Arc<dyn TrEndpointHandler<C, S>>, state: Arc<S>) -> Self {
+        RadixRouter {
+            root_: root,
+            trie_: Trie::new(),
+            routers_: Vec::new_in(Global),
+            pipeline_: Pipeline::new(),
+            state_: state,
+        }
+    }
+}
+
+impl<C, A, S> RadixRouter<C, A, S>
+where
+    C: TrConfig + 'static,
+    A: Allocator + Send + Sync,
+    S: Send + Sync + 'static,
+{
+    /// 用根 handler、连接状态与显式分配器构造。
+    pub fn new_in_with_state(
+        root: Arc<dyn TrEndpointHandler<C, S>>,
+        state: Arc<S>,
+        alloc: A,
+    ) -> Self {
+        RadixRouter {
+            root_: root,
+            trie_: Trie::new(),
+            routers_: Vec::new_in(alloc),
+            pipeline_: Pipeline::new(),
+            state_: state,
         }
     }
 
     /// 本层根 handler。
-    pub fn root(&self) -> &Arc<dyn TrEndpointHandler<C>> {
+    pub fn root(&self) -> &Arc<dyn TrEndpointHandler<C, S>> {
         &self.root_
+    }
+
+    /// 连接作用域状态（共享借用）。
+    pub fn state(&self) -> &S {
+        &self.state_
     }
 
     /// 绑定一条 handler 规则：`pattern` + 方法集合 + 终端处理器。
@@ -131,7 +186,7 @@ where
         mut self,
         pattern: &'static str,
         methods: MethodSet,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         let endpoint = Endpoint::new(pattern, methods, Arc::new(handler));
         let normalized = normalize_(endpoint.pattern());
@@ -144,7 +199,7 @@ where
         self,
         pattern: &'static str,
         methods: MethodSet,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, methods, handler)
     }
@@ -153,7 +208,7 @@ where
     pub fn head(
         self,
         pattern: &'static str,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::HEAD, handler)
     }
@@ -162,7 +217,7 @@ where
     pub fn view(
         self,
         pattern: &'static str,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::VIEW, handler)
     }
@@ -171,7 +226,7 @@ where
     pub fn post(
         self,
         pattern: &'static str,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::POST, handler)
     }
@@ -180,7 +235,7 @@ where
     pub fn drop(
         self,
         pattern: &'static str,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::DROP, handler)
     }
@@ -189,7 +244,7 @@ where
     pub fn push(
         self,
         pattern: &'static str,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::PUSH, handler)
     }
@@ -198,7 +253,7 @@ where
     pub fn pull(
         self,
         pattern: &'static str,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::PULL, handler)
     }
@@ -207,7 +262,7 @@ where
     pub fn call(
         self,
         pattern: &'static str,
-        handler: impl TrEndpointHandler<C> + 'static,
+        handler: impl TrEndpointHandler<C, S> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::CALL, handler)
     }
@@ -216,29 +271,34 @@ where
     ///
     /// 请求命中该前缀后，剩余路径交给子 router 递归匹配；本 router 不关心子 router 内部
     /// 规则。当前不做「handler 规则与子 router 前缀重叠」的冲突检测，属后续 round。
-    pub fn bind_router(mut self, prefix: &'static str, child: Arc<dyn TrRouteMatcher<C>>) -> Self {
+    pub fn bind_router(
+        mut self,
+        prefix: &'static str,
+        child: Arc<dyn TrRouteMatcher<C, S>>,
+    ) -> Self {
         self.routers_.push((prefix, child));
         self
     }
 
     /// 追加一个中间件（装配顺序即执行顺序）。
-    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C> + 'static) -> Self {
+    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C, S> + 'static) -> Self {
         self.pipeline_ = self.pipeline_.use_middleware(middleware);
         self
     }
 
     /// 本 router 的中间件链。
-    pub fn pipeline(&self) -> &Pipeline<C> {
+    pub fn pipeline(&self) -> &Pipeline<C, S> {
         &self.pipeline_
     }
 }
 
-impl<C, A> TrRouteMatcher<C> for RadixRouter<C, A>
+impl<C, A, S> TrRouteMatcher<C, S> for RadixRouter<C, A, S>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync,
+    S: Send + Sync + 'static,
 {
-    fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C> {
+    fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C, S> {
         // 1. 本层 handler 规则：路径 + 方法精确命中。
         match match_method_(&self.trie_, method, location, Endpoint::methods) {
             Matched::Root => {}
@@ -259,8 +319,8 @@ where
 
 /// 纯匹配：路径 + 方法 → 值。
 ///
-/// 与 `C` 无关，因此可以在单测里用简单值类型（如 `&'static str`）验证；生产路径由
-/// [`RadixRouter::match_route`] 以 `V = Endpoint<C>` 调用。
+/// 与 `C` / `S` 无关，因此可以在单测里用简单值类型（如 `&'static str`）验证；生产路径由
+/// [`RadixRouter::match_route`] 以 `V = Endpoint<C, S>` 调用。
 fn match_method_<'f, V>(
     trie: &'f Trie<V>,
     method: AccessMethod,

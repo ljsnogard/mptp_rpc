@@ -23,15 +23,16 @@ use mptp_smux::{HeaderVal, ResponsePrefix, ServeError};
 
 use super::{MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher};
 
-impl<C, A> TrServeHandler<C> for RadixRouter<C, A>
+impl<C, A, S> TrServeHandler<C> for RadixRouter<C, A, S>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync,
+    S: Send + Sync + 'static,
 {
     type Err = ServeError;
 
     type HandleAsync<'f>
-        = RouterHandleAsync<'f, 'f, C, A>
+        = RouterHandleAsync<'f, 'f, C, A, S>
     where
         Self: 'f,
         C: 'f;
@@ -48,8 +49,8 @@ where
 /// [`RadixRouter`] 作为 [`TrServeHandler`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(RouterHandle, pub, new(pub(crate)))]
-async fn router_handle_async_<'f, C, A, K>(
-    router: &'f RadixRouter<C, A>,
+async fn router_handle_async_<'f, C, A, S, K>(
+    router: &'f RadixRouter<C, A, S>,
     method: AccessMethod,
     session: &'f mut ServingSession<C>,
     cancel: K,
@@ -57,6 +58,7 @@ async fn router_handle_async_<'f, C, A, K>(
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync,
+    S: Send + Sync + 'static,
     K: TrCancellationToken,
 {
     // 克隆 location：匹配结果的 params 借用 location，而调用 handler 需要 `&mut session`；
@@ -65,7 +67,7 @@ where
 
     match router.match_route(method, &location) {
         MatchOutcome::Found { value: endpoint, params } => {
-            let mut ctx = MptpContext::new_(method, &location, params, session);
+            let mut ctx = MptpContext::new_(method, &location, params, session, router.state());
             router.pipeline().run(endpoint, &mut ctx).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
@@ -86,7 +88,7 @@ where
         }
         MatchOutcome::Root => {
             let params = RouteParams::empty();
-            let mut ctx = MptpContext::new_(method, &location, params, session);
+            let mut ctx = MptpContext::new_(method, &location, params, session, router.state());
             router.root().handle(&mut ctx).await
         }
     }

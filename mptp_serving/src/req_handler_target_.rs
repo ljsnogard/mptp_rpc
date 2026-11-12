@@ -43,9 +43,10 @@ impl<H> ReqHandlerTarget<H> {
     }
 }
 
-impl<C, H> TrEndpointHandler<C> for ReqHandlerTarget<H>
+impl<C, H, S> TrEndpointHandler<C, S> for ReqHandlerTarget<H>
 where
     C: TrConfig + 'static,
+    S: 'static,
     H: TrReqHandler<C> + Send + Sync + 'static,
     H::Err: 'static,
     ChannelTx<C>: Send,
@@ -55,7 +56,7 @@ where
 {
     fn handle<'a, 'f>(
         &'a self,
-        ctx: &'a mut MptpContext<'f, C>,
+        ctx: &'a mut MptpContext<'f, C, S>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'a>> {
         let method = ctx.method();
         // 先同步取走两半，再装箱：异步块只捕获拥有所有权的两半与 handler 引用，
