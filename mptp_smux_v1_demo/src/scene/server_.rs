@@ -13,9 +13,9 @@
 //! every planet stream live on that thread.
 
 use std::{
-    cell::RefCell,
     net::SocketAddr,
     rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 use abs_art_facade::{TrJoinHandle, TrLocalScope};
@@ -54,8 +54,8 @@ pub async fn serve_async_(addr: SocketAddr) -> Result<()> {
 ///
 /// 接受失败（监听套接字不可用）时返回错误。
 pub async fn serve_on_listener_async_(listener: TcpListener) -> Result<()> {
-    let registry = Rc::new(RefCell::new(PlanetRegistry::new_()));
-    let hub = Rc::new(RefCell::new(SceneHub::new_()));
+    let registry = Arc::new(Mutex::new(PlanetRegistry::new_()));
+    let hub = Arc::new(Mutex::new(SceneHub::new_()));
     let scope = crate::scene::cfg_::compio_rt_().local_scope();
     let mut next_connection: ClientId = 1u64;
 
@@ -90,7 +90,7 @@ pub async fn serve_on_listener_async_(listener: TcpListener) -> Result<()> {
 /// 连接任务被取消时的兜底清理（不广播 `Removed`）。
 struct ConnCleanup_ {
     /// 连接上下文。
-    ctx_: Rc<ConnectionCtx>,
+    ctx_: Arc<ConnectionCtx>,
 }
 
 impl Drop for ConnCleanup_ {
@@ -103,12 +103,12 @@ impl Drop for ConnCleanup_ {
 async fn serve_connection_async_(
     stream: TcpStream,
     connection_id: ClientId,
-    registry: Rc<RefCell<PlanetRegistry>>,
-    hub: Rc<RefCell<SceneHub>>,
+    registry: Arc<Mutex<PlanetRegistry>>,
+    hub: Arc<Mutex<SceneHub>>,
 ) -> Result<()> {
     let conn = accept_conn_async_(stream).await?;
     let shared: SharedConn = share_conn_(conn);
-    let ctx = Rc::new(ConnectionCtx::new_(connection_id, registry, hub));
+    let ctx = Arc::new(ConnectionCtx::new_(connection_id, registry, hub));
     let handler = SceneHandler::new_(ctx.clone());
     let servlet = Rc::new(MptpServlet::<ServingCfg, SceneHandler>::new(handler));
     let _cleanup = ConnCleanup_ { ctx_: ctx.clone() };
