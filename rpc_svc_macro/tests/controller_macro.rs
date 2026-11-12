@@ -12,14 +12,15 @@
 #![feature(impl_trait_in_assoc_type)]
 #![recursion_limit = "256"]
 
-use core::future::Future;
-use core::pin::pin;
-use core::task::{Context, Poll, Waker};
+use core::{
+    future::Future,
+    pin::pin,
+    task::{Context, Poll, Waker},
+};
 
 use abs_cancel::{NonCancellableToken, TrMayCancel};
 use mptp_serving::TrEndpointHandler;
-use rpc_core_v1::serving::TrReplyError;
-use rpc_core_v1::x_deps::abs_mptp::spec::Status;
+use rpc_core_v1::{serving::TrReplyError, x_deps::abs_mptp::spec::Status};
 use rpc_svc_macro::rpc;
 
 /// 加入场景的请求体。
@@ -84,6 +85,25 @@ impl SceneService {
         id: u64,
     ) -> impl rpc_core_v1::x_deps::abs_async_iter::TrAsyncIterator<Item = u64> {
         std::iter::once(id)
+    }
+
+    /// 显式声明尾参取消令牌的端点（`gen_mcf2` 形状）。
+    #[rpc(call = "with_token")]
+    #[allow(dead_code)]
+    async fn with_token<K>(
+        &self,
+        req: JoinRequest,
+        cancel: K,
+    ) -> Result<PlanetDescriptor, SceneError>
+    where
+        K: abs_cancel::TrCancellationToken,
+    {
+        let _ = self.next_id;
+        let _ = cancel.child_token();
+        Ok(PlanetDescriptor {
+            id: 2,
+            name: req.name,
+        })
     }
 }
 
@@ -168,4 +188,122 @@ where
 
     assert_handler::<C, S, __rpc_controller_SceneService::SceneService_join>();
     assert_handler::<C, S, __rpc_controller_SceneService::SceneService_pull_planet>();
+}
+
+/// 编译期验证自由函数 handler 的单元结构体实现了 `TrEndpointHandler`，且 `install_into` 可调用。
+/// Compile-time check that the free-function unit handler implements `TrEndpointHandler` and `install_into` compiles.
+///
+/// - 手段：用泛型断言实例化 `pingHandler`，并调用 `install_into::<C, (), ()>(router)`。
+/// - 判断：编译通过。
+///
+/// - Means: instantiate `pingHandler` via a generic assertion and call `install_into`.
+/// - Verdict: it compiles.
+#[allow(dead_code)]
+fn free_fn_handler_and_install_compile_<C>(router: mptp_serving::RadixRouter<C>)
+where
+    C: mptp_serving::x_deps::mptp_smux::serving::config::TrConfig + 'static,
+{
+    fn assert_handler<C, S, H>()
+    where
+        C: mptp_serving::x_deps::mptp_smux::serving::config::TrConfig,
+        H: TrEndpointHandler<C, S>,
+    {
+    }
+
+    assert_handler::<C, (), __rpc_handler_ping::pingHandler>();
+    let _ = __rpc_handler_ping::install_into::<C, (), ()>(router);
+}
+
+/// 自由函数 handler（无 `self`）。
+#[rpc(call = "scene/ping")]
+#[allow(dead_code)]
+async fn ping(req: JoinRequest) -> Result<PlanetDescriptor, SceneError> {
+    Ok(PlanetDescriptor {
+        id: 99,
+        name: req.name,
+    })
+}
+
+/// 带尾参取消令牌的自由函数 handler。
+#[rpc(call = "scene/echo_token")]
+#[allow(dead_code)]
+async fn echo_token<K>(req: JoinRequest, cancel: K) -> Result<PlanetDescriptor, SceneError>
+where
+    K: abs_cancel::TrCancellationToken,
+{
+    let _ = cancel.can_be_cancelled();
+    Ok(PlanetDescriptor {
+        id: 100,
+        name: req.name,
+    })
+}
+
+/// 测试 controller 端点显式声明尾参取消令牌后，step 函数照常生成并驱动。
+/// Test that a controller endpoint with an explicit trailing token still generates a runnable step.
+///
+/// - 手段：驱动 `SceneService_with_tokenAsync::new(&svc, req)`（`new` 不含 token）。
+/// - 判断：返回 `Ok` 且行星名一致——token 没有被误当作 body 参数解码。
+///
+/// - Means: drive `SceneService_with_tokenAsync::new(&svc, req)` (no token in `new`).
+/// - Verdict: it returns `Ok` with the matching name; the token is not decoded as a body arg.
+#[test]
+fn controller_token_param_runs_() {
+    let svc = SceneService { next_id: 7 };
+    let req = JoinRequest {
+        name: "mars".to_string(),
+    };
+    let result = block_on_(
+        __rpc_controller_SceneService::SceneService_with_tokenAsync::new(&svc, req)
+            .may_cancel_with(NonCancellableToken::new())
+            .into_future(),
+    );
+    let desc = result.expect("with_token 应当成功");
+    assert_eq!(desc.id, 2u64);
+    assert_eq!(desc.name, "mars");
+}
+
+/// 测试自由函数 handler 的 step 函数生成并可驱动。
+/// Test that a free-function handler generates a runnable step function.
+///
+/// - 手段：驱动 `__rpc_handler_ping::pingAsync::new(req)`。
+/// - 判断：返回 `Ok` 且行星名一致。
+///
+/// - Means: drive `__rpc_handler_ping::pingAsync::new(req)`.
+/// - Verdict: it returns `Ok` with the matching name.
+#[test]
+fn free_fn_step_runs_() {
+    let req = JoinRequest {
+        name: "luna".to_string(),
+    };
+    let result = block_on_(
+        __rpc_handler_ping::pingAsync::new(req)
+            .may_cancel_with(NonCancellableToken::new())
+            .into_future(),
+    );
+    let desc = result.expect("ping 应当成功");
+    assert_eq!(desc.id, 99u64);
+    assert_eq!(desc.name, "luna");
+}
+
+/// 测试自由函数 + 尾参取消令牌的组合也能生成可驱动的 step。
+/// Test that a free function combined with a trailing token still generates a runnable step.
+///
+/// - 手段：驱动 `__rpc_handler_echo_token::echo_tokenAsync::new(req)`。
+/// - 判断：返回 `Ok` 且行星名一致——token 与自由函数两者可叠加。
+///
+/// - Means: drive `__rpc_handler_echo_token::echo_tokenAsync::new(req)`.
+/// - Verdict: it returns `Ok` with the matching name.
+#[test]
+fn free_fn_with_token_runs_() {
+    let req = JoinRequest {
+        name: "titan".to_string(),
+    };
+    let result = block_on_(
+        __rpc_handler_echo_token::echo_tokenAsync::new(req)
+            .may_cancel_with(NonCancellableToken::new())
+            .into_future(),
+    );
+    let desc = result.expect("echo_token 应当成功");
+    assert_eq!(desc.id, 100u64);
+    assert_eq!(desc.name, "titan");
 }

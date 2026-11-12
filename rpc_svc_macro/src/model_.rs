@@ -47,6 +47,32 @@ pub(crate) struct EndpointMethodModel_ {
 
     /// 访问方法 + 相对路径。
     pub(crate) endpoint_: EndpointSpec_,
+
+    /// 用户显式声明的尾参取消令牌（`K: TrCancellationToken`）；`None` 表示由宏注入 `__C`。
+    pub(crate) token_param_: Option<TokenParam_>,
+}
+
+/// 端点方法显式声明的尾参取消令牌。
+#[allow(dead_code)]
+pub(crate) struct TokenParam_ {
+    /// 参数名（例如 `cancel`）。
+    pub(crate) param_ident_: syn::Ident,
+
+    /// 泛型类型参数名（例如 `K`）。
+    pub(crate) ty_ident_: syn::Ident,
+}
+
+/// 一个自由函数 handler（`#[rpc(method = "full/path")] async fn ...`）的模型。
+///
+/// 与 controller 不同：没有 `self` 接收者、没有 `interface` 前缀（路径取 `method` 声明里的
+/// 完整值）、也没有客户端代理。展开层据此生成一个无状态的单元 handler。
+#[allow(dead_code)]
+pub(crate) struct FreeFnModel_ {
+    /// 原始函数 item（`#[rpc(...)]` 端点声明属性已剥离）。
+    pub(crate) fn_item_: syn::ItemFn,
+
+    /// 端点方法模型（无 `self`）。
+    pub(crate) method_: EndpointMethodModel_,
 }
 
 /// 一个端点的访问方法 + 相对路径。

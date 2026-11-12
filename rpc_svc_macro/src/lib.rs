@@ -1,7 +1,7 @@
 //! `rpc_svc_macro`：从 controller impl 块生成 MPTP RPC 的服务端处理器与客户端代理。
 //!
 //! 业务 crate 用 `#[rpc(interface = "...")]` 标注一个固有 impl 块，把每个方法声明成独立
-//! 端点；宏据此生成：
+//! 端点；也可以用 `#[rpc(call = "full/path")]` 标注一个自由 `async fn`。宏据此生成：
 //!
 //! - 每个 unary 端点一个 `gen_may_cancel_future` step 函数 + 一个 `TrEndpointHandler`；
 //! - 每个 `Pull` 端点一个流处理器（解码路径参数 → 调方法取迭代器 → 逐项写后缀流）；
@@ -34,6 +34,11 @@
 //!   call / view / head / post / drop / push / pull；
 //! - unary 端点是 `async fn`，返回 `Result<T, E>`（`E` 实现 `TrReplyError`）；
 //! - `Pull` 端点是普通 `fn`，返回 `impl TrAsyncIterator<Item = T, Err = E>`；
+//! - unary 端点可以把请求级取消令牌作为最后一个参数显式接住：
+//!   `async fn f<K>(&self, req: X, cancel: K) where K: TrCancellationToken`（`K` 必须是唯一
+//!   的泛型类型参数、且 `cancel` 必须是最后一个参数；不写时宏自动注入 `__C`）；
+//! - 自由函数形式 `#[rpc(call = "full/path")] async fn f(...)` 不生成客户端代理，也没有
+//!   `interface` 前缀（路径取 `call = "..."` 的完整值）；
 //! - 生成代码会调用 `gen_mcf2`，协议 crate 需要打开
 //!   `#![feature(impl_trait_in_assoc_type)]`。
 //!
@@ -86,17 +91,22 @@ use zyn::syn::{self, spanned::Spanned};
 #[zyn::attribute]
 fn rpc(#[zyn(input)] item: syn::Item, args: zyn::Args) -> zyn::TokenStream {
     let result = (|| -> syn::Result<zyn::Output> {
-        match analyze_::parse_rpc_args_(&args)? {
-            analyze_::RpcArgs_::Controller { interface } => {
-                let syn::Item::Impl(item_impl) = &item else {
-                    return Result::Err(syn::Error::new(
-                        item.span(),
-                        "`#[rpc(interface = \"...\")]` 只能用于固有 impl 块",
-                    ));
-                };
+        match &item {
+            syn::Item::Impl(item_impl) => {
+                let analyze_::RpcArgs_::Controller { interface } =
+                    analyze_::parse_rpc_args_(&args)?;
                 let model = analyze_::analyze_controller_(item_impl, interface)?;
                 expand_::expand_controller_(&model)
             }
+            syn::Item::Fn(item_fn) => {
+                let (method, path) = analyze_::parse_free_fn_args_(&args)?;
+                let model = analyze_::analyze_free_fn_(item_fn, method, path)?;
+                expand_::expand_free_fn_(&model)
+            }
+            other => Result::Err(syn::Error::new(
+                other.span(),
+                "`#[rpc]` 只能用于固有 impl 块或自由 async 函数",
+            )),
         }
     })();
 
