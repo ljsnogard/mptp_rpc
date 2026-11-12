@@ -19,7 +19,6 @@
 use std::{
     future::Future,
     net::SocketAddr,
-    pin::Pin,
     rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
@@ -37,7 +36,7 @@ use mptp_smux::{
     serving::{MptpServlet, SuffixStream},
     x_deps::abs_smux,
 };
-use mptp_serving::{MptpContext, RadixRouter, TrEndpointHandler};
+use mptp_serving::{HandlerFuture, MptpContext, RadixRouter, TrEndpointHandler, box_future_};
 use mptp_smux_v1_demo::scene::{
     ClientCfg, ConnectionCtx, PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId,
     PlanetParams, PlanetRegistry, SceneHub, SceneService, ServingCfg, UpdateAck,
@@ -233,8 +232,9 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
     fn handle<'a, 'f>(
         &'a self,
         ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
-        Box::pin(async move {
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
             let mut stream: SuffixStream<'_, C> = ctx
                 .session_mut()
                 .response(Status::Ok)
@@ -265,8 +265,9 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S> for Tes
     fn handle<'a, 'f>(
         &'a self,
         ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
-        Box::pin(async move {
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
             let event = PlanetEvent::Updated(PlanetDescriptor {
                 id: 7u64,
                 owner: 1u64,
