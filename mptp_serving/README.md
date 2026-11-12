@@ -27,7 +27,8 @@ mptp_wire / abs_mptp / smux_v1
 
 - [`Endpoint`]：`pattern + MethodSet + 元数据 + 终端 handler`；
 - [`EndpointMetadata`]：类型化元数据标记集合（`Vec<Arc<dyn Any>, A>`，中间件按类型读取）；
-- [`TrEndpointHandler`]：对象安全的终端处理器（boxed future）；
+- [`TrEndpointHandler`]：对象安全的终端处理器（boxed future，收 [`MptpContext`]）；
+- [`MptpContext`]：请求上下文（方法 + 位置 + 零拷贝路由参数 + 会话）；
 - [`RouteParams`]：零拷贝路径参数（参数名借路由表、值借 `location`）；
 - [`TrRouteMatcher`] + [`RadixRouter`]：分层匹配（handler 规则 → 子 router → 根 endpoint），
   复用 `matchit_route`，方法糖 `head/view/post/drop/push/pull/call`；
@@ -50,6 +51,7 @@ mptp_wire / abs_mptp / smux_v1
 [`Endpoint`]: crate::Endpoint
 [`EndpointMetadata`]: crate::EndpointMetadata
 [`TrEndpointHandler`]: crate::TrEndpointHandler
+[`MptpContext`]: crate::MptpContext
 [`ReqHandlerTarget`]: crate::ReqHandlerTarget
 [`RouteParams`]: crate::RouteParams
 [`TrRouteMatcher`]: crate::TrRouteMatcher

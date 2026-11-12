@@ -19,13 +19,11 @@ use core::future::Future;
 use core::pin::Pin;
 
 use abs_mptp::serving::TrReqHandler;
-use abs_mptp::spec::access_method::AccessMethod;
 use mptp_smux::serving::config::{ChannelRx, ChannelTx, TrConfig};
-use mptp_smux::serving::ServingSession;
 use mptp_smux::{ServeError, StateError};
 
+use super::context_::MptpContext;
 use super::handler_::TrEndpointHandler;
-use super::route_params_::RouteParams;
 
 /// 把一个旧 [`TrReqHandler`] 包成新框架的终端处理器。
 pub struct ReqHandlerTarget<H> {
@@ -57,13 +55,12 @@ where
 {
     fn handle<'f>(
         &'f self,
-        method: AccessMethod,
-        session: &'f mut ServingSession<C>,
-        _params: RouteParams<'f>,
+        ctx: &'f mut MptpContext<'f, C>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'f>> {
+        let method = ctx.method();
         // 先同步取走两半，再装箱：异步块只捕获拥有所有权的两半与 handler 引用，
         // 不需要 `&mut ServingSession` 满足 `Send`。
-        let Option::Some((tx, rx, mut headers, location)) = session.take_parts() else {
+        let Option::Some((tx, rx, mut headers, location)) = ctx.session_mut().take_parts() else {
             return Box::pin(async { Result::Err(ServeError::State(StateError::ChannelTaken)) });
         };
 
