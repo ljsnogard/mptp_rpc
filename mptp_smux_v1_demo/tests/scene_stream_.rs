@@ -1,3 +1,5 @@
+#![feature(impl_trait_in_assoc_type)]
+
 //! 场景协议的无 Bevy 集成测试矩阵。
 //!
 //! 每个用例都跑在**真实 TCP** 上：`compio` 单线程运行时、`smux_v1` 握手、`MptpServlet` /

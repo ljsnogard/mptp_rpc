@@ -1,3 +1,5 @@
+#![feature(impl_trait_in_assoc_type)]
+
 //! 兜底 500 与错误观测 hook（Phase E / G3）的集成测试。
 //!
 //! 夹具在场景路由上装了错误观测 hook（记录 `err.to_string()`），并注册三个端点：

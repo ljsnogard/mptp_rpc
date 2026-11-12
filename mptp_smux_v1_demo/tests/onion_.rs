@@ -1,3 +1,5 @@
+#![feature(impl_trait_in_assoc_type)]
+
 //! 中间件洋葱化（Phase D / G1）的集成测试。
 //!
 //! 夹具在 `/test/order` 上依次挂了 `OrderMiddleware`（`next` 前后各记一笔）与

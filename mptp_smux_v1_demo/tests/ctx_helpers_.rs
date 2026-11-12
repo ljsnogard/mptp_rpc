@@ -1,3 +1,5 @@
+#![feature(impl_trait_in_assoc_type)]
+
 //! `MptpContext` 一级 helper 的集成测试（Phase A）。
 //!
 //! 这些 helper 是 `mptp_smux::serving::ServingSession` 之上的薄委托，单测无法构造会话

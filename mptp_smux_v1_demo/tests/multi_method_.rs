@@ -1,3 +1,5 @@
+#![feature(impl_trait_in_assoc_type)]
+
 //! 同路径多方法端点（Phase B / G4）的集成测试。
 //!
 //! 夹具在 `/test/multi` 上同时挂了 `VIEW` 与 `PULL` 两个端点：前者写标记头，后者写一个
