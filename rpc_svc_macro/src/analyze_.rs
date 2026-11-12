@@ -653,11 +653,26 @@ pub(crate) fn analyze_controller_(
             // 非端点方法：原样保留，不进入端点列表。
             continue;
         };
+        if !method.sig.generics.params.is_empty() {
+            return Result::Err(syn::Error::new(
+                method.sig.generics.span(),
+                "`#[rpc(interface = \"...\")]` 的端点方法暂不支持泛型参数 / 生命周期；\
+                 请把借用放到参数上（`&self` + `&str` 之类）",
+            ));
+        }
+        if method.sig.asyncness.is_none() {
+            return Result::Err(syn::Error::new(
+                method.sig.ident.span(),
+                "`#[rpc(interface = \"...\")]` 的端点方法必须是 `async fn`（宏会把它重写成 \
+                 `gen_may_cancel_future`）",
+            ));
+        }
         // 剥离端点声明属性；其余属性（文档、`#[cfg]` 等）保留。
         method.attrs.retain(|attr| !attr.path().is_ident("rpc"));
         methods.push(EndpointMethodModel_ {
             ident_: method.sig.ident.clone(),
             sig_: method.sig.clone(),
+            block_: method.block.clone(),
             attrs_: cfg_attrs_(&method.attrs),
             endpoint_: endpoint,
         });
