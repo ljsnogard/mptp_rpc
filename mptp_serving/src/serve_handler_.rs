@@ -13,8 +13,8 @@ use alloc::alloc::Global;
 use core::alloc::Allocator;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-use abs_mptp::spec::access_method::AccessMethod;
 use abs_mptp::spec::Status;
+use abs_mptp::spec::access_method::AccessMethod;
 use abs_str::str_alloc::String as AbsString;
 use bumpalo::Bump;
 use gen_mcf2::gen_may_cancel_future;
@@ -27,7 +27,7 @@ use super::{MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher}
 impl<C, A, S> TrServeHandler<C> for RadixRouter<C, A, S>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync,
+    A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
 {
     type Err = ServeError;
@@ -58,7 +58,7 @@ async fn router_handle_async_<'f, C, A, S, K>(
 ) -> Result<(), ServeError>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync,
+    A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
     K: TrCancellationToken,
 {
@@ -69,17 +69,28 @@ where
     let bump = Bump::new();
 
     match router.match_route(method, &location) {
-        MatchOutcome::Found { value: endpoint, params } => {
+        MatchOutcome::Found {
+            value: endpoint,
+            params,
+        } => {
             let cancel = router.cancel_token();
-            let mut ctx =
-                MptpContext::new_(&bump, method, &location, params, session, router.state(), cancel);
+            let mut ctx = MptpContext::new_(
+                &bump,
+                method,
+                &location,
+                params,
+                session,
+                router.state(),
+                cancel,
+            );
             router.pipeline().run(endpoint, &mut ctx).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
             let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
-            prefix
-                .headers_mut()
-                .set(K_TMP_ALLOW_HEADER_KEY, HeaderVal::from_text(allowed.to_allow_value()));
+            prefix.headers_mut().set(
+                K_TMP_ALLOW_HEADER_KEY,
+                HeaderVal::from_text(allowed.to_allow_value()),
+            );
             session
                 .response_prefix(prefix)
                 .no_body_async()
@@ -94,8 +105,15 @@ where
         MatchOutcome::Root => {
             let params = RouteParams::empty();
             let cancel = router.cancel_token();
-            let mut ctx =
-                MptpContext::new_(&bump, method, &location, params, session, router.state(), cancel);
+            let mut ctx = MptpContext::new_(
+                &bump,
+                method,
+                &location,
+                params,
+                session,
+                router.state(),
+                cancel,
+            );
             router.root().handle(&mut ctx).await
         }
     }
