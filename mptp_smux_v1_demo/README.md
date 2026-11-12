@@ -6,8 +6,8 @@ tokio。
 
 场景本身很简单：太阳在原点；每个客户端 `join` 后新增一颗行星，表面带程序化纹理；
 摄像机锁定自己的行星，可在「轨道跟随」与「地表随转」之间切换并用滚轮缩放；两个客户端
-默认互相订阅、互相可见；客户端可以改自己的公转 / 自转速度，也可以按行星选择性退订 /
-重新订阅。
+默认互相订阅、互相可见；客户端可以改自己的公转 / 自转速度、轨道半径、行星半径、颜色
+与纹理主题，也可以按行星选择性退订 / 重新订阅。
 
 但 demo 的第一目标是**把 `mptp_smux` 的公开 API 用满**：
 
@@ -47,7 +47,7 @@ Bevy 侧：
 | 资源 | 方法 | 语义 |
 | --- | --- | --- |
 | `/scene/join` | `Call` | 当前连接创建自己的行星，返回 `PlanetDescriptor` |
-| `/scene/update` | `Call` | 修改自己的公转 / 自转速度，返回 `UpdateAck`；连接即身份 |
+| `/scene/update` | `Call` | 用完整 `PlanetParams` 修改自己的行星，返回 `UpdateAck`；连接即身份 |
 | `/scene/unsubscribe` | `Call` | 业务层退订提示（见「API 缺口」），按连接身份移除订阅 |
 | `/scene/planets` | `View` | 列出全部行星数据流，不订阅 |
 | `/scene/planets` | `Head` | 无体；返回数量 / 目录版本头 |
@@ -63,6 +63,27 @@ Updated(PlanetDescriptor)    // 参数变化
 Removed { planet_id, version } // 行星删除，随后流结束
 Heartbeat { sequence }       // 空闲心跳，客户端忽略
 ```
+
+### 行星参数与广播
+
+`PlanetDescriptor.params` 是唯一的可变业务参数集合（`PlanetParams`）：
+
+| 字段 | 含义 | 支持范围 / 取值 |
+| --- | --- | --- |
+| `orbit_speed` | 公转速度（弧度 / 秒） | 0 – 3 |
+| `spin_speed` | 自转速度（弧度 / 秒） | 0 – 6 |
+| `orbit_radius` | 轨道半径（世界单位） | 4 – 30 |
+| `planet_radius` | 行星自身半径（世界单位） | 0.2 – 1.6 |
+| `color` | 展示颜色（低 24 位 RGB） | 任意 24 位 RGB |
+| `texture_theme` | 表面纹理主题 | 开放的 `u32`；当前客户端认识 0–5 |
+
+- `Call /scene/update` 提交**完整**参数，不是字段补丁；服务端 `sanitized_` 把连续量
+  夹到支持范围，然后递增版本并向该行星的所有 `Pull` 订阅者广播 `Updated`；
+- `UpdateAck.params` 回显服务端清洗后实际生效的参数；
+- 纹理主题在线上是开放编号：未知编号回退到「类地」，这样新增主题不需要改
+  `mptp_smux`，也不会让旧客户端解码失败；
+- 面板上的「行星参数」区会实时提交这些参数；自己的行星默认订阅自己，所以本地视图
+  也是通过服务器广播回来的，而不是绕过服务器的本地预览。
 
 ### chunk 语义
 
@@ -132,7 +153,8 @@ $ cargo run -p mptp_smux_v1_demo --features bevy-client --bin scene-client -- --
 面板提供：
 
 - 每颗行星一个勾选框（订阅 / 退订）；自己的行星默认订阅且不可退订；
-- 自己的公转 / 自转滑杆；
+- 「行星参数」滑杆：公转 / 自转速度、轨道半径、行星半径；
+- 行星颜色选择器、纹理主题下拉框；
 - 观察视角切换、缩放滑杆，以及实际使用的中文字体；
 - 背景光强度、太阳光强度滑杆（附「恢复默认」）；
 - 摄像机锁定自己的行星；未订阅行星不显示，重新勾选后按 `Snapshot` 恢复。
@@ -157,8 +179,9 @@ $ cargo run -p mptp_smux_v1_demo --features bevy-client --bin scene-client -- --
 - **地表随转**：相机固定在行星表面（北纬约 35°），跟着自转一起转；太阳与其他行星会
   扫过天空，自转非常直观。滚轮或「离地高度」滑杆调整离地高度；
 - 键盘 `1` / `2` 切换两种视角；
-- 行星表面纹理按 `planet_id` 程序化生成（大陆 / 海洋 / 极冠 / 云带），不依赖外部图片
-  资产；纹理随自转移动，轨道视角下也能看出自转。
+- 行星表面纹理按 `planet_id` + 纹理主题程序化生成（类地 / 海洋 / 沙漠 / 冰封 / 熔岩 /
+  气态），不依赖外部图片资产；纹理随自转移动，轨道视角下也能看出自转；
+- 轨道半径与行星半径由服务端参数驱动，实时修改会广播给所有订阅者。
 
 ### 光照
 
@@ -187,7 +210,7 @@ $ just e2e-scene
 ### 测试
 
 ```console
-$ cargo test -p mptp_smux_v1_demo          # 15 项集成测试，无 Bevy
+$ cargo test -p mptp_smux_v1_demo          # 16 项集成测试 + 参数清洗单元测试，无 Bevy
 $ cargo test -p mptp_smux_v1_demo --features bevy-client --bin scene-client  # 纹理 / 相机单元测试
 $ cargo test -p mptp_smux                  # SuffixStream 单元测试
 $ cargo check -p mptp_smux_v1_demo --features bevy-client --bin scene-client
@@ -215,7 +238,9 @@ required-features = ["bevy-client"]
    API，demo 暂用业务层 `/scene/unsubscribe`。
 2. **客户端无限 `Push`** 仍只有有限源语义；本 demo 不需要。
 3. 文件级细节与验证记录见
-   [`dev-notes/mptp-smux-demo-20261111-1934.md`](../dev-notes/mptp-smux-demo-20261111-1934.md)。
+   [`dev-notes/mptp-smux-demo-20261111-1934.md`](../dev-notes/mptp-smux-demo-20261111-1934.md)；
+4. 本轮「可变参数扩张」对 `mptp_smux` 不变量与业务变化范围的分析见
+   [`dev-notes/scene-param-evolution-20261112-1251.md`](../dev-notes/scene-param-evolution-20261112-1251.md)。
 
 ## `mptp_smux` API 使用矩阵
 
@@ -248,4 +273,8 @@ approved. The Bevy client loads a bundled MapleMono CJK fallback so Chinese UI t
 draws a deterministic procedural surface texture per planet so rotation is visible, and
 offers an orbit-follow camera and a surface-fixed camera with scroll-wheel zoom. Lighting is
 adjustable at runtime: the background ambient light and the sun point light (the only direct
-light) have separate sliders, so the terminator and rotation stay readable.
+light) have separate sliders, so the terminator and rotation stay readable. Mutable planet
+parameters now live in one `PlanetParams` value object (speeds, orbit radius, planet radius,
+color, texture theme); `/scene/update` submits the full object and the server broadcasts the
+sanitized result to every subscriber, so visual changes propagate through the same
+per-planet stream without touching `mptp_smux`.
