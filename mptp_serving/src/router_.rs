@@ -1,16 +1,20 @@
-//! 分层路由器的默认实现（round 1 / P0：单层 handler 规则 + 根 endpoint）。
+//! 分层路由器的默认实现（round 1 / P0）。
 //!
-//! 路径树复用 [`matchit_route`]（no_std + bumpalo），本 crate 不新造匹配算法。方法维度由
-//! [`MethodSet`] 表达：路径命中但方法不在集合内时返回 [`MatchOutcome::MethodNotAllowed`]；
-//! 本层无命中时返回 [`MatchOutcome::Root`]，由根 endpoint 兜底。
+//! 每个 router 以自己为根：`根 endpoint + handler 规则（精确路径模式 + 方法集合）+ 子
+//! router 规则（静态前缀）`。匹配顺序是「本层 handler 规则 → 子 router（递归）→ 本层根
+//! endpoint」。路径树复用 [`matchit_route`]（no_std + bumpalo）；方法维度由 [`MethodSet`]
+//! 表达。子 router 列表是**装配期构建、只读**的，用带分配器参数的 `Vec<T, A>` 存储。
 //!
-//! # `router_`: the layered router (flat, P0)
+//! # `router_`: the layered router (P0)
 //!
-//! The trie is `matchit_route`; the method dimension is `MethodSet`. Unmatched paths fall
-//! back to the root endpoint, and a path hit with a disallowed method reports
-//! `MethodNotAllowed`.
+//! Each router owns a local table rooted at itself. Matching tries handler rules, then child
+//! routers (recursively), then the root endpoint. The trie is `matchit_route`; the child list
+//! is an allocator-parameterised `Vec` built at assembly time.
 
+use alloc::alloc::Global;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::alloc::Allocator;
 
 use abs_mptp::spec::access_method::AccessMethod;
 use matchit_route::Router as Trie;
@@ -60,30 +64,51 @@ where
     fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C>;
 }
 
-/// 默认实现：单层 handler 规则 + 根 endpoint。
+/// 默认实现：分层 router。
 ///
-/// `C` 是服务端配置类型。当前是**装配期**构建（消费式 `bind`，无运行期增删）；运行期增删
-/// 需要 no_std 读多写少锁，属后续 round。
-pub struct RadixRouter<C>
+/// `C` 是服务端配置类型，`A` 是子 router 列表的分配器（缺省 [`Global`]）。当前是**装配期**
+/// 构建（消费式 `bind` / `bind_router`，无运行期增删）；运行期增删需要 no_std 读多写少锁，
+/// 属后续 round。
+pub struct RadixRouter<C, A = Global>
 where
     C: TrConfig + 'static,
+    A: Allocator + Send + Sync,
 {
     /// 本层根 endpoint：所有未命中的请求都由它兜底。
     root_: Arc<dyn TrEndpointHandler<C>>,
 
     /// handler 规则：精确路径模式 → 端点。
     trie_: Trie<Endpoint<C>>,
+
+    /// 子 router 规则：静态前缀 → 子 router 匹配器。
+    routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C>>), A>,
 }
 
-impl<C> RadixRouter<C>
+impl<C> RadixRouter<C, Global>
 where
     C: TrConfig + 'static,
 {
-    /// 用根 handler 构造一个空 router。
+    /// 用根 handler 构造一个空 router（使用全局分配器存子 router 列表）。
     pub fn new(root: Arc<dyn TrEndpointHandler<C>>) -> Self {
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
+            routers_: Vec::new_in(Global),
+        }
+    }
+}
+
+impl<C, A> RadixRouter<C, A>
+where
+    C: TrConfig + 'static,
+    A: Allocator + Send + Sync,
+{
+    /// 用根 handler 与显式分配器构造。
+    pub fn new_in(root: Arc<dyn TrEndpointHandler<C>>, alloc: A) -> Self {
+        RadixRouter {
+            root_: root,
+            trie_: Trie::new(),
+            routers_: Vec::new_in(alloc),
         }
     }
 
@@ -107,14 +132,111 @@ where
         self.trie_.insert(normalized, endpoint)?;
         Result::Ok(self)
     }
+
+    /// 一个 handler 同时响应多种方法。
+    pub fn on(
+        self,
+        pattern: &'static str,
+        methods: MethodSet,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, methods, handler)
+    }
+
+    /// `Head` 方法糖。
+    pub fn head(
+        self,
+        pattern: &'static str,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, MethodSet::HEAD, handler)
+    }
+
+    /// `View` 方法糖。
+    pub fn view(
+        self,
+        pattern: &'static str,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, MethodSet::VIEW, handler)
+    }
+
+    /// `Post` 方法糖。
+    pub fn post(
+        self,
+        pattern: &'static str,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, MethodSet::POST, handler)
+    }
+
+    /// `Drop` 方法糖。
+    pub fn drop(
+        self,
+        pattern: &'static str,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, MethodSet::DROP, handler)
+    }
+
+    /// `Push` 方法糖。
+    pub fn push(
+        self,
+        pattern: &'static str,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, MethodSet::PUSH, handler)
+    }
+
+    /// `Pull` 方法糖。
+    pub fn pull(
+        self,
+        pattern: &'static str,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, MethodSet::PULL, handler)
+    }
+
+    /// `Call` 方法糖。
+    pub fn call(
+        self,
+        pattern: &'static str,
+        handler: impl TrEndpointHandler<C> + 'static,
+    ) -> Result<Self, matchit_route::InsertError> {
+        self.bind(pattern, MethodSet::CALL, handler)
+    }
+
+    /// 在静态前缀下挂载一个子 router。
+    ///
+    /// 请求命中该前缀后，剩余路径交给子 router 递归匹配；本 router 不关心子 router 内部
+    /// 规则。当前不做「handler 规则与子 router 前缀重叠」的冲突检测，属后续 round。
+    pub fn bind_router(mut self, prefix: &'static str, child: Arc<dyn TrRouteMatcher<C>>) -> Self {
+        self.routers_.push((prefix, child));
+        self
+    }
 }
 
-impl<C> TrRouteMatcher<C> for RadixRouter<C>
+impl<C, A> TrRouteMatcher<C> for RadixRouter<C, A>
 where
     C: TrConfig + 'static,
+    A: Allocator + Send + Sync,
 {
     fn match_route<'f>(&'f self, method: AccessMethod, location: &'f str) -> MatchOutcome<'f, C> {
-        match_method_(&self.trie_, method, location, Endpoint::methods)
+        // 1. 本层 handler 规则：路径 + 方法精确命中。
+        match match_method_(&self.trie_, method, location, Endpoint::methods) {
+            Matched::Root => {}
+            other => return other,
+        }
+
+        // 2. 子 router：前缀命中后递归。
+        for (prefix, child) in &self.routers_ {
+            if let Option::Some(remaining) = strip_prefix_(prefix, location) {
+                return child.match_route(method, remaining);
+            }
+        }
+
+        // 3. 本层根 endpoint 兜底。
+        Matched::Root
     }
 }
 
@@ -126,7 +248,7 @@ fn match_method_<'f, V>(
     trie: &'f Trie<V>,
     method: AccessMethod,
     location: &'f str,
-    methods_of: impl Fn(&V) -> MethodSet,
+    methods_of: fn(&V) -> MethodSet,
 ) -> Matched<'f, V> {
     match trie.at(normalize_(location)) {
         Result::Ok(matched) => {
@@ -143,6 +265,23 @@ fn match_method_<'f, V>(
         }
         Result::Err(_) => Matched::Root,
     }
+}
+
+/// 剥掉静态前缀，返回剩余路径（在 `/` 段边界上）。
+///
+/// 与 [`normalize_`] 一致：前后空白斜杠被忽略；前缀必须按完整路径段命中，`/topic` 匹配
+/// `/topic/chat` 但不匹配 `/topicx`。
+fn strip_prefix_<'a>(prefix: &str, location: &'a str) -> Option<&'a str> {
+    let prefix = normalize_(prefix);
+    let location = normalize_(location);
+    if prefix.is_empty() {
+        return Option::Some(location);
+    }
+    let rest = location.strip_prefix(prefix)?;
+    if rest.is_empty() {
+        return Option::Some("");
+    }
+    rest.strip_prefix('/')
 }
 
 /// 路径规范化：去掉首尾 `/`，与现有 `rpc_core_v1` 的约定一致。
@@ -224,5 +363,20 @@ mod tests_ {
     fn normalize_trims_slashes_() {
         assert_eq!(normalize_("/feeds/"), "feeds");
         assert_eq!(normalize_("feeds"), "feeds");
+    }
+
+    /// 测试前缀剥离在完整路径段边界上工作。
+    /// Test that prefix stripping works on whole-segment boundaries.
+    ///
+    /// - 手段：用 `api/v1` 剥离 `api/v1/goods`、`api/v10/goods`、`api/v1`。
+    /// - 判断：第一条得到 `goods`，第二条为 `None`，第三条得到空串。
+    ///
+    /// - Means: strip `api/v1` from a normal path, a look-alike prefix and the exact path.
+    /// - Verdict: the first yields `goods`, the second `None`, the third an empty slice.
+    #[test]
+    fn strip_prefix_on_segment_boundary_() {
+        assert_eq!(strip_prefix_("api/v1", "/api/v1/goods"), Option::Some("goods"));
+        assert_eq!(strip_prefix_("api/v1", "/api/v10/goods"), Option::None);
+        assert_eq!(strip_prefix_("api/v1", "/api/v1"), Option::Some(""));
     }
 }
