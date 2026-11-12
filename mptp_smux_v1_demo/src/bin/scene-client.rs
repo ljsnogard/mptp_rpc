@@ -422,8 +422,6 @@ fn sync_planet_entities_(
         let visible =
             state.subscriptions.contains(&visual.id) && state.planets.contains_key(&visual.id);
         if !visible {
-            let old_texture = std::mem::take(&mut visual.texture_);
-            let _ = images.remove(&old_texture);
             commands.entity(entity).despawn();
             continue;
         }
