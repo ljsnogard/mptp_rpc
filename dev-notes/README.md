@@ -61,6 +61,10 @@
   `mptp_serving` 对齐框架设计稿的差距清单（G1–G7）与分阶段实施计划（Phase A–F），含
   每阶段文件 / 步骤 / 验收门槛、风险回退，以及**开新会话接续用的提示词**；面向
   「本会话做不完、跨会话推进」的场景。
+- [`rpc-svc-macro-handlers-20261113-0700.md`](rpc-svc-macro-handlers-20261113-0700.md)：
+  `rpc_svc_macro` 的 handler 形态扩展：尾参 `TrCancellationToken` 与自由函数 handler 的
+  落地记录，以及闭包 `FnHandler` + `bind_handler!` 的可行性结论（受 Rust 生命周期约束
+  不可行，附 spike 证据与替代方案）。
 - [`mptp-serving-implementation-20261113-0115.md`](mptp-serving-implementation-20261113-0115.md)：
   上述差距计划的实施记录（round 27–31 / Phase A–F）：C1 泛型请求级状态 `R`、D1 `next`
   回调洋葱的 arena 放置方案、兜底 500 与观测 hook、元数据分配器参数化与组元数据继承，
