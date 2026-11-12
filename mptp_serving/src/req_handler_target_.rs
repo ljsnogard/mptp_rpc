@@ -9,9 +9,9 @@
 //! Wraps an old `TrReqHandler` as a `TrEndpointHandler` so legacy handlers can be mounted on
 //! the new router without change.
 //!
-//! 注意：`TrEndpointHandler` 的 future 是 `Send` 的，因此本适配器只适用于**发送型**传输
-//! （如 tokio）；`!Send` 的 compio 单线程传输需要另一个非 `Send` 的 handler 变体，属后续
-//! round 的传输中立工作。
+//! 注意：`TrEndpointHandler` 的 future **不带 `Send`**（见 integration-decisions 的 !Send
+//! 结论），因此本适配器对传输不做 `Send` 假设；旧的 `TrReqHandler` 无论其 future 是否
+//! `Send`，只要 handler 类型本身 `Send + Sync` 即可挂到 [`RadixRouter`] 上。
 
 use alloc::boxed::Box;
 use alloc::string::ToString;
@@ -19,7 +19,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use abs_mptp::serving::TrReqHandler;
-use mptp_smux::serving::config::{ChannelRx, ChannelTx, TrConfig};
+use mptp_smux::serving::config::TrConfig;
 use mptp_smux::{ServeError, StateError};
 
 use super::context_::MptpContext;
@@ -49,15 +49,11 @@ where
     S: 'static,
     H: TrReqHandler<C> + Send + Sync + 'static,
     H::Err: 'static,
-    ChannelTx<C>: Send,
-    ChannelRx<C>: Send,
-    for<'f> <<H as TrReqHandler<C>>::HandleAsync<'f> as core::future::IntoFuture>::IntoFuture:
-        Send,
 {
     fn handle<'a, 'f>(
         &'a self,
         ctx: &'a mut MptpContext<'f, C, S>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
         let method = ctx.method();
         // 先同步取走两半，再装箱：异步块只捕获拥有所有权的两半与 handler 引用，
         // 不需要 `&mut ServingSession` 满足 `Send`。

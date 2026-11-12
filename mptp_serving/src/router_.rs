@@ -194,6 +194,21 @@ where
         Result::Ok(self)
     }
 
+    /// 直接绑定一个已经构造好的端点。
+    ///
+    /// 与 [`bind`](Self::bind) 不同，这里接收一个已经通过
+    /// [`Endpoint::with_metadata`](super::Endpoint::with_metadata) 挂上元数据的
+    /// [`Endpoint`]，供「先造端点、追加元数据、再登记进路径树」的装配路径使用（RPC 宏生成
+    /// 的端点正是这种形状）。`pattern` / `methods` 取自端点自身。
+    pub fn bind_endpoint(
+        mut self,
+        endpoint: Endpoint<C, S>,
+    ) -> Result<Self, matchit_route::InsertError> {
+        let normalized = normalize_(endpoint.pattern());
+        self.trie_.insert(normalized, endpoint)?;
+        Result::Ok(self)
+    }
+
     /// 一个 handler 同时响应多种方法。
     pub fn on(
         self,
