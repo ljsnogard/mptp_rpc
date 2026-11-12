@@ -18,6 +18,8 @@ use core::task::{Context, Poll, Waker};
 
 use abs_cancel::{NonCancellableToken, TrMayCancel};
 use mptp_serving::TrEndpointHandler;
+use rpc_core_v1::serving::TrReplyError;
+use rpc_core_v1::x_deps::abs_mptp::spec::Status;
 use rpc_svc_macro::rpc;
 
 /// 加入场景的请求体。
@@ -44,9 +46,13 @@ pub struct SceneError {
     pub detail_: &'static str,
 }
 
-impl core::fmt::Display for SceneError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.detail_)
+impl TrReplyError for SceneError {
+    fn status(&self) -> Status {
+        Status::InternalServerError
+    }
+
+    fn message(&self) -> String {
+        self.detail_.to_string()
     }
 }
 

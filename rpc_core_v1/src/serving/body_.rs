@@ -22,6 +22,18 @@ use crate::x_deps::abs_mptp::spec::Status;
 /// 编码暂存区容量：业务体超过它时明确失败而不是悄悄截断。
 const K_ENCODE_CAP_: usize = 64usize * 1024usize;
 
+/// 业务错误 → 状态回复的契约。
+///
+/// 宏生成的 handler 用 [`status`](Self::status) 决定状态码、用 [`message`](Self::message)
+/// 决定错误体文本；这样业务错误能映射成具体的 4xx / 5xx，而不是一律 500。
+pub trait TrReplyError {
+    /// 本错误对应的状态码。
+    fn status(&self) -> Status;
+
+    /// 本错误对应的线上 message（作为 UTF-8 错误体）。
+    fn message(&self) -> String;
+}
+
 /// 从请求体解码出一个 owned 值。
 ///
 /// # Errors
