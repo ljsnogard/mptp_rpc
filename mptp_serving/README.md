@@ -30,6 +30,7 @@ mptp_wire / abs_mptp / smux_v1
 - [`TrEndpointHandler`]：对象安全的终端处理器（boxed future，收 [`MptpContext`]）；
 - [`MptpContext`]：请求上下文（方法 + 位置 + 零拷贝路由参数 + 会话）；
 - [`TrMiddleware`] + [`Pipeline`]：线性“前置”中间件链，按 [`EndpointMetadata`] 短路；
+- [`RequestCancel`]：对象安全的取消句柄（擦除 `abs_cancel::TrCancellationToken`）；
 - [`RouteParams`]：零拷贝路径参数（参数名借路由表、值借 `location`）；
 - [`TrRouteMatcher`] + [`RadixRouter`]：分层匹配（handler 规则 → 子 router → 根 endpoint），
   复用 `matchit_route`，方法糖 `head/view/post/drop/push/pull/call`；
@@ -55,6 +56,7 @@ mptp_wire / abs_mptp / smux_v1
 [`MptpContext`]: crate::MptpContext
 [`TrMiddleware`]: crate::TrMiddleware
 [`Pipeline`]: crate::Pipeline
+[`RequestCancel`]: crate::RequestCancel
 [`ReqHandlerTarget`]: crate::ReqHandlerTarget
 [`RouteParams`]: crate::RouteParams
 [`TrRouteMatcher`]: crate::TrRouteMatcher
