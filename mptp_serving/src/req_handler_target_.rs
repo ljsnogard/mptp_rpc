@@ -53,10 +53,10 @@ where
     for<'f> <<H as TrReqHandler<C>>::HandleAsync<'f> as core::future::IntoFuture>::IntoFuture:
         Send,
 {
-    fn handle<'f>(
-        &'f self,
-        ctx: &'f mut MptpContext<'f, C>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'f>> {
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + Send + 'a>> {
         let method = ctx.method();
         // 先同步取走两半，再装箱：异步块只捕获拥有所有权的两半与 handler 引用，
         // 不需要 `&mut ServingSession` 满足 `Send`。
