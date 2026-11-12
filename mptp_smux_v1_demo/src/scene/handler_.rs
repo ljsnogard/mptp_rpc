@@ -1,51 +1,49 @@
-//! 单一 `TrServeHandler`：路由 + join / update / View / Head / per-planet Pull。
+//! 场景服务：controller 形态的端点 + 手写的 `Head` / `Pull` 处理器。
 //!
-//! 一个 [`SceneHandler`] 只服务**一条连接**；它持有该连接的身份、自己的行星以及共享的
-//! 目录 / 订阅中心。路由、方法分派与 404 都在这里；405 由框架按 `allowed_methods`
-//! 在进入 handler 之前处理。
+//! `SceneService` 是一个 [`mptp_serving`] controller（每条连接一个实例）：`Call join` /
+//! `Call update` / `Call unsubscribe` / `View planets` 四个端点由
+//! `#[rpc(interface = "scene")]` 宏生成处理器并注册；`Head planets`（只写头、无体）与
+//! `Pull planets/{id}`（后缀流）仍由本模块手写 [`TrEndpointHandler`]。
 //!
-//! 行星数据流用 [`SuffixStream`] 写：每个 `PlanetEvent` 用 denco 序列化后作为一个 chunk
-//! 写入。`Snapshot` 是流的第一帧，之后是 `Updated` / `Removed`；流一直保持到客户端退订
-//! 或连接关闭。
+//! # `handler_`: the scene controller plus hand-written Head / Pull handlers
 //!
-//! # `handler_`: the single scene handler
-//!
-//! One handler per connection. Routing, 404 and dispatch live here; 405 is handled by the
-//! framework through `allowed_methods`. The planet stream is written with `SuffixStream`.
+//! `SceneService` is a per-connection controller. The macro generates handlers for the four
+//! unary endpoints; `Head` (headers-only) and `Pull` (suffix stream) are hand-written
+//! `TrEndpointHandler` implementations.
 
+use core::{future::Future, pin::Pin};
 use std::sync::{Arc, Mutex};
 
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
-use gen_mcf2::gen_may_cancel_future;
+use mptp_serving::{MethodSet, MptpContext, TrEndpointHandler};
 use mptp_smux::{
-    HeaderVal, MethodSet, ServeError,
-    serving::{ServingSession, SuffixStream, TrServeHandler},
-    x_deps::{abs_cancel, gen_mcf2},
+    HeaderVal, ServeError,
+    serving::{ServingSession, SuffixStream, config::TrConfig},
 };
+use rpc_core_v1::serving::{TrReplyError, write_ok_async};
+use rpc_svc_macro::rpc;
 
 use crate::scene::{
-    cancel_::{SceneCancelToken, cancel_pair_},
-    cfg_::ServingCfg,
+    cancel_::cancel_pair_,
     protocol_::{
-        JoinRequest, K_HDR_DIRECTORY_VERSION, K_HDR_PLANET_COUNT, K_SCENE_JOIN, K_SCENE_PLANETS,
-        K_SCENE_UNSUBSCRIBE, K_SCENE_UPDATE, PlanetEvent, PlanetId, UnsubscribeAck,
-        UnsubscribeRequest, UpdateAck, UpdateRequest, decode_value_async_, encode_event_async_,
-        encode_to_vec_async_, parse_planet_uri_,
+        JoinRequest, K_HDR_DIRECTORY_VERSION, K_HDR_PLANET_COUNT, PlanetDescriptor, PlanetEvent,
+        PlanetId, UnsubscribeAck, UnsubscribeRequest, UpdateAck, UpdateRequest, encode_event_async_,
+        parse_planet_uri_,
     },
     state_::{ConnectionCtx, K_SUB_QUEUE_CAP, SceneHub, SubId},
 };
 
-/// 场景 handler。
-pub struct SceneHandler {
+/// 场景服务（controller）：每条连接一个实例，持有该连接的身份与共享目录 / 订阅中心。
+pub struct SceneService {
     /// 本连接的上下文。
     ctx_: Arc<ConnectionCtx>,
 }
 
-impl SceneHandler {
-    /// 用连接上下文构造 handler。
+impl SceneService {
+    /// 用连接上下文构造服务。
     pub fn new_(ctx: Arc<ConnectionCtx>) -> Self {
-        SceneHandler { ctx_: ctx }
+        SceneService { ctx_: ctx }
     }
 
     /// 本连接的上下文。
@@ -54,240 +52,156 @@ impl SceneHandler {
     }
 }
 
-impl TrServeHandler<ServingCfg> for SceneHandler {
-    type Err = ServeError;
-
-    fn allowed_methods(&self) -> MethodSet {
-        MethodSet::HEAD
-            .union(MethodSet::VIEW)
-            .union(MethodSet::PULL)
-            .union(MethodSet::CALL)
-    }
-
-    type HandleAsync<'f>
-        = SceneHandleAsync<'f, 'f>
-    where
-        Self: 'f,
-        ServingCfg: 'f;
-
-    fn handle_async<'f>(
-        &'f self,
-        method: AccessMethod,
-        session: &'f mut ServingSession<ServingCfg>,
-    ) -> Self::HandleAsync<'f> {
-        SceneHandleAsync::new(self, method, session)
-    }
+/// 场景业务错误：经 [`TrReplyError`] 映射成具体状态码。
+#[derive(Debug)]
+pub enum SceneError {
+    /// 已经加入过场景。
+    AlreadyJoined,
+    /// 尚未加入场景。
+    NotJoined,
+    /// 行星不存在。
+    PlanetGone { planet_id: PlanetId },
+    /// 缺少请求体。
+    BadRequest,
+    /// 业务值编解码失败。
+    Codec(String),
 }
 
-/// [`SceneHandler::handle_async`] 的 step 函数。
-#[allow(clippy::needless_lifetimes)]
-#[gen_may_cancel_future(SceneHandle, pub, new(pub(crate)))]
-async fn scene_handle_async_<'f, K>(
-    handler: &'f SceneHandler,
-    method: AccessMethod,
-    session: &'f mut ServingSession<ServingCfg>,
-    cancel: K,
-) -> Result<(), ServeError>
-where
-    K: TrCancellationToken,
-{
-    handler.ctx_.touch_();
-    let location = session.location().to_string();
-    match (method, location.as_str()) {
-        (AccessMethod::Call, K_SCENE_JOIN) => {
-            join_async_(handler, session, cancel.child_token()).await
+impl TrReplyError for SceneError {
+    fn status(&self) -> Status {
+        match self {
+            SceneError::AlreadyJoined => Status::new(409u16),
+            SceneError::NotJoined => Status::new(409u16),
+            SceneError::PlanetGone { .. } => Status::NotFound,
+            SceneError::BadRequest => Status::BadRequest,
+            SceneError::Codec(_) => Status::InternalServerError,
         }
-        (AccessMethod::Call, K_SCENE_UPDATE) => {
-            update_async_(handler, session, cancel.child_token()).await
+    }
+
+    fn message(&self) -> String {
+        match self {
+            SceneError::AlreadyJoined => "已经加入过场景".to_string(),
+            SceneError::NotJoined => "尚未加入场景".to_string(),
+            SceneError::PlanetGone { planet_id } => format!("行星 {planet_id} 已不存在"),
+            SceneError::BadRequest => "缺少请求体".to_string(),
+            SceneError::Codec(detail) => detail.clone(),
         }
-        (AccessMethod::Call, K_SCENE_UNSUBSCRIBE) => unsubscribe_async_(handler, session).await,
-        (AccessMethod::View, K_SCENE_PLANETS) => view_async_(handler, session).await,
-        (AccessMethod::Head, K_SCENE_PLANETS) => head_async_(handler, session).await,
-        (AccessMethod::Pull, uri) if parse_planet_uri_(uri).is_some() => {
-            pull_async_(handler, session, cancel.child_token()).await
+    }
+}
+
+#[allow(dead_code)] // 端点方法原样保留但由宏生成的 step 函数驱动；本方法供直接调用 / 测试。
+#[rpc(interface = "scene")]
+impl SceneService {
+    /// `Call /scene/join`：加入场景，创建自己的行星。
+    #[rpc(call = "join")]
+    async fn join(&self, req: JoinRequest) -> Result<PlanetDescriptor, SceneError> {
+        if self.ctx_.own_planet_().is_some() {
+            return Err(SceneError::AlreadyJoined);
         }
-        _ => reply_status_async_(session, Status::NotFound).await,
+        let descriptor = self.ctx_.registry_().lock().unwrap().allocate_planet_(
+            self.ctx_.connection_id_(),
+            &req.name,
+            req.color,
+        );
+        self.ctx_.claim_own_planet_(descriptor.id);
+        Ok(descriptor)
+    }
+
+    /// `Call /scene/update`：只操作自己的行星。
+    #[rpc(call = "update")]
+    async fn update(&self, req: UpdateRequest) -> Result<UpdateAck, SceneError> {
+        let planet_id = self.ctx_.own_planet_().ok_or(SceneError::NotJoined)?;
+        let updated = self
+            .ctx_
+            .registry_()
+            .lock()
+            .unwrap()
+            .update_planet_(planet_id, req.params)
+            .ok_or(SceneError::PlanetGone { planet_id })?;
+        let frame = encode_event_async_(&PlanetEvent::Updated(updated.clone()))
+            .await
+            .map_err(|err| SceneError::Codec(err.to_string()))?;
+        self.ctx_.hub_().lock().unwrap().broadcast_(planet_id, frame);
+        Ok(UpdateAck {
+            planet_id,
+            version: updated.version,
+            params: updated.params,
+        })
+    }
+
+    /// `Call /scene/unsubscribe`：显式退订某颗行星。
+    #[rpc(call = "unsubscribe")]
+    async fn unsubscribe(&self, req: UnsubscribeRequest) -> Result<UnsubscribeAck, SceneError> {
+        let removed = self.ctx_.hub_().lock().unwrap().unsubscribe_connection_(
+            req.planet_id,
+            self.ctx_.connection_id_(),
+        );
+        Ok(UnsubscribeAck {
+            removed: u32::try_from(removed).unwrap_or(u32::MAX),
+        })
     }
 }
 
-/// 读一个可选的 denco 请求体。
-async fn read_request_async_<T>(
-    session: &mut ServingSession<ServingCfg>,
-) -> Result<Option<T>, ServeError>
-where
-    T: abs_denco::de::TrDecodableOwned,
-{
-    let has_body = session
-        .headers()
-        .body_size()
-        .is_some_and(|size| size > 0usize);
-    if !has_body {
-        return Ok(None);
+/// `View` / `Head /scene/planets`：同一路径上按访问方法分派。
+struct ScenePlanets {
+    /// 服务实例。
+    svc_: Arc<SceneService>,
+}
+
+impl<C: TrConfig, S> TrEndpointHandler<C, S> for ScenePlanets {
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
+        Box::pin(async move {
+            match ctx.method() {
+                AccessMethod::View => {
+                    let directory = self.svc_.ctx_().registry_().lock().unwrap().directory_();
+                    write_ok_async(ctx.session_mut(), &directory).await?;
+                    Ok(())
+                }
+                AccessMethod::Head => {
+                    let (count, version) = {
+                        let registry = self.svc_.ctx_().registry_().lock().unwrap();
+                        (registry.planet_count_(), registry.directory_version_())
+                    };
+                    let mut builder = ctx.session_mut().response(Status::Ok);
+                    builder.header(K_HDR_PLANET_COUNT, HeaderVal::from_text(count.to_string()));
+                    builder.header(
+                        K_HDR_DIRECTORY_VERSION,
+                        HeaderVal::from_text(version.to_string()),
+                    );
+                    builder.no_body_async().await?;
+                    Ok(())
+                }
+                _ => {
+                    ctx.session_mut()
+                        .response(Status::MethodNotAllowed)
+                        .no_body_async()
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
     }
-    let mut body = session.req_body_async().await?;
-    let value = decode_value_async_::<T, _>(&mut body)
-        .await
-        .map_err(|err| ServeError::Target {
-            detail: err.to_string(),
-        })?;
-    Ok(Some(value))
 }
 
-/// 写一条无体状态回复。
-async fn reply_status_async_(
-    session: &mut ServingSession<ServingCfg>,
-    status: Status,
-) -> Result<(), ServeError> {
-    session.response(status).no_body_async().await?;
-    Ok(())
+/// `Pull /scene/planets/{id}`：先发 `Snapshot`，再持续写更新。
+struct ScenePull {
+    /// 服务实例。
+    svc_: Arc<SceneService>,
 }
 
-/// 写一条定长 denco 回复体。
-async fn reply_value_async_<T>(
-    session: &mut ServingSession<ServingCfg>,
-    status: Status,
-    value: &T,
-) -> Result<(), ServeError>
-where
-    T: ?Sized + abs_denco::ser::TrEncodable,
-{
-    let mut body = encode_to_vec_async_(value)
-        .await
-        .map_err(|err| ServeError::Target {
-            detail: err.to_string(),
-        })?;
-    let len = body.len();
-    let mut src: &mut [u8] = body.as_mut_slice();
-    session.response(status).sized_async(&mut src, len).await?;
-    Ok(())
-}
-
-/// `Call /scene/join`。
-async fn join_async_<K>(
-    handler: &SceneHandler,
-    session: &mut ServingSession<ServingCfg>,
-    cancel: K,
-) -> Result<(), ServeError>
-where
-    K: TrCancellationToken,
-{
-    let _ = cancel;
-    let request = read_request_async_::<JoinRequest>(session)
-        .await?
-        .unwrap_or(JoinRequest {
-            name: String::new(),
-            color: 0u32,
-        });
-
-    if handler.ctx_.own_planet_().is_some() {
-        // 每个连接只允许 join 一次。
-        return reply_status_async_(session, Status::new(409u16)).await;
+impl<S> TrEndpointHandler<crate::scene::cfg_::ServingCfg, S> for ScenePull {
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, crate::scene::cfg_::ServingCfg, S>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
+        Box::pin(async move {
+            let cancel = ctx.cancel().child_token();
+            pull_async_(self.svc_.ctx_(), ctx.session_mut(), cancel).await
+        })
     }
-
-    let descriptor = handler.ctx_.registry_().lock().unwrap().allocate_planet_(
-        handler.ctx_.connection_id_(),
-        &request.name,
-        request.color,
-    );
-    handler.ctx_.claim_own_planet_(descriptor.id);
-
-    reply_value_async_(session, Status::Ok, &descriptor).await
-}
-
-/// `Call /scene/update`：只操作自己的行星。
-async fn update_async_<K>(
-    handler: &SceneHandler,
-    session: &mut ServingSession<ServingCfg>,
-    cancel: K,
-) -> Result<(), ServeError>
-where
-    K: TrCancellationToken,
-{
-    let _ = cancel;
-    let Some(request) = read_request_async_::<UpdateRequest>(session).await? else {
-        return reply_status_async_(session, Status::BadRequest).await;
-    };
-    let Some(planet_id) = handler.ctx_.own_planet_() else {
-        // 还没 join：没有「自己的行星」可更新。
-        return reply_status_async_(session, Status::new(409u16)).await;
-    };
-
-    let updated = handler
-        .ctx_
-        .registry_()
-        .lock().unwrap()
-        .update_planet_(planet_id, request.params)
-        .ok_or_else(|| ServeError::Target {
-            detail: format!("行星 {planet_id} 已不存在"),
-        })?;
-
-    let frame = encode_event_async_(&PlanetEvent::Updated(updated.clone()))
-        .await
-        .map_err(|err| ServeError::Target {
-            detail: err.to_string(),
-        })?;
-    handler
-        .ctx_
-        .hub_()
-        .lock().unwrap()
-        .broadcast_(planet_id, frame);
-
-    let ack = UpdateAck {
-        planet_id,
-        version: updated.version,
-        params: updated.params,
-    };
-    reply_value_async_(session, Status::Ok, &ack).await
-}
-
-/// `View /scene/planets`：目录，不订阅。
-async fn view_async_(
-    handler: &SceneHandler,
-    session: &mut ServingSession<ServingCfg>,
-) -> Result<(), ServeError> {
-    let directory = handler.ctx_.registry_().lock().unwrap().directory_();
-    reply_value_async_(session, Status::Ok, &directory).await
-}
-
-/// `Head /scene/planets`：无体，只给数量与目录版本。
-async fn head_async_(
-    handler: &SceneHandler,
-    session: &mut ServingSession<ServingCfg>,
-) -> Result<(), ServeError> {
-    let (count, version) = {
-        let registry = handler.ctx_.registry_().lock().unwrap();
-        (registry.planet_count_(), registry.directory_version_())
-    };
-    let mut builder = session.response(Status::Ok);
-    builder.header(K_HDR_PLANET_COUNT, HeaderVal::from_text(count.to_string()));
-    builder.header(
-        K_HDR_DIRECTORY_VERSION,
-        HeaderVal::from_text(version.to_string()),
-    );
-    builder.no_body_async().await?;
-    Ok(())
-}
-
-/// `Call /scene/unsubscribe`：按连接身份移除某颗行星的订阅。
-///
-/// 这是应用层的清理提示，不是 `mptp_smux` 的传输语义：客户端在丢弃 `Pull` 之前显式
-/// 通知服务端，服务端立刻触发该订阅的取消令牌，pull 任务随即退出。
-async fn unsubscribe_async_(
-    handler: &SceneHandler,
-    session: &mut ServingSession<ServingCfg>,
-) -> Result<(), ServeError> {
-    let Some(request) = read_request_async_::<UnsubscribeRequest>(session).await? else {
-        return reply_status_async_(session, Status::BadRequest).await;
-    };
-    let removed = handler
-        .ctx_
-        .hub_()
-        .lock().unwrap()
-        .unsubscribe_connection_(request.planet_id, handler.ctx_.connection_id_());
-    let ack = UnsubscribeAck {
-        removed: u32::try_from(removed).unwrap_or(u32::MAX),
-    };
-    reply_value_async_(session, Status::Ok, &ack).await
 }
 
 /// 退订守卫：无论正常结束、写失败还是任务被取消，都从 hub 里摘掉订阅。
@@ -306,7 +220,8 @@ impl Drop for SubGuard_ {
     fn drop(&mut self) {
         let _ = self
             .hub_
-            .lock().unwrap()
+            .lock()
+            .unwrap()
             .unsubscribe_(self.planet_id_, self.sub_id_);
     }
 }
@@ -316,8 +231,8 @@ const K_PULL_IDLE_HEARTBEAT: core::time::Duration = core::time::Duration::from_m
 
 /// `Pull /scene/planets/{id}`：先发 `Snapshot`，再持续写更新。
 async fn pull_async_<K>(
-    handler: &SceneHandler,
-    session: &mut ServingSession<ServingCfg>,
+    conn: &ConnectionCtx,
+    session: &mut ServingSession<crate::scene::cfg_::ServingCfg>,
     cancel: K,
 ) -> Result<(), ServeError>
 where
@@ -326,7 +241,7 @@ where
     let Some(planet_id) = parse_planet_uri_(session.location()) else {
         return reply_status_async_(session, Status::NotFound).await;
     };
-    let Some(snapshot) = handler.ctx_.registry_().lock().unwrap().snapshot_(planet_id) else {
+    let Some(snapshot) = conn.registry_().lock().unwrap().snapshot_(planet_id) else {
         return reply_status_async_(session, Status::NotFound).await;
     };
     let snapshot_frame = encode_event_async_(&PlanetEvent::Snapshot(snapshot))
@@ -338,19 +253,19 @@ where
     // 先登记订阅，再打开后缀流：登记与快照之间没有 await，因此不会漏掉更新。
     let (tx, rx) = flume::bounded::<Arc<[u8]>>(K_SUB_QUEUE_CAP);
     let (canceller, token) = cancel_pair_();
-    let sub_id = handler.ctx_.hub_().lock().unwrap().subscribe_(
+    let sub_id = conn.hub_().lock().unwrap().subscribe_(
         planet_id,
-        handler.ctx_.connection_id_(),
+        conn.connection_id_(),
         tx,
         canceller,
     );
     let _guard = SubGuard_ {
-        hub_: handler.ctx_.hub_().clone(),
+        hub_: conn.hub_().clone(),
         planet_id_: planet_id,
         sub_id_: sub_id,
     };
 
-    let mut stream: SuffixStream<'_, ServingCfg> = session
+    let mut stream: SuffixStream<'_, crate::scene::cfg_::ServingCfg> = session
         .response(Status::Ok)
         .suffix_stream_async()
         .may_cancel_with(cancel.child_token())
@@ -363,14 +278,10 @@ where
         .await?;
 
     // 之后：逐帧写更新；队列断开（退订 / 慢订阅被移除 / 行星删除）即结束。
-    //
-    // 空闲时写心跳：客户端丢弃 `Pull` 后不会再读，写失败就是「订阅已经不存在」的
-    // 信号。没有心跳时，服务端会一直停在队列上，无法及时清理订阅者。
     let mut heartbeat = 0u64;
     loop {
         let frame = match compio::time::timeout(K_PULL_IDLE_HEARTBEAT, rx.recv_async()).await {
             Ok(Ok(frame)) => frame,
-            // 队列断开：退订 / 行星删除 / 慢订阅被移除。
             Ok(Err(_)) => break,
             Err(_) => {
                 heartbeat = heartbeat.saturating_add(1u64);
@@ -393,7 +304,7 @@ where
         }
     }
 
-    // 收尾：半关闭写端、读尽对端。收尾失败已经不影响写出的响应。
+    // 收尾：半关闭写端、读尽对端。
     let _ = stream
         .finish_async()
         .may_cancel_with(NonCancellableToken::new())
@@ -401,8 +312,52 @@ where
     Ok(())
 }
 
-/// 让类型检查器确认 `SceneCancelToken` 可以交给 `mptp_smux` 的取消入口。
-const _: fn() = || {
-    fn assert_token<T: TrCancellationToken>() {}
-    assert_token::<SceneCancelToken>();
-};
+/// 写一条无体状态回复。
+async fn reply_status_async_<C>(
+    session: &mut ServingSession<C>,
+    status: Status,
+) -> Result<(), ServeError>
+where
+    C: mptp_smux::serving::config::TrConfig,
+{
+    session.response(status).no_body_async().await?;
+    Ok(())
+}
+
+/// 场景根 handler：未命中任何端点时兜底写 404。
+struct SceneRoot;
+
+impl<C: TrConfig, S> TrEndpointHandler<C, S> for SceneRoot {
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ServeError>> + 'a>> {
+        Box::pin(async move {
+            ctx.session_mut()
+                .response(Status::NotFound)
+                .no_body_async()
+                .await?;
+            Ok(())
+        })
+    }
+}
+
+/// 把 controller 端点与手写端点装配进一个 [`mptp_serving::RadixRouter`]。
+///
+/// # Errors
+///
+/// 端点路径冲突或装配失败时返回错误。
+pub fn assemble_router(
+    svc: Arc<SceneService>,
+) -> Result<mptp_serving::RadixRouter<crate::scene::cfg_::ServingCfg>, mptp_serving::x_deps::matchit_route::InsertError> {
+    let router = mptp_serving::RadixRouter::<crate::scene::cfg_::ServingCfg>::new(Arc::new(SceneRoot));
+    let router = __rpc_controller_SceneService::install_into(router, svc.clone())?;
+    let router = router
+        .on(
+            "scene/planets",
+            MethodSet::VIEW.union(MethodSet::HEAD),
+            ScenePlanets { svc_: svc.clone() },
+        )?
+        .pull("scene/planets/{id}", ScenePull { svc_: svc })?;
+    Ok(router)
+}

@@ -26,7 +26,7 @@ use compio::net::{TcpListener, TcpStream};
 use mptp_smux::serving::MptpServlet;
 
 use crate::scene::{
-    ConnectionCtx, PlanetRegistry, SceneHandler, SceneHub, ServingCfg,
+    ConnectionCtx, PlanetRegistry, SceneHub, SceneService, ServingCfg,
     cfg_::{Dock, SharedConn},
     conn_::{accept_conn_async_, share_conn_},
     protocol_::ClientId,
@@ -109,8 +109,10 @@ async fn serve_connection_async_(
     let conn = accept_conn_async_(stream).await?;
     let shared: SharedConn = share_conn_(conn);
     let ctx = Arc::new(ConnectionCtx::new_(connection_id, registry, hub));
-    let handler = SceneHandler::new_(ctx.clone());
-    let servlet = Rc::new(MptpServlet::<ServingCfg, SceneHandler>::new(handler));
+    let svc = Arc::new(SceneService::new_(ctx.clone()));
+    let router = crate::scene::handler_::assemble_router(svc)
+        .map_err(|err| anyhow!("装配场景路由失败：{err}"))?;
+    let servlet = Rc::new(MptpServlet::<ServingCfg, _>::new(router));
     let _cleanup = ConnCleanup_ { ctx_: ctx.clone() };
 
     let mut binding = abs_smux::conn::TrConnection::bind_async(

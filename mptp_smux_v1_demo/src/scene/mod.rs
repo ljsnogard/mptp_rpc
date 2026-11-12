@@ -14,7 +14,7 @@ pub mod state_;
 
 pub use cfg_::{ClientCfg, ServingCfg};
 pub use client_::SceneClient;
-pub use handler_::SceneHandler;
+pub use handler_::SceneService;
 pub use net_::{NetCommand, NetEvent, NetHandle, spawn_net_thread_};
 pub use protocol_::{
     PlanetDescriptor, PlanetDirectory, PlanetEvent, PlanetId, PlanetParams, PlanetTheme, UpdateAck,
