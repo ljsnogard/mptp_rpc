@@ -4,8 +4,6 @@
 
 - [`mptp-protocol-20261020-0200.md`](mptp-protocol-20261020-0200.md)：通信格式（前缀、头表、
   定长 / 分块体、后缀流、会话顺序）与实现模型；
-- [`rpc-framework-20261020-0332.md`](rpc-framework-20261020-0332.md)：`core_rpc_mptp_smux_v1`
-  的重构计划、Phase 0 结果与待确认问题。
 - [`rpc-preludes-20261022-2110.md`](rpc-preludes-20261022-2110.md)：`rpc_core_v1::preludes`
   的导出内容与后续文档补全清单。
 - [`router-20261106-0112.md`](router-20261106-0112.md)：分层 router 的设计提案——
@@ -37,17 +35,6 @@
 - [`scene-param-evolution-20261112-1251.md`](scene-param-evolution-20261112-1251.md)：
   以 demo 的需求变化为例，记录 `mptp_smux` 的传输不变量、场景业务契约的不变量，以及
   `PlanetParams` 的可变范围、服务端清洗、开放纹理主题编号和后续需要新 API 的情形。
-- [`mptp-transport-neutrality-20261112-1344.md`](mptp-transport-neutrality-20261112-1344.md)：
-  讨论 `mptp_smux` 的设计原则能否零改动迁移到假设的 `mptp_quic`：结论是 MPTP 语义可
-  迁移，但当前 `abs_mptp` 依赖 `abs_smux`、`mptp_smux` 会话驱动与绑定合一、`Dock` 与
-  ring 内存模型仍绑定 smux；提出 `mptp_core` / `abs_mux` 的分层判据与第二个传输的
-  验证方式；补充讨论 servlet 与 connection 的绑定、每连接状态 owner 与并发 session
-  的冲突域，以及 DockBinding 作为 per-connection/per-dock acceptor 资源与 servlet
-  分派职责的分离；最后更正为「servlet/service 绑定 dock，connection 由 router 持有并
-  被多个 dock 共享」。
-- [`matchit-no_std-20261110-0520.md`](matchit-no_std-20261110-0520.md)：`matchit_route`
-  的 no_std / bumpalo 移植：router 自有 arena、`T: 'static`、`Send` / `Sync` 的安全
-  论证，以及第 3 步删除 `rpc_router_trie`、统一为一套路径匹配算法的计划。
 - [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
   `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
   dev/0.3.0 的改动、依赖统一与验证结果。
