@@ -38,7 +38,7 @@ use crate::{
     analyze_::cfg_attrs_,
     model_::{
         ArgModel_, ControllerModel_, ConvertKind_, EndpointMethodModel_, InterfaceModel_,
-        MethodModel_, ServiceModel_, ServiceOfModel_,
+        MethodKind_, MethodModel_, ServiceModel_, ServiceOfModel_,
     },
 };
 
@@ -486,7 +486,7 @@ pub(crate) fn expand_controller_(model: &ControllerModel_) -> syn::Result<zyn::O
     })
 }
 
-/// 生成 controller 的隐藏模块：目前只含每个端点方法的 step 函数。
+/// 生成 controller 的隐藏模块：step 函数 + 端点处理器 + `install_into`。
 fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStream> {
     let self_ty = &model.self_ty_;
     let self_ident = self_type_ident_(self_ty).ok_or_else(|| {
@@ -501,14 +501,31 @@ fn controller_module_(model: &ControllerModel_) -> syn::Result<::zyn::TokenStrea
         .iter()
         .map(|method| endpoint_step_fn_(self_ty, method))
         .collect::<syn::Result<Vec<_>>>()?;
+    let handlers = model
+        .methods_
+        .iter()
+        .map(|method| {
+            let handler_struct = handler_struct_(&self_ident, self_ty, method);
+            let handler_impl = handler_impl_(&self_ident, method);
+            quote! {
+                #handler_struct
+                #handler_impl
+            }
+        })
+        .collect::<Vec<_>>();
+    let install = install_into_(&self_ident, model);
 
     Result::Ok(quote! {
         #[doc(hidden)]
         #[allow(non_snake_case, non_camel_case_types, unused_imports)]
         pub mod #module_ident {
             use super::*;
+            use ::mptp_serving::{Endpoint, MethodSet, MptpContext, RadixRouter, TrEndpointHandler};
+            use ::mptp_serving::x_deps::mptp_smux::{ServeError, serving::config::TrConfig};
 
             #(#steps)*
+            #(#handlers)*
+            #install
         }
     })
 }
@@ -593,6 +610,108 @@ fn self_type_ident_(ty: &Type) -> Option<syn::Ident> {
         .segments
         .last()
         .map(|segment| segment.ident.clone())
+}
+
+/// 一个端点处理器结构体的标识符：`{Self}_{Method}`。
+fn handler_ident_(self_ident: &syn::Ident, method_ident: &syn::Ident) -> syn::Ident {
+    format_ident!("{}_{}", self_ident, method_ident)
+}
+
+/// 生成一个端点处理器结构体：持有 `Arc<Self>`，实现 [`TrEndpointHandler`]。
+fn handler_struct_(self_ident: &syn::Ident, self_ty: &Type, method: &EndpointMethodModel_) -> ::zyn::TokenStream {
+    let handler_ident = handler_ident_(self_ident, &method.ident_);
+
+    quote! {
+        #[doc(hidden)]
+        pub struct #handler_ident {
+            pub svc_: ::std::sync::Arc<#self_ty>,
+        }
+    }
+}
+
+/// 生成一个端点处理器的 [`TrEndpointHandler`] 实现。
+///
+/// 当前 `handle` 是占位：body 解码与回复写入属 P1 后续 round（届时把 step 函数接进来）。
+fn handler_impl_(self_ident: &syn::Ident, method: &EndpointMethodModel_) -> ::zyn::TokenStream {
+    let handler_ident = handler_ident_(self_ident, &method.ident_);
+
+    quote! {
+        #[doc(hidden)]
+        impl<C, S> TrEndpointHandler<C, S> for #handler_ident
+        where
+            C: TrConfig,
+        {
+            fn handle<'a, 'f>(
+                &'a self,
+                ctx: &'a mut MptpContext<'f, C, S>,
+            ) -> ::core::pin::Pin<
+                ::std::boxed::Box<
+                    dyn ::core::future::Future<Output = Result<(), ServeError>> + 'a
+                >
+            > {
+                ::std::boxed::Box::pin(async move {
+                    let _ = (self, ctx);
+                    // TODO(P1 后续): 解码 body、调用 step 函数、写回复。
+                    Result::Ok(())
+                })
+            }
+        }
+    }
+}
+
+/// 生成 `install_into`：把每个端点处理器注册进 [`RadixRouter`]。
+fn install_into_(self_ident: &syn::Ident, model: &ControllerModel_) -> ::zyn::TokenStream {
+    let self_ty = &model.self_ty_;
+    let interface = &model.path_;
+    let bindings = model.methods_.iter().map(|method| {
+        let handler_ident = handler_ident_(self_ident, &method.ident_);
+        let path = full_path_lit_(interface, &method.endpoint_.path_);
+        let method_set = method_set_expr_(method.endpoint_.method_);
+        quote! {
+            .bind_endpoint(Endpoint::new(
+                #path,
+                #method_set,
+                ::std::sync::Arc::new(#handler_ident { svc_: svc.clone() }),
+            ))?
+        }
+    });
+
+    quote! {
+        #[doc(hidden)]
+        pub fn install_into<C>(
+            router: RadixRouter<C>,
+            svc: ::std::sync::Arc<#self_ty>,
+        ) -> Result<RadixRouter<C>, ::mptp_serving::x_deps::matchit_route::InsertError>
+        where
+            C: TrConfig + 'static,
+        {
+            let router = router #(#bindings)*;
+            Result::Ok(router)
+        }
+    }
+}
+
+/// 访问方法种类 → [`MethodSet`] 表达式。
+fn method_set_expr_(kind: MethodKind_) -> ::zyn::TokenStream {
+    match kind {
+        MethodKind_::Call => quote!(MethodSet::CALL),
+        MethodKind_::View => quote!(MethodSet::VIEW),
+        MethodKind_::Head => quote!(MethodSet::HEAD),
+        MethodKind_::Post => quote!(MethodSet::POST),
+        MethodKind_::Drop => quote!(MethodSet::DROP),
+        MethodKind_::Push => quote!(MethodSet::PUSH),
+        MethodKind_::Pull => quote!(MethodSet::PULL),
+    }
+}
+
+/// 组合 interface 前缀与端点相对路径，返回一个字符串字面量。
+fn full_path_lit_(interface: &str, path: &str) -> syn::LitStr {
+    let full = if interface.is_empty() {
+        path.to_string()
+    } else {
+        format!("{}/{}", interface, path)
+    };
+    syn::LitStr::new(&full, proc_macro2::Span::call_site())
 }
 
 /// 把方法体里的 `self` 重写成 `svc`。

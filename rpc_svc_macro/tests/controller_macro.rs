@@ -17,6 +17,7 @@ use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 
 use abs_cancel::{NonCancellableToken, TrMayCancel};
+use mptp_serving::TrEndpointHandler;
 use rpc_svc_macro::rpc;
 
 /// 加入场景的请求体。
@@ -104,4 +105,28 @@ where
             Poll::Pending => core::hint::spin_loop(),
         }
     }
+}
+
+/// 编译期验证生成的端点处理器实现了 `TrEndpointHandler`。
+/// Compile-time check that the generated endpoint handler implements `TrEndpointHandler`.
+///
+/// - 手段：用只要求 `TrEndpointHandler<C, S>` 的泛型断言实例化生成的处理器类型。
+/// - 判断：编译通过。
+///
+/// - Means: instantiate the generated handler through a generic assertion requiring
+///   `TrEndpointHandler<C, S>`.
+/// - Verdict: it compiles.
+#[allow(dead_code)]
+fn handler_implements_endpoint_handler_<C, S>()
+where
+    C: mptp_serving::x_deps::mptp_smux::serving::config::TrConfig,
+{
+    fn assert_handler<C, S, H>()
+    where
+        C: mptp_serving::x_deps::mptp_smux::serving::config::TrConfig,
+        H: TrEndpointHandler<C, S>,
+    {
+    }
+
+    assert_handler::<C, S, __rpc_controller_SceneService::SceneService_join>();
 }
