@@ -51,6 +51,12 @@
   集成阶段的设计决策：取消令牌进 `MptpContext` 引入 `K: Clone` 公开约束（暂缓待确认）、
   框架保持 `Send`-by-design（compio 需非 `Send` 变体）、`MptpConnection` 属 `mptp_smux`
   绑定层、demo 迁移按 tokio 先行 / compio 待后。
+- [`rpc-svc-macro-mptp-serving-20261112-2130.md`](rpc-svc-macro-mptp-serving-20261112-2130.md)：
+  `rpc_svc_macro` 面向 `mptp_serving` 的改造方向（设计稿）：从「service trait + interface
+  marker + body enum 分派」改成「每个方法 = 一个 `Endpoint`」的 C# Attribute 形状（方法 +
+  路径 + 元数据 + 参数来源），宏直接落在 `RadixRouter` / `Endpoint` / `EndpointMetadata` /
+  `TrEndpointHandler` 上，退役 `RpcRouter` / `TrRpcService` / `TrRpcCallCtx`；含三个框架侧
+  前置缺口、理想语法、场景 demo 前后对照与 P0–P3 分阶段。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。
