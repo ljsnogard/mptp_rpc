@@ -33,7 +33,9 @@ pub use config::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfi
 pub use ctx_::RpcCallCtx;
 pub use router_::{Router, RouterCtx, RouterError, TrPathHandler, TrPathRouter, TrPathRouterMut};
 pub use rpc_router_::{RpcRouter, RpcServiceCtx};
-pub use body_::{TrReplyError, decode_body_async, write_ok_async, write_status_async};
+pub use body_::{
+    TrReplyError, decode_body_async, write_ok_async, write_status_async, write_stream_item_async,
+};
 #[doc(hidden)]
 pub use cancel_future_::{EitherMayCancel, MapErrMayCancel, ReadyMayCancel};
 #[doc(hidden)]

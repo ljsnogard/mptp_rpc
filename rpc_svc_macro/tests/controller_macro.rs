@@ -75,6 +75,16 @@ impl SceneService {
             name: req.name,
         })
     }
+
+    /// 拉取某颗行星的数据流（示意：返回一个单元素迭代器）。
+    #[rpc(pull = "planets/{id}")]
+    #[allow(dead_code)]
+    fn pull_planet(
+        &self,
+        id: u64,
+    ) -> impl rpc_core_v1::x_deps::abs_async_iter::TrAsyncIterator<Item = u64> {
+        std::iter::once(id)
+    }
 }
 
 /// 测试 controller 形态生成的 step 函数能编译并被正确驱动。
@@ -157,4 +167,5 @@ where
     }
 
     assert_handler::<C, S, __rpc_controller_SceneService::SceneService_join>();
+    assert_handler::<C, S, __rpc_controller_SceneService::SceneService_pull_planet>();
 }
