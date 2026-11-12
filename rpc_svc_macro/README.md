@@ -1,133 +1,166 @@
 # rpc_svc_macro
 
-`#[rpc]` 属性宏：从 service trait / interface marker / 服务端 impl 块生成 MPTP RPC 样板。
+`#[rpc]` 属性宏：把一段服务端业务代码展开成 MPTP RPC 的**端点处理器**、`RadixRouter`
+**登记函数**与（controller 形态的）**客户端代理**。它只做「形状转换」，运行期由
+[`mptp_serving`](../mptp_serving) 承担。
 
-Use it in the protocol crate shared by the client and the server:
+## 快速开始
 
 ```rust
-use abs_cancel::TrMayCancel;
-use rpc_core_v1::messaging::RpcResult;
 use rpc_svc_macro::rpc;
 
-#[derive(Clone, denco_macro::TrEncodable, denco_macro::TrDecodable)]
-pub struct GoodsInfo {
-    pub id: u64,
+/// 一个 controller：状态放在 struct 里，每个方法是一个端点。
+pub struct Greeter {
+    prefix: String,
 }
 
-#[rpc(service = "customer/goods")]
-pub trait GoodsCustomerService {
-    fn list(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<GoodsInfo>>>;
-
-    fn find<'f>(
-        &'f self,
-        name: &'f str,
-    ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<Vec<GoodsInfo>>>;
+#[rpc(interface = "greet")]
+impl Greeter {
+    /// `Call /greet/hello`
+    #[rpc(call = "hello")]
+    async fn hello(&self, req: HelloRequest) -> Result<HelloReply, GreetError> {
+        Ok(HelloReply {
+            text: format!("{}{}", self.prefix, req.name),
+        })
+    }
 }
 
-#[rpc(path = "api/v1", services = [GoodsCustomerService])]
-pub struct ApiV1;
+// 装配：controller 生成 `__rpc_controller_<Self>::install_into`。
+let router = mptp_serving::RadixRouter::<ServingCfg>::new(std::sync::Arc::new(root));
+let router = __rpc_controller_Greeter::install_into(
+    router,
+    std::sync::Arc::new(Greeter {
+        prefix: "hi ".to_string(),
+    }),
+)?;
+let servlet = mptp_smux::serving::MptpServlet::<ServingCfg, _>::new(router);
 ```
+
+`root` 是 `RadixRouter` 的兜底端点（未命中时由它响应）。上面的 `HelloRequest` /
+`HelloReply` 需要 denco 的 `TrEncodable` / `TrDecodable`，`GreetError` 需要实现
+`rpc_core_v1::serving::TrReplyError`。
+
+## 组织服务端代码的五种方式
+
+### 1. controller：有状态、多端点、带客户端代理
+
+`#[rpc(interface = "...")] impl Service { ... }`。每个带 `#[rpc(方法 = "路径")]` 的方法
+是一个端点，相对路径拼在 `interface` 前缀之后；`Arc<Self>` 被所有端点共享。
+
+```rust
+#[rpc(interface = "scene")]
+impl SceneService {
+    #[rpc(call = "join")]
+    async fn join(&self, req: JoinRequest) -> Result<PlanetDescriptor, SceneError> { ... }
+}
+```
+
+### 2. 自由函数：无状态、单端点、无客户端代理
+
+```rust
+/// `Call /scene/ping` —— 没有 `self`，路径取完整值。
+#[rpc(call = "scene/ping")]
+async fn ping(req: JoinRequest) -> Result<PlanetDescriptor, SceneError> { ... }
+
+// 装配：自由函数生成 `__rpc_handler_<fn>::install_into(router)`。
+let router = __rpc_handler_ping::install_into(router)?;
+```
+
+### 3. 尾参取消令牌：两种写法都能叠加
+
+unary 端点可以把请求级取消令牌作为**最后一个参数**显式接住：
+
+```rust
+#[rpc(call = "join")]
+async fn join<K>(&self, req: JoinRequest, cancel: K) -> Result<PlanetDescriptor, SceneError>
+where
+    K: abs_cancel::TrCancellationToken,
+{
+    let _ = cancel.child_token(); // 也可以交给 may_cancel_with
+    ...
+}
+```
+
+`K` 必须是唯一的泛型类型参数、`cancel` 必须是最后一个参数；不写时宏自动注入。
+
+### 4. Pull 流端点：后缀流
+
+`Pull` 是普通 `fn`，返回 `impl TrAsyncIterator<Item = T, Err = E>`；路径参数由宏解码后，
+逐项把 item 写进回复后缀流。
+
+```rust
+#[rpc(pull = "items/{count}")]
+fn items(&self, count: u64) -> impl TrAsyncIterator<Item = u64> {
+    0..count
+}
+```
+
+### 5. 手写 `TrEndpointHandler`：完全控制（逃生口）
+
+需要读请求后缀、手改头表、`take_parts` 自己收尾等能力时，直接在 `mptp_serving` 层
+`impl TrEndpointHandler`，用 `router.bind_endpoint(...)` 登记；可与宏生成的端点混挂。
+
+```rust
+struct Raw;
+impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for Raw {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move { ... })
+    }
+}
+```
+
+## 如何选择
+
+| 需求 | 选哪种 |
+| --- | --- |
+| 有状态、多端点、想要类型化客户端代理 | controller（方式 1） |
+| 无状态、单端点、不关心客户端代理 | 自由函数（方式 2） |
+| 需要请求级取消 | 在方式 1 / 2 上加尾参令牌（方式 3） |
+| 回复是持续流（订阅、推送） | Pull 端点（方式 4） |
+| 读请求后缀、手改头表、手控收尾 | 手写 `TrEndpointHandler`（方式 5） |
+
+**闭包不做**：`MptpContext` 是借用的，而 handler future 会借用它；`TrEndpointHandler` 的
+`handle<'a, 'f>` 又要求两个独立生命周期，`Fn` 闭包无法表达「返回借用参数的 future」
+（高阶 return type 不可写）。请用自由函数覆盖「无捕获」、controller 覆盖「有状态」。
 
 ## 生成内容
 
-### service 宏
+对 controller（隐藏模块 `__rpc_controller_<Self>`）与自由函数（隐藏模块
+`__rpc_handler_<fn>`）分别生成：
 
-- trait 里注入 `const SERVICE_PATH: &'static str = "customer/goods";`；
-- trait 里注入隐藏的默认方法 `__rpc_dispatch_async`，它转到隐藏模块里的 dispatch；
-- 隐藏模块 `__rpc_service_GoodsCustomerService` 里的一个 owned body enum `Call`：
-  - 变体名 = 方法名，字段名 = 参数名；
-  - 无参方法用 unit variant；
-  - 同时派生 `TrEncodable` 与 `TrDecodable`；
-- `impl GoodsCustomerService for ClientProxy<'_, C, I>`：
-  - 每个方法把参数转成 owned 字段，构造 `Call` 变体；
-  - 调用 `rpc_core_v1::client::call_unary_async`；
-- 隐藏模块里的 `dispatch_async`：
-  - 解码 `Call`，`match` 方法变体；
-  - 调用用户实现，把成功值写成 `200 Ok`，业务错误交给 `TrRpcCallCtx::reply_error_async`，由上下文把 `RpcError` 拆成状态码与线上 message。
+- 每个 unary 端点：
+  - `gen_may_cancel_future` step 函数（`{Self}_{Method}Async` / `{Method}Async`）；
+  - 一个 `TrEndpointHandler`（controller 持有 `Arc<Self>`，自由函数是无状态单元结构体）；
+- 每个 `Pull` 端点：一个流处理器（解码路径参数 → 调方法取迭代器 → 逐项写后缀流）；
+- `install_into`：把处理器登记进 `RadixRouter`；
+- controller 另生成客户端代理 `{Self}Rpc<'a, C>` 与构造器 `rpc(&client)`。
 
-**不再生成** `Worker`、队列、`route()` 或 `run_async()`。
-
-### interface 宏
-
-- `impl TrRpcInterface for ApiV1`，`PATH = "api/v1"`；
-- `impl ServiceSelector<C> for ApiV1`，返回 `ClientProxy<'_, C, ApiV1>`；
-- 不再生成 worker 组或任何服务端组织代码。
-
-### service_of 宏
+客户端代理只覆盖 **1 个 body 参数的 unary 端点**：
 
 ```rust
-#[rpc(service_of(ApiV1))]
-impl GoodsCustomerService for GoodsCustomerServiceImpl {
-    // 用户实现
-}
+let proxy = __rpc_controller_Greeter::rpc(&client);
+let reply: HelloReply = proxy.hello(req).may_cancel_with(token).await?;
 ```
-
-它保留原来的 impl，并为 `GoodsCustomerServiceImpl` 补一个
-`abs_rpc_serv::service::TrRpcService<ApiV1, C>` 实现：
-
-- `SERVICE_PATH` 取自 `<Self as GoodsCustomerService>::SERVICE_PATH`；
-- `dispatch_async` 转到 trait 的隐藏方法，因此不需要知道隐藏模块路径；
-- `Err` 是 `rpc_core_v1::messaging::RpcError`。
-
-## 服务端：用户自己组织
-
-`RpcRouter` 是 interface 级的**内联** router；用户逐个 `add_service`，再用顶层
-`Router` 按 interface 前缀登记：
-
-```rust
-use mptp_smux::serving::MptpServlet;
-use rpc_core_v1::serving::{RpcRouter, Router};
-
-let router = Router::<ServingCfg, _>::new()
-    .call(|ctx| {
-        RpcRouter::<ApiV1>::new(ctx)
-            .add_service::<GoodsCustomerServiceImpl>(move |_| {
-                GoodsCustomerServiceImpl::new(other_data)
-            })
-    })
-    .call(|ctx| {
-        RpcRouter::<ApiV2>::new(ctx)
-            .add_service::<GoodsAdminServiceImpl>(move |_| {
-                GoodsAdminServiceImpl::new(another_args)
-            })
-    });
-let server = MptpServlet::<ServingCfg, _>::new(router);
-```
-
-- `Router` 按最长路径前缀把请求交给对应的 `RpcRouter`；
-- `RpcRouter` 剥掉 `ApiV1::PATH`，再按 service 的 `SERVICE_PATH` 匹配；
-- 未命中写 `404`，非 `Call` 写 `405`；
-- 命中后直接解码、调用 service、写回复、收尾；没有队列，也不替使用者 spawn。
-
-路径匹配统一由 `matchit_route` 完成；需要队列 / 背压时，在 `TrReqHandler` 或 target
-内部实现自己的队列，框架不再提供第二套 router 装配链。
 
 ## 使用约束
 
-- service trait 必须是非泛型、非 unsafe 的普通 trait，方法接收者只能是 `&self`；
-- 方法不能是 `async fn`，返回类型必须是
-  `impl TrMayCancel<'f, MayCancelOutput = RpcResult<T>>`；
-- `T` 必须实现 denco 的 `TrEncodable` / `TrDecodable`（当前 `()` 不在其中）；
-- 参数支持按值类型，以及这些顶层借用：
-  - `&str` → `String`
-  - `&[u8]` → `Vec<u8>`
-  - `&String` / `&Vec<u8>` → clone
-  - `&Copy` 标量（整数、浮点、`bool`、`char`）→ 解引用
-  - 其它 `&T` 请改成 owned 参数；`&mut T` 不支持；
-- **body enum 是 owned 的**：`denco_macro` 当前不支持带生命周期参数的派生类型，
-  因此客户端与服务端共用一个 owned enum；借用参数在客户端被转成 owned 字段；
-- 变体顺序由方法声明顺序决定。稳定协议上只应在末尾追加方法；插入 / 重排方法会改变
-  线上的变体编号；
-- interface marker 必须是单元结构体；`services` 写 service trait 的路径。`services` 仍会
-  被解析与校验，但不再据此生成 worker；
-- `service_of(Interface)` 的 impl 块暂不支持泛型参数与 where 子句；同一个 impl 类型在
-  **同一个 interface** 下只能对应一个 service trait（不同 interface 可以各有一条实现）；
-- 生成代码会调用 `gen_mcf2`，协议 crate 需要打开
+- controller 必须是**固有 impl 块**，暂不支持泛型 impl / impl 级 where 子句；
+- 端点方法用 `#[rpc(方法 = "路径")]` 声明访问方法与路径，支持
+  call / view / head / post / drop / push / pull；
+- unary 端点：`async fn`，返回 `Result<T, E>`（`E: TrReplyError`），**0 或 1 个 body 参数**
+  （路径参数只对 `Pull` 生效）；
+- `Pull` 端点：普通 `fn`，返回 `impl TrAsyncIterator<Item = T, Err = E>`，路径参数按参数名
+  从路由取；
+- 尾参令牌：唯一泛型类型参数 + 最后一个参数 + `TrCancellationToken` 约束；
+- 自由函数：路径取完整值（无 `interface` 前缀）、不生成客户端代理、端点声明写在
+  `#[rpc(方法 = "完整路径")]` 上；
+- 业务类型需要 denco 的 `TrEncodable` / `TrDecodable`；
+- 生成代码会调用 `gen_mcf2`，协议 crate 需要
   `#![feature(impl_trait_in_assoc_type)]`。
 
 ## 依赖
 
-生成代码使用 `rpc_core_v1` 的运行时与 `x_deps`（包括转出的 `abs_rpc_serv`）。协议 crate
-的 denco 派生会引用 `abs_denco`、`abs_cancel` 与 `gen_mcf2`；`#[rpc]` 生成的隐藏模块已经为
-body enum 补齐了这些导入，但用户自己的业务类型派生仍需要它们（或通过
-`use rpc_core_v1::x_deps::...` 引入）。
+生成的隐藏模块会引用 `mptp_serving`、`rpc_core_v1`（含 `x_deps`）、`gen_mcf2` 与
+`abs_cancel`；业务类型的 denco 派生还需要 `abs_denco`。协议 crate 的 `Cargo.toml` 里
+把这些依赖列全即可（`rpc_core_v1::x_deps` 也转出了其中大部分）。
