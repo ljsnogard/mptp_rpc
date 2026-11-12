@@ -21,15 +21,16 @@ use zyn::{
     format_ident,
     meta::Arg,
     syn::{
-        self, Attribute, Expr, FnArg, GenericArgument, ItemImpl, ItemStruct, ItemTrait, Lifetime,
-        Pat, ReturnType, TraitItem, TraitItemFn, Type, TypeParamBound,
+        self, Attribute, Expr, FnArg, GenericArgument, ImplItem, ItemImpl, ItemStruct, ItemTrait,
+        Lifetime, Lit, Meta, Pat, ReturnType, TraitItem, TraitItemFn, Type, TypeParamBound,
         spanned::Spanned,
         visit::{self, Visit},
     },
 };
 
 use crate::model_::{
-    ArgModel_, ConvertKind_, InterfaceModel_, MethodModel_, ServiceModel_, ServiceOfModel_,
+    ArgModel_, ControllerModel_, ConvertKind_, EndpointMethodModel_, EndpointSpec_, InterfaceModel_,
+    MethodKind_, MethodModel_, ServiceModel_, ServiceOfModel_,
 };
 
 /// `#[rpc]` 的两种参数形态。
@@ -54,6 +55,12 @@ pub(crate) enum RpcArgs_ {
         /// 该实现所属的 interface marker 路径。
         interface: syn::Path,
     },
+
+    /// `#[rpc(interface = "...")]`：controller 固有 impl 块。
+    Controller {
+        /// interface 路径前缀。
+        interface: String,
+    },
 }
 
 /// 解析 `#[rpc]` 属性参数，区分 service 宏与 interface 宏。
@@ -62,6 +69,7 @@ pub(crate) fn parse_rpc_args_(args: &zyn::Args) -> syn::Result<RpcArgs_> {
     let mut interface_path: Option<(String, proc_macro2::Span)> = Option::None;
     let mut services: Option<(Vec<syn::Path>, proc_macro2::Span)> = Option::None;
     let mut service_of: Option<(syn::Path, proc_macro2::Span)> = Option::None;
+    let mut controller_interface: Option<(String, proc_macro2::Span)> = Option::None;
 
     for arg in args {
         match arg.name().map(ToString::to_string).as_deref() {
@@ -97,6 +105,17 @@ pub(crate) fn parse_rpc_args_(args: &zyn::Args) -> syn::Result<RpcArgs_> {
                 }
                 service_of = Option::Some(parse_service_of_arg_(arg)?);
             }
+            Some("interface") => {
+                if controller_interface.is_some() {
+                    return Result::Err(syn::Error::new(
+                        arg_span_(arg),
+                        "`interface` 只能出现一次",
+                    ));
+                }
+                let (value, span) = string_arg_(arg, "interface")?;
+                validate_interface_path_(&value, span)?;
+                controller_interface = Option::Some((value, span));
+            }
             Some(other) => {
                 return Result::Err(syn::Error::new(
                     arg_span_(arg),
@@ -116,35 +135,59 @@ pub(crate) fn parse_rpc_args_(args: &zyn::Args) -> syn::Result<RpcArgs_> {
         }
     }
 
-    match (service, interface_path, services, service_of) {
-        (Option::Some((path, _)), Option::None, Option::None, Option::None) => {
+    match (service, interface_path, services, service_of, controller_interface) {
+        (Option::Some((path, _)), Option::None, Option::None, Option::None, Option::None) => {
             Result::Ok(RpcArgs_::Service { path })
         }
-        (Option::None, Option::Some((path, _)), Option::Some((services, _)), Option::None) => {
-            Result::Ok(RpcArgs_::Interface { path, services })
-        }
-        (Option::None, Option::None, Option::None, Option::Some((interface, _))) => {
-            Result::Ok(RpcArgs_::ServiceOf { interface })
-        }
+        (
+            Option::None,
+            Option::Some((path, _)),
+            Option::Some((services, _)),
+            Option::None,
+            Option::None,
+        ) => Result::Ok(RpcArgs_::Interface { path, services }),
+        (
+            Option::None,
+            Option::None,
+            Option::None,
+            Option::Some((interface, _)),
+            Option::None,
+        ) => Result::Ok(RpcArgs_::ServiceOf { interface }),
+        (
+            Option::None,
+            Option::None,
+            Option::None,
+            Option::None,
+            Option::Some((interface, _)),
+        ) => Result::Ok(RpcArgs_::Controller { interface }),
         (Option::Some((_, span)), ..) => Result::Err(syn::Error::new(
             span,
-            "`service` 不能与 `path` / `services` / `service_of` 混用：`service` 用于 service trait",
+            "`service` 不能与 `path` / `services` / `service_of` / `interface` 混用：`service` 用于 service trait",
         )),
-        (Option::None, Option::Some((_, span)), Option::None, _) => {
+        (Option::None, Option::Some((_, span)), Option::None, _, _) => {
             Result::Err(syn::Error::new(span, "interface 宏缺少 `services = [...]`"))
         }
-        (Option::None, Option::None, Option::Some((_, span)), _) => {
+        (Option::None, Option::None, Option::Some((_, span)), _, _) => {
             Result::Err(syn::Error::new(span, "interface 宏缺少 `path = \"...\"`"))
         }
-        (Option::None, Option::Some((_, span)), _, Option::Some(_)) => Result::Err(
+        (Option::None, Option::Some((_, span)), _, Option::Some(_), _) => Result::Err(
             syn::Error::new(span, "`path` / `services` 不能与 `service_of` 混用"),
         ),
-        (Option::None, Option::None, Option::None, Option::None) => Result::Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "缺少 `#[rpc]` 参数；service 用 `#[rpc(service = \"...\")]`，interface 用 \
-             `#[rpc(path = \"...\", services = [...])]`，服务端 impl 用 \
-             `#[rpc(service_of(Interface))]`",
-        )),
+        (Option::None, Option::None, Option::None, Option::Some((_, span)), Option::Some(_)) => {
+            Result::Err(syn::Error::new(span, "`service_of` 不能与 `interface` 混用"))
+        }
+        (Option::None, Option::Some((_, span)), _, _, Option::Some(_)) => Result::Err(
+            syn::Error::new(span, "`path` / `services` 不能与 `interface` 混用"),
+        ),
+        (Option::None, Option::None, Option::None, Option::None, Option::None) => Result::Err(
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "缺少 `#[rpc]` 参数；service 用 `#[rpc(service = \"...\")]`，interface 用 \
+                 `#[rpc(path = \"...\", services = [...])]`，服务端 impl 用 \
+                 `#[rpc(service_of(Interface))]`，controller 用 \
+                 `#[rpc(interface = \"...\")]`",
+            ),
+        ),
     }
 }
 
@@ -555,6 +598,200 @@ pub(crate) fn analyze_service_of_(
         self_ty_: (*item.self_ty).clone(),
         interface_path_: interface_path,
     })
+}
+
+/// 分析一个 controller impl 块。
+///
+/// 每个带 `#[rpc(call/view/head/... = "path")]` 的方法是一个端点；不带该属性的方法原样
+/// 保留（属于 controller 的普通辅助方法）。方法上的 `#[rpc(...)]` 端点声明属性会被剥离，
+/// 避免再次被当作独立属性宏展开。
+pub(crate) fn analyze_controller_(
+    item: &ItemImpl,
+    interface: String,
+) -> syn::Result<ControllerModel_> {
+    if item.unsafety.is_some() {
+        return Result::Err(syn::Error::new(
+            item.unsafety.span(),
+            "`#[rpc(interface = \"...\")]` 不支持 unsafe impl",
+        ));
+    }
+    if item.defaultness.is_some() {
+        return Result::Err(syn::Error::new(
+            item.defaultness.span(),
+            "`#[rpc(interface = \"...\")]` 不支持 default impl",
+        ));
+    }
+    if item.trait_.is_some() {
+        return Result::Err(syn::Error::new(
+            item.self_ty.span(),
+            "`#[rpc(interface = \"...\")]` 只能用于固有 impl（`impl SceneService { ... }`），\
+             不支持 trait impl",
+        ));
+    }
+    if !item.generics.params.is_empty() {
+        return Result::Err(syn::Error::new(
+            item.generics.span(),
+            "`#[rpc(interface = \"...\")]` 暂不支持泛型 impl",
+        ));
+    }
+    if let Some(where_clause) = &item.generics.where_clause {
+        return Result::Err(syn::Error::new(
+            where_clause.span(),
+            "`#[rpc(interface = \"...\")]` 暂不支持 impl 级 where 子句",
+        ));
+    }
+
+    let self_ty = (*item.self_ty).clone();
+
+    let mut impl_item = item.clone();
+    let mut methods = Vec::new();
+    for impl_item_entry in &mut impl_item.items {
+        let ImplItem::Fn(method) = impl_item_entry else {
+            continue;
+        };
+        let Some(endpoint) = parse_method_endpoint_(&method.attrs)? else {
+            // 非端点方法：原样保留，不进入端点列表。
+            continue;
+        };
+        // 剥离端点声明属性；其余属性（文档、`#[cfg]` 等）保留。
+        method.attrs.retain(|attr| !attr.path().is_ident("rpc"));
+        methods.push(EndpointMethodModel_ {
+            ident_: method.sig.ident.clone(),
+            sig_: method.sig.clone(),
+            attrs_: cfg_attrs_(&method.attrs),
+            endpoint_: endpoint,
+        });
+    }
+
+    Result::Ok(ControllerModel_ {
+        self_ty_: self_ty,
+        impl_item_: impl_item,
+        path_: interface,
+        methods_: methods,
+    })
+}
+
+/// 从方法的 `#[rpc(...)]` 属性里解析端点声明；方法没有 `#[rpc]` 时返回 `None`。
+fn parse_method_endpoint_(attrs: &[Attribute]) -> syn::Result<Option<EndpointSpec_>> {
+    let mut found = Option::None;
+    for attr in attrs {
+        if !attr.path().is_ident("rpc") {
+            continue;
+        }
+        if found.is_some() {
+            return Result::Err(syn::Error::new(
+                attr.span(),
+                "一个方法只能有一个 `#[rpc(...)]` 端点声明",
+            ));
+        }
+        found = Option::Some(attr);
+    }
+    let Option::Some(attr) = found else {
+        return Result::Ok(Option::None);
+    };
+
+    let Meta::List(list) = &attr.meta else {
+        return Result::Err(syn::Error::new(
+            attr.span(),
+            "方法上的 `#[rpc]` 需要写成 `#[rpc(call = \"join\")]` 之类的端点声明",
+        ));
+    };
+    let metas = list
+        .parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+        .map_err(|err| syn::Error::new(err.span(), format!("解析方法端点声明失败：{err}")))?;
+
+    let mut method = Option::None;
+    let mut path = Option::None;
+    for meta in metas {
+        let Meta::NameValue(name_value) = meta else {
+            return Result::Err(syn::Error::new(
+                meta.span(),
+                "端点声明的每一项都要写成 `方法名 = \"路径\"`，例如 `call = \"join\"`",
+            ));
+        };
+        let Option::Some(kind_name) = name_value.path.get_ident() else {
+            return Result::Err(syn::Error::new(
+                name_value.path.span(),
+                "访问方法名必须是简单标识符",
+            ));
+        };
+        if method.is_some() {
+            return Result::Err(syn::Error::new(
+                kind_name.span(),
+                "访问方法只能声明一次",
+            ));
+        }
+        let Expr::Lit(expr_lit) = name_value.value else {
+            return Result::Err(syn::Error::new(
+                name_value.value.span(),
+                "端点路径需要写成字符串字面量",
+            ));
+        };
+        let Lit::Str(lit_str) = expr_lit.lit else {
+            return Result::Err(syn::Error::new(
+                expr_lit.lit.span(),
+                "端点路径需要写成字符串字面量",
+            ));
+        };
+        let Option::Some(kind) = method_kind_from_name_(kind_name) else {
+            return Result::Err(syn::Error::new(
+                kind_name.span(),
+                format!(
+                    "不认识的访问方法 `{kind_name}`；支持 call / view / head / post / drop / push / pull"
+                ),
+            ));
+        };
+        let value = lit_str.value();
+        validate_endpoint_path_(&value, lit_str.span())?;
+        method = Option::Some(kind);
+        path = Option::Some(value.trim_matches('/').to_string());
+    }
+
+    let (Option::Some(method), Option::Some(path)) = (method, path) else {
+        return Result::Err(syn::Error::new(
+            attr.span(),
+            "方法端点声明需要指定访问方法，例如 `#[rpc(call = \"join\")]`",
+        ));
+    };
+    Result::Ok(Option::Some(EndpointSpec_ {
+        method_: method,
+        path_: path,
+    }))
+}
+
+/// 访问方法名 → [`MethodKind_`]。
+fn method_kind_from_name_(name: &syn::Ident) -> Option<MethodKind_> {
+    match name.to_string().as_str() {
+        "call" => Option::Some(MethodKind_::Call),
+        "view" => Option::Some(MethodKind_::View),
+        "head" => Option::Some(MethodKind_::Head),
+        "post" => Option::Some(MethodKind_::Post),
+        "drop" => Option::Some(MethodKind_::Drop),
+        "push" => Option::Some(MethodKind_::Push),
+        "pull" => Option::Some(MethodKind_::Pull),
+        _ => Option::None,
+    }
+}
+
+/// 校验端点路径：非空、无空段、无空白；允许首尾 `/`（分析时统一 `trim_matches('/')`）。
+fn validate_endpoint_path_(path: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return Result::Err(syn::Error::new(span, "端点路径不能为空"));
+    }
+    if trimmed.split('/').any(str::is_empty) {
+        return Result::Err(syn::Error::new(
+            span,
+            "端点路径不能包含空段（例如 `a//b`）",
+        ));
+    }
+    if path.chars().any(char::is_whitespace) {
+        return Result::Err(syn::Error::new(
+            span,
+            "端点路径不能包含空白字符",
+        ));
+    }
+    Result::Ok(())
 }
 
 /// 分析一个方法。
@@ -1327,5 +1564,112 @@ mod tests_ {
 
         let static_ref = analyze_arg_(&name, &parse_quote!(&'static str));
         assert!(static_ref.is_err(), "&'static 借用应当被拒绝");
+    }
+
+    /// 测试 controller 分析能从固有 impl 抽出端点方法，并跳过非端点辅助方法。
+    /// Test that controller analysis extracts endpoint methods and skips helper methods.
+    ///
+    /// - 手段：构造一个带 `#[rpc(call = "join")]` 端点与一个普通辅助方法的 `impl`。
+    /// - 判断：interface 为 `scene`，端点列表只含 `join`（`Call`、路径 `join`）。
+    ///
+    /// - Means: build an impl with one `#[rpc(call = "join")]` endpoint and one helper.
+    /// - Verdict: the interface is `scene` and the endpoint list holds only `join`.
+    #[test]
+    fn analyzes_controller_() {
+        let item: ItemImpl = parse_quote!(
+            impl SceneService {
+                #[rpc(call = "join")]
+                async fn join(&self, req: u64) -> u64 { req }
+
+                fn helper_(&self) {}
+            }
+        );
+        let model = analyze_controller_(&item, "scene".to_string())
+            .expect("controller 应当分析成功");
+
+        assert_eq!(model.path_, "scene");
+        assert_eq!(model.methods_.len(), 1usize);
+        assert_eq!(model.methods_[0].ident_.to_string(), "join");
+        assert_eq!(model.methods_[0].endpoint_.method_, MethodKind_::Call);
+        assert_eq!(model.methods_[0].endpoint_.path_, "join");
+    }
+
+    /// 测试 controller 分析拒绝 trait impl 与泛型 impl。
+    /// Test that controller analysis rejects trait impls and generic impls.
+    ///
+    /// - 手段：分别构造 `impl SomeTrait for SceneService {}` 与 `impl<T> SceneService<T> {}`。
+    /// - 判断：两者都返回 `Err`。
+    ///
+    /// - Means: build a trait impl and a generic impl.
+    /// - Verdict: both are rejected.
+    #[test]
+    fn rejects_bad_controller_impls_() {
+        let trait_impl: ItemImpl = parse_quote!(impl SomeTrait for SceneService {});
+        assert!(
+            analyze_controller_(&trait_impl, "scene".to_string()).is_err(),
+            "trait impl 应当被拒绝"
+        );
+
+        let generic: ItemImpl = parse_quote!(impl<T> SceneService<T> {});
+        assert!(
+            analyze_controller_(&generic, "scene".to_string()).is_err(),
+            "泛型 impl 应当被拒绝"
+        );
+    }
+
+    /// 测试端点属性解析拒绝未知访问方法与空路径。
+    /// Test that endpoint parsing rejects unknown methods and empty paths.
+    ///
+    /// - 手段：分别构造 `#[rpc(foo = "join")]` 与 `#[rpc(call = "")]`。
+    /// - 判断：两者都返回 `Err`。
+    ///
+    /// - Means: build an unknown method kind and an empty path.
+    /// - Verdict: both are rejected.
+    #[test]
+    fn rejects_bad_endpoint_() {
+        let unknown: ItemImpl = parse_quote!(
+            impl SceneService {
+                #[rpc(foo = "join")]
+                async fn join(&self) {}
+            }
+        );
+        assert!(
+            analyze_controller_(&unknown, "scene".to_string()).is_err(),
+            "未知访问方法应当被拒绝"
+        );
+
+        let empty: ItemImpl = parse_quote!(
+            impl SceneService {
+                #[rpc(call = "")]
+                async fn join(&self) {}
+            }
+        );
+        assert!(
+            analyze_controller_(&empty, "scene".to_string()).is_err(),
+            "空路径应当被拒绝"
+        );
+    }
+
+    /// 测试访问方法名到 [`MethodKind_`] 的映射覆盖全部七种方法。
+    /// Test that the method-name mapping covers all seven access methods.
+    ///
+    /// - 手段：把七种方法名与一个未知名交给 `method_kind_from_name_`。
+    /// - 判断：七种都得到对应变体，未知名得到 `None`。
+    ///
+    /// - Means: map seven names and one unknown name.
+    /// - Verdict: the seven map correctly and the unknown yields `None`.
+    #[test]
+    fn method_kind_maps_() {
+        fn kind(name: &str) -> Option<MethodKind_> {
+            method_kind_from_name_(&zyn::format_ident!("{}", name))
+        }
+        assert_eq!(kind("call"), Option::Some(MethodKind_::Call));
+        assert_eq!(kind("view"), Option::Some(MethodKind_::View));
+        assert_eq!(kind("head"), Option::Some(MethodKind_::Head));
+        assert_eq!(kind("post"), Option::Some(MethodKind_::Post));
+        assert_eq!(kind("drop"), Option::Some(MethodKind_::Drop));
+        assert_eq!(kind("push"), Option::Some(MethodKind_::Push));
+        assert_eq!(kind("pull"), Option::Some(MethodKind_::Pull));
+        assert_eq!(kind("foo"), Option::None);
     }
 }

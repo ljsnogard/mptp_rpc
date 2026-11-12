@@ -212,6 +212,16 @@ fn rpc(#[zyn(input)] item: syn::Item, args: zyn::Args) -> zyn::TokenStream {
                 let model = analyze_::analyze_service_of_(item_impl, interface)?;
                 expand_::expand_service_of_(&model)
             }
+            analyze_::RpcArgs_::Controller { interface } => {
+                let syn::Item::Impl(item_impl) = &item else {
+                    return Result::Err(syn::Error::new(
+                        item.span(),
+                        "`#[rpc(interface = \"...\")]` 只能用于固有 impl 块",
+                    ));
+                };
+                let model = analyze_::analyze_controller_(item_impl, interface)?;
+                expand_::expand_controller_(&model)
+            }
         }
     })();
 
