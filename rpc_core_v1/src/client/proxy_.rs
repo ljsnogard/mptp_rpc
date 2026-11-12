@@ -14,16 +14,17 @@
 //! runtime, while the interface is a zero-sized type parameter. [`call_unary_async`]
 //! performs one unary exchange; macro-generated methods only build the body enum variant.
 
+use alloc::{
+    format,
+    string::{String, ToString},
+};
 use core::{marker::PhantomData, mem::MaybeUninit};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use abs_mptp::{
     client::{TrMptpClient, TrMptpSession},
-    spec::{
-        Status, StdHeaderKey, StdHeaderVal,
-        access_method::AccessMethod,
-    },
+    spec::{Status, StdHeaderKey, StdHeaderVal, access_method::AccessMethod},
 };
 use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::client::MptpClient;
@@ -132,7 +133,10 @@ where
     C: rpc_client::TrRpcClientConfig,
 {
     /// 本 interface 的客户端视图。
-    type View<'a> where Self: 'a, C: 'a;
+    type View<'a>
+    where
+        Self: 'a,
+        C: 'a;
 
     /// 从底层客户端选出本 interface 的视图。
     fn select<'a>(client: &'a MptpClient<C>) -> Self::View<'a>;

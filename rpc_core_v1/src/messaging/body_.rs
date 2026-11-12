@@ -13,8 +13,11 @@
 //! `send_req_body_async` drains the other half; the ring is only a bounded concurrency
 //! window, not a size limit. Decoding reads directly through a limited / chunked view.
 
+use alloc::{format, string::ToString, vec, vec::Vec};
 use core::mem::MaybeUninit;
 
+#[cfg(test)]
+use abs_buff::buffer::TrBuffSegmMut;
 use abs_buff::{
     Demand, TrBuffRead, TrBuffWrite,
     buffer::{TrBuffSegmRef, TrBuffSegmView, TrConsumerState},
@@ -22,17 +25,14 @@ use abs_buff::{
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
-use mptp_wire::limited::LimitedReader;
 use buffex::ring::Ring;
 use mp_denco::{MpDecoder, MpEncoder};
-
-#[cfg(test)]
-use abs_buff::buffer::TrBuffSegmMut;
 #[cfg(test)]
 use mptp_wire::chunked::ChunkedReader;
+use mptp_wire::limited::LimitedReader;
 
-use crate::x_deps::{abs_buff, abs_cancel};
 use super::error_::{RpcError, RpcResult};
+use crate::x_deps::{abs_buff, abs_cancel};
 
 /// 编码 / 发送之间的 ring 窗口（字节）。
 ///
@@ -107,11 +107,7 @@ where
 ///
 /// 不经过 `std::io` 适配层：借写段、把源字节搬进去、段回收时结算进度。
 #[cfg(test)]
-pub(crate) async fn write_body_async_<T, K>(
-    tx: &mut T,
-    bytes: &[u8],
-    cancel: K,
-) -> RpcResult<usize>
+pub(crate) async fn write_body_async_<T, K>(tx: &mut T, bytes: &[u8], cancel: K) -> RpcResult<usize>
 where
     T: TrBuffWrite<u8>,
     K: TrCancellationToken,
@@ -144,11 +140,7 @@ where
 /// 按 `Body_Size` 声明的长度从接收半边读出一段字节。
 ///
 /// 只用于**已知长度的错误体**；业务体走 [`decode_body_from_async_`] 的流式解码。
-pub(crate) async fn read_body_async_<R, K>(
-    rx: &mut R,
-    size: usize,
-    cancel: K,
-) -> RpcResult<Vec<u8>>
+pub(crate) async fn read_body_async_<R, K>(rx: &mut R, size: usize, cancel: K) -> RpcResult<Vec<u8>>
 where
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
@@ -193,18 +185,37 @@ where
     T: TrDecodableOwned,
 {
     let mut slice: &[u8] = bytes;
-    decode_from_async_::<T, _, _>(
-        &mut slice,
-        abs_cancel::NonCancellableToken::new(),
-    ).await
+    decode_from_async_::<T, _, _>(&mut slice, abs_cancel::NonCancellableToken::new()).await
 }
 
 #[cfg(test)]
 mod tests_ {
+    use alloc::string::String;
+    use core::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+
     use abs_cancel::NonCancellableToken;
-    use futures::{executor::block_on, future::join};
+    use futures::future::join;
 
     use super::*;
+
+    /// 用空 waker 驱动一个立即完成的 future（测试用，不依赖 std 执行器）。
+    fn block_on_<TyFut>(future: TyFut) -> TyFut::Output
+    where
+        TyFut: Future,
+    {
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut future = pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => core::hint::spin_loop(),
+            }
+        }
+    }
 
     /// 把 ring 读端的剩余内容读成一段字节，直到写端关闭。
     async fn read_ring_to_vec_<R>(reader: &mut R) -> Vec<u8>
@@ -243,7 +254,7 @@ mod tests_ {
             result
         };
         let read = async { read_ring_to_vec_(&mut reader).await };
-        let (encoded, bytes) = block_on(join(encode, read));
+        let (encoded, bytes) = block_on_(join(encode, read));
         encoded.expect("编码应当成功");
         bytes
     }
@@ -269,7 +280,7 @@ mod tests_ {
             writer.close();
         };
         let read = async { read_ring_to_vec_(&mut reader).await };
-        let ((), bytes) = block_on(join(write, read));
+        let ((), bytes) = block_on_(join(write, read));
         assert_eq!(bytes, b"abc");
     }
 
@@ -285,7 +296,7 @@ mod tests_ {
     fn body_roundtrip_preserves_value_() {
         let original = "workspace-alpha".to_string();
         let bytes = encode_via_ring_(&original);
-        let decoded: String = block_on(decode_slice_async_(&bytes)).expect("解码应当成功");
+        let decoded: String = block_on_(decode_slice_async_(&bytes)).expect("解码应当成功");
 
         assert_eq!(decoded, original);
     }
@@ -303,7 +314,7 @@ mod tests_ {
         let original = "x".repeat(200usize * 1024usize);
         let bytes = encode_via_ring_(&original);
         assert!(bytes.len() > 64usize * 1024usize, "编码结果应超过 64 KiB");
-        let decoded: String = block_on(decode_slice_async_(&bytes)).expect("解码应当成功");
+        let decoded: String = block_on_(decode_slice_async_(&bytes)).expect("解码应当成功");
         assert_eq!(decoded, original);
     }
 
@@ -326,7 +337,7 @@ mod tests_ {
             result
         };
         let read = async { read_ring_to_vec_(&mut reader).await };
-        let (written, bytes) = block_on(join(write, read));
+        let (written, bytes) = block_on_(join(write, read));
 
         assert_eq!(written.expect("写错误体应当成功"), b"error-body".len());
         assert_eq!(bytes, b"error-body");
@@ -346,7 +357,7 @@ mod tests_ {
     fn reads_error_body_without_std_adapter_() {
         let data = b"error-body";
         let mut src: &[u8] = data;
-        let got = block_on(read_body_async_(
+        let got = block_on_(read_body_async_(
             &mut src,
             data.len(),
             NonCancellableToken::new(),
@@ -355,7 +366,7 @@ mod tests_ {
         assert_eq!(got, data);
 
         let mut src: &[u8] = data;
-        let err = block_on(read_body_async_(
+        let err = block_on_(read_body_async_(
             &mut src,
             data.len() + 4usize,
             NonCancellableToken::new(),
@@ -378,7 +389,7 @@ mod tests_ {
         let original = "streamed-body".to_string();
         let bytes = encode_via_ring_(&original);
 
-        let decoded: String = block_on(decode_body_from_async_(
+        let decoded: String = block_on_(decode_body_from_async_(
             &mut bytes.as_slice(),
             false,
             bytes.len(),
@@ -392,7 +403,7 @@ mod tests_ {
         chunked.extend_from_slice(&bytes);
         chunked.extend_from_slice(&0u16.to_be_bytes());
 
-        let decoded: String = block_on(decode_body_from_async_(
+        let decoded: String = block_on_(decode_body_from_async_(
             &mut chunked.as_slice(),
             true,
             0usize,

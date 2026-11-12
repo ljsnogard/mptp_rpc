@@ -33,8 +33,6 @@ buffex = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 # 宏生成代码依赖的抽象服务端契约。本 crate 提供具体实现（`RpcCallCtx` / `RpcRouter`），
 # 但不把抽象契约定义在这里，避免宏展开与核心实现互相绑定。
 abs_rpc_serv = { path = "../abs_rpc_serv" }
-# 所有路径匹配统一走 matchit_route；本 crate 不再自带前缀扫描。
-matchit_route = { path = "../matchit_route" }
 mptp_smux = { path = "../mptp_smux" }
 # 前缀线格式由 mptp_wire 拥有；RPC 层不再依赖具体传输的 messaging 别名。
 mptp_wire = { path = "../mptp_wire" }
@@ -42,8 +40,9 @@ mptp_wire = { path = "../mptp_wire" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 
 # 同一 task 内 join「编码进 ring」与「从 ring 搬运」两条分支；不替使用者选运行时。
-futures = "0.3"
-thiserror = { version = "2.0.20" }
+# 只用到 `futures::future::join`（纯 `core` 组合子），因此关掉默认的 std / executor /
+# async-await 特性，保持 no_std。
+futures = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 # Phase 0 删除了旧的协议 / 冒烟测试；这些依赖留给 Phase 2 的真实多流集成测试。
