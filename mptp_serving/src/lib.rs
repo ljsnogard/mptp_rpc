@@ -25,7 +25,8 @@
 //! 已落地：`Endpoint`（含类型化 [`EndpointMetadata`]）、[`TrEndpointHandler`]（收
 //! [`MptpContext`]）、[`TrMiddleware`] + [`Pipeline`]（线性“前置”中间件，按元数据短路）、
 //! [`ReqHandlerTarget`]（旧 `TrReqHandler` 适配）、`RouteParams`、[`TrRouteMatcher`] 与
-//! 默认实现 [`RadixRouter`]（复用 `matchit_route`）。连接状态与取消令牌属 P3。
+//! 默认实现 [`RadixRouter`]（复用 `matchit_route`），以及连接作用域状态 `S`（经
+//! [`MptpContext::state`] 注入）。请求级取消令牌属 P3 后续部分。
 
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]

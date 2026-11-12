@@ -37,31 +37,31 @@ pub type MiddlewareFuture<'f> =
 ///
 /// `'a` 是本次借用，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，使管线在一次
 /// `.await` 之后能重新借用 `ctx`。
-pub trait TrMiddleware<C>: Send + Sync
+pub trait TrMiddleware<C, S = ()>: Send + Sync
 where
     C: TrConfig,
 {
     /// 在终端处理器之前执行。
     fn before<'a, 'f>(
         &'a self,
-        endpoint: &'a Endpoint<C>,
-        ctx: &'a mut MptpContext<'f, C>,
+        endpoint: &'a Endpoint<C, S>,
+        ctx: &'a mut MptpContext<'f, C, S>,
     ) -> MiddlewareFuture<'a>;
 }
 
 /// 一条有序的中间件链，末端接终端处理器。
 ///
 /// `A` 是中间件列表的分配器（缺省 [`Global`]）。装配期构建、请求路径只读。
-pub struct Pipeline<C, A = Global>
+pub struct Pipeline<C, S = (), A = Global>
 where
     C: TrConfig + 'static,
     A: Allocator,
 {
     /// 按装配顺序排列的中间件。
-    middlewares_: Vec<Arc<dyn TrMiddleware<C>>, A>,
+    middlewares_: Vec<Arc<dyn TrMiddleware<C, S>>, A>,
 }
 
-impl<C> Pipeline<C, Global>
+impl<C, S> Pipeline<C, S, Global>
 where
     C: TrConfig + 'static,
 {
@@ -73,7 +73,7 @@ where
     }
 }
 
-impl<C> Default for Pipeline<C, Global>
+impl<C, S> Default for Pipeline<C, S, Global>
 where
     C: TrConfig + 'static,
 {
@@ -82,7 +82,7 @@ where
     }
 }
 
-impl<C, A> Pipeline<C, A>
+impl<C, S, A> Pipeline<C, S, A>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync,
@@ -95,7 +95,7 @@ where
     }
 
     /// 追加一个中间件（装配顺序即执行顺序）。
-    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C> + 'static) -> Self {
+    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C, S> + 'static) -> Self {
         self.middlewares_.push(Arc::new(middleware));
         self
     }
@@ -106,8 +106,8 @@ where
     /// 处理器返回错误都按 [`ServeError`] 上抛，收尾仍由 servlet 兜底。
     pub async fn run<'f>(
         &'f self,
-        endpoint: &'f Endpoint<C>,
-        ctx: &'f mut MptpContext<'f, C>,
+        endpoint: &'f Endpoint<C, S>,
+        ctx: &'f mut MptpContext<'f, C, S>,
     ) -> Result<(), ServeError> {
         for middleware in &self.middlewares_ {
             if let Option::Some(status) = middleware.before(endpoint, ctx).await? {

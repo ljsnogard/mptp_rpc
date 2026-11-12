@@ -24,7 +24,7 @@ use super::metadata_::EndpointMetadata;
 /// `C` 是服务端配置类型；它只出现在 handler 的类型约束里，端点上不存储 `C` 的值。
 /// `C: 'static` 是因为 handler 以 `Arc<dyn TrEndpointHandler<C>>`（默认 `'static` 对象）
 /// 存储。元数据集合的分配器固定为 [`Global`]（[`EndpointMetadata`] 类型本身可参数化）。
-pub struct Endpoint<C>
+pub struct Endpoint<C, S = ()>
 where
     C: TrConfig + 'static,
 {
@@ -38,10 +38,10 @@ where
     metadata_: EndpointMetadata<Global>,
 
     /// 终端处理器；类型擦除只发生在装配边界。
-    handler_: Arc<dyn TrEndpointHandler<C>>,
+    handler_: Arc<dyn TrEndpointHandler<C, S>>,
 }
 
-impl<C> Endpoint<C>
+impl<C, S> Endpoint<C, S>
 where
     C: TrConfig + 'static,
 {
@@ -49,7 +49,7 @@ where
     pub fn new(
         pattern: &'static str,
         methods: MethodSet,
-        handler: Arc<dyn TrEndpointHandler<C>>,
+        handler: Arc<dyn TrEndpointHandler<C, S>>,
     ) -> Self {
         Endpoint {
             pattern_: pattern,
@@ -75,7 +75,7 @@ where
     }
 
     /// 终端处理器。
-    pub fn handler(&self) -> &Arc<dyn TrEndpointHandler<C>> {
+    pub fn handler(&self) -> &Arc<dyn TrEndpointHandler<C, S>> {
         &self.handler_
     }
 
