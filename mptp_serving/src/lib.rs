@@ -36,7 +36,11 @@
 //! - 请求 / 回复一级 helper（[`MptpContext::headers_mut`]、
 //!   [`MptpContext::response`]、[`MptpContext::req_body_async`]、
 //!   [`MptpContext::req_suffix_async`]）与「是否已回复」状态
-//!   [`MptpContext::reply_written`]。
+//!   [`MptpContext::reply_written`]；
+//! - 收尾兜底：处理器 / 中间件出错或没写回复时补 `500`，错误经
+//!   [`RadixRouter::with_error_hook`] 上报，不泄漏到线上；
+//! - 元数据分配器参数化（`Endpoint<C, S, R, A>` 的 `A`）与组默认元数据继承
+//!   （[`RadixRouter::with_group_metadata`]，端点自己的标记优先）。
 
 #![no_std]
 #![feature(impl_trait_in_assoc_type)]

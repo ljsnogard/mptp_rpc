@@ -20,10 +20,11 @@ use super::{handler_::TrEndpointHandler, metadata_::EndpointMetadata};
 ///
 /// `C` 是服务端配置类型；它只出现在 handler 的类型约束里，端点上不存储 `C` 的值。
 /// `C: 'static` 是因为 handler 以 `Arc<dyn TrEndpointHandler<C>>`（默认 `'static` 对象）
-/// 存储。元数据集合的分配器固定为 [`Global`]（[`EndpointMetadata`] 类型本身可参数化）。
-pub struct Endpoint<C, S = (), R = ()>
+/// 存储。`A` 是元数据集合的分配器（缺省 [`Global`]），由 router 在绑定时传入。
+pub struct Endpoint<C, S = (), R = (), A = Global>
 where
     C: TrConfig + 'static,
+    A: Allocator,
 {
     /// 路径模式（相对所属 router），如 `"feeds/{id}"`；静态字符串，零拷贝。
     pattern_: &'static str,
@@ -31,27 +32,43 @@ where
     /// 本端点响应的方法集合。
     methods_: MethodSet,
 
-    /// 本端点的类型化元数据（P2：中间件按它执行策略）。
-    metadata_: EndpointMetadata<Global>,
+    /// 本端点的类型化元数据（中间件按它执行策略）。
+    metadata_: EndpointMetadata<A>,
 
     /// 终端处理器；类型擦除只发生在装配边界。
     handler_: Arc<dyn TrEndpointHandler<C, S, R>>,
 }
 
-impl<C, S, R> Endpoint<C, S, R>
+impl<C, S, R> Endpoint<C, S, R, Global>
 where
     C: TrConfig + 'static,
 {
-    /// 由「模式 + 方法集合 + 处理器」构造。
+    /// 由「模式 + 方法集合 + 处理器」构造（元数据用全局分配器）。
     pub fn new(
         pattern: &'static str,
         methods: MethodSet,
         handler: Arc<dyn TrEndpointHandler<C, S, R>>,
     ) -> Self {
+        Endpoint::new_in(pattern, methods, handler, Global)
+    }
+}
+
+impl<C, S, R, A> Endpoint<C, S, R, A>
+where
+    C: TrConfig + 'static,
+    A: Allocator,
+{
+    /// 用指定分配器构造元数据集合。
+    pub fn new_in(
+        pattern: &'static str,
+        methods: MethodSet,
+        handler: Arc<dyn TrEndpointHandler<C, S, R>>,
+        alloc: A,
+    ) -> Self {
         Endpoint {
             pattern_: pattern,
             methods_: methods,
-            metadata_: EndpointMetadata::new_in(Global),
+            metadata_: EndpointMetadata::new_in(alloc),
             handler_: handler,
         }
     }
@@ -77,7 +94,7 @@ where
     }
 
     /// 本端点的元数据。
-    pub fn metadata(&self) -> &EndpointMetadata<Global> {
+    pub fn metadata(&self) -> &EndpointMetadata<A> {
         &self.metadata_
     }
 
@@ -88,6 +105,14 @@ where
     {
         self.metadata_.insert(value);
         self
+    }
+
+    /// 继承 router 的组默认元数据：只补本端点没有的类型，端点自己的标记优先。
+    ///
+    /// 由 [`RadixRouter`](super::RadixRouter) 在绑定时调用；「先插入先命中」的查询顺序
+    /// 保证端点显式声明的元数据覆盖组默认值。
+    pub(crate) fn inherit_metadata(&mut self, group: &EndpointMetadata<A>) {
+        self.metadata_.inherit(group);
     }
 }
 
@@ -108,7 +133,7 @@ where
     A: Allocator,
 {
     /// 按插入顺序保存的端点。
-    entries_: Vec<Endpoint<C, S, R>, A>,
+    entries_: Vec<Endpoint<C, S, R, A>, A>,
 }
 
 impl<C, S, R, A> EndpointSet<C, S, R, A>
@@ -124,12 +149,12 @@ where
     }
 
     /// 追加一个端点（同路径的新端点排在已有端点之后）。
-    pub(crate) fn push(&mut self, endpoint: Endpoint<C, S, R>) {
+    pub(crate) fn push(&mut self, endpoint: Endpoint<C, S, R, A>) {
         self.entries_.push(endpoint);
     }
 
     /// 取第一个接受 `method` 的端点；都不接受时返回 `None`。
-    pub(crate) fn select(&self, method: AccessMethod) -> Option<&Endpoint<C, S, R>> {
+    pub(crate) fn select(&self, method: AccessMethod) -> Option<&Endpoint<C, S, R, A>> {
         self.entries_
             .iter()
             .find(|endpoint| endpoint.accepts(method))

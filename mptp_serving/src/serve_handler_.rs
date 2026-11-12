@@ -22,6 +22,7 @@ use mptp_smux::serving::config::TrConfig;
 use mptp_smux::serving::{K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler};
 use mptp_smux::{HeaderVal, ResponsePrefix, ServeError};
 
+use super::router_::ErrorHook;
 use super::{MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher};
 
 impl<C, A, S, R> TrServeHandler<C> for RadixRouter<C, A, S, R>
@@ -89,7 +90,8 @@ where
                 request_state,
                 cancel,
             );
-            router.pipeline().run(endpoint, &mut ctx).await
+            let result = router.pipeline().run(endpoint, &mut ctx).await;
+            settle_reply_(&mut ctx, result, router.error_hook_()).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
             let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
@@ -121,7 +123,37 @@ where
                 request_state,
                 cancel,
             );
-            router.root().handle(&mut ctx).await
+            let result = router.root().handle(&mut ctx).await;
+            settle_reply_(&mut ctx, result, router.error_hook_()).await
         }
     }
+}
+
+/// 收尾一次请求的回复：错误上报 + 未回复兜底 500。
+///
+/// 设计稿 §7④/⑤：处理器返回 `Ok` 但没写回复、或返回错误但还没写回复时，框架补一个
+/// `500 Internal Server Error` 的无体回复；错误本身只经观测回调上报，**不**写到线上。
+/// 已经写出回复前缀的请求不再改写状态码（回复已经开始，改不了）。
+async fn settle_reply_<'f, C, S, R>(
+    ctx: &mut MptpContext<'f, C, S, R>,
+    result: Result<(), ServeError>,
+    hook: Option<&ErrorHook>,
+) -> Result<(), ServeError>
+where
+    C: TrConfig + 'static,
+    S: Send + Sync + 'static,
+    R: 'static,
+{
+    if let Result::Err(err) = result
+        && let Option::Some(hook) = hook
+    {
+        hook(&err);
+    }
+    if !ctx.reply_written() {
+        ctx.session_mut()
+            .response(Status::InternalServerError)
+            .no_body_async()
+            .await?;
+    }
+    Result::Ok(())
 }

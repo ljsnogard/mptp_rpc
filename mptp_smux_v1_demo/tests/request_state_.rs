@@ -50,6 +50,12 @@ async fn middleware_stashes_principal_() {
         .and_then(|headers| headers.try_get(HeaderKey::from_text(K_HDR_PRINCIPAL)))
         .and_then(HeaderVal::as_text);
     assert_eq!(echoed, Some("alice"), "处理器应读到中间件写入的主体");
+    // 组标记来自 router 的 `with_group_metadata`，端点自身没有声明——证明继承生效。
+    let group = resp
+        .headers()
+        .and_then(|headers| headers.try_get(HeaderKey::from_text("X-Scene-Group")))
+        .and_then(HeaderVal::as_text);
+    assert_eq!(group, Some("scene"), "端点应继承 router 的组默认元数据");
 }
 
 /// 测试没有主体头时请求级状态是匿名的。

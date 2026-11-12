@@ -102,6 +102,9 @@ pub struct SceneFixture {
 
     /// 中间件洋葱顺序的观测记录（`/test/order` 路径）。
     trace_: Arc<Mutex<Vec<&'static str>>>,
+
+    /// 错误观测 hook 收到的错误文本（`/test/fail*` 路径）。
+    errors_: Arc<Mutex<Vec<String>>>,
 }
 
 impl SceneFixture {
@@ -121,12 +124,14 @@ impl SceneFixture {
         let hub = Arc::new(Mutex::new(SceneHub::new_()));
         let probe = Arc::new(Mutex::new(CtxProbe::default()));
         let trace = Arc::new(Mutex::new(Vec::new()));
+        let errors = Arc::new(Mutex::new(Vec::new()));
         let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
 
         let registry_for_server = registry.clone();
         let hub_for_server = hub.clone();
         let probe_for_server = probe.clone();
         let trace_for_server = trace.clone();
+        let errors_for_server = errors.clone();
         let accept = scope.clone().spawn_local(async move {
             let mut next_connection = 1u64;
             loop {
@@ -139,6 +144,7 @@ impl SceneFixture {
                 let hub = hub_for_server.clone();
                 let probe = probe_for_server.clone();
                 let trace = trace_for_server.clone();
+                let errors = errors_for_server.clone();
                 let task_scope = scope.clone();
                 let task = scope.spawn_local(async move {
                     let Ok(conn) = accept_conn_async_(stream).await else {
@@ -187,10 +193,24 @@ impl SceneFixture {
                         )
                         .expect("装配测试路由");
                     let router = router
+                        .view("test/no-reply", TestNoReply)
+                        .expect("装配测试路由");
+                    let router = router.view("test/fail", TestFail).expect("装配测试路由");
+                    let router = router
+                        .view("test/fail-after-reply", TestFailAfterReply)
+                        .expect("装配测试路由");
+                    let router = router
                         .use_middleware(OrderMiddleware {
                             trace_: trace.clone(),
                         })
                         .use_middleware(GuardMiddleware);
+                    let errors_for_hook = errors.clone();
+                    let router = router.with_error_hook(move |err| {
+                        errors_for_hook
+                            .lock()
+                            .expect("错误记录锁被污染")
+                            .push(err.to_string());
+                    });
                     let servlet = Rc::new(MptpServlet::<ServingCfg, _>::new(router));
                     let _cleanup = ConnCleanup_(ctx.clone());
                     let _ = serve_connection_(shared, servlet, ctx, task_scope).await;
@@ -206,6 +226,7 @@ impl SceneFixture {
             hub_: hub,
             probe_: probe,
             trace_: trace,
+            errors_: errors,
         })
     }
 
@@ -232,6 +253,11 @@ impl SceneFixture {
     /// 中间件洋葱顺序的观测记录。
     pub fn trace_(&self) -> &Arc<Mutex<Vec<&'static str>>> {
         &self.trace_
+    }
+
+    /// 错误观测 hook 收到的错误文本。
+    pub fn errors_(&self) -> &Arc<Mutex<Vec<String>>> {
+        &self.errors_
     }
 }
 
@@ -506,8 +532,10 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S, SceneRe
                 .principal
                 .clone()
                 .unwrap_or_else(|| String::from("anonymous"));
+            let group = ctx.request_state().group.unwrap_or("no-group").to_string();
             let mut response = ctx.response(Status::Ok);
             response.header("X-Scene-Principal", HeaderVal::from_text(principal));
+            response.header("X-Scene-Group", HeaderVal::from_text(group));
             response.no_body_async().await?;
             Ok(())
         })
@@ -596,6 +624,71 @@ where
                 .push("handler");
             ctx.response(Status::Ok).no_body_async().await?;
             Ok(())
+        })
+    }
+}
+
+/// `View /test/no-reply`：返回 `Ok` 但一个字节都不写，用于验证兜底 500。
+///
+/// `View /test/no-reply`: returns `Ok` without writing anything; the framework must 500.
+struct TestNoReply;
+
+impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestNoReply
+where
+    C: mptp_smux::serving::config::TrConfig,
+{
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move { Ok(()) })
+    }
+}
+
+/// `View /test/fail`：返回错误且不写回复，用于验证「上报 + 兜底 500」。
+///
+/// `View /test/fail`: returns an error without a reply; the hook must see it and the client
+/// must see a 500.
+struct TestFail;
+
+impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestFail
+where
+    C: mptp_smux::serving::config::TrConfig,
+{
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            Err(ServeError::Target {
+                detail: String::from("boom"),
+            })
+        })
+    }
+}
+
+/// `View /test/fail-after-reply`：先写 200 再返回错误，验证不覆盖已写出的回复。
+///
+/// `View /test/fail-after-reply`: writes 200 first, then fails; the reply must not be
+/// overwritten by the fallback 500.
+struct TestFailAfterReply;
+
+impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestFailAfterReply
+where
+    C: mptp_smux::serving::config::TrConfig,
+{
+    fn handle<'a, 'f>(
+        &'a self,
+        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            ctx.response(Status::Ok).no_body_async().await?;
+            Err(ServeError::Target {
+                detail: String::from("boom-after"),
+            })
         })
     }
 }

@@ -19,14 +19,16 @@ use alloc::alloc::Global;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Allocator;
+use core::any::Any;
 
 use abs_mptp::spec::access_method::AccessMethod;
 use matchit_route::Router as Trie;
-use mptp_smux::MethodSet;
 use mptp_smux::serving::config::TrConfig;
+use mptp_smux::{MethodSet, ServeError};
 
 use super::endpoint_::{Endpoint, EndpointSet};
 use super::handler_::TrEndpointHandler;
+use super::metadata_::EndpointMetadata;
 use super::middleware_::{Pipeline, TrMiddleware};
 use super::route_params_::RouteParams;
 use super::{CancellationSource, RequestCancel};
@@ -55,23 +57,32 @@ pub enum Matched<'f, V> {
     Root,
 }
 
+/// 错误观测回调：处理器 / 中间件出错时上报，错误文本不上线。
+///
+/// 用 `Arc<dyn Fn>` 而不是泛型，是为了让 hook 与 router 的 `C` / `S` / `R` 无关，也不给
+/// 装配类型再添一个参数。
+pub(crate) type ErrorHook = Arc<dyn Fn(&ServeError) + Send + Sync>;
+
 /// 服务端路由的匹配结果。
-pub type MatchOutcome<'f, C, S = (), R = ()> = Matched<'f, Endpoint<C, S, R>>;
+///
+/// `A` 与 [`RadixRouter`] 的分配器一致：它同时用于端点集合与端点元数据集合。
+pub type MatchOutcome<'f, C, S = (), R = (), A = Global> = Matched<'f, Endpoint<C, S, R, A>>;
 
 /// 一个 router 的匹配契约。
 ///
 /// 对象安全：返回类型是具体类型 [`MatchOutcome`]，因此子 router 可以用
 /// [`alloc::sync::Arc<dyn TrRouteMatcher>`](alloc::sync::Arc) 擦除。
-pub trait TrRouteMatcher<C, S = (), R = ()>: Send + Sync
+pub trait TrRouteMatcher<C, S = (), R = (), A = Global>: Send + Sync
 where
     C: TrConfig,
+    A: Allocator,
 {
     /// 在「相对于本 router 根」的 `location` 上匹配。
     fn match_route<'f>(
         &'f self,
         method: AccessMethod,
         location: &'f str,
-    ) -> MatchOutcome<'f, C, S, R>;
+    ) -> MatchOutcome<'f, C, S, R, A>;
 }
 
 /// 默认实现：分层 router。
@@ -90,23 +101,28 @@ where
     root_: Arc<dyn TrEndpointHandler<C, S, R>>,
 
     /// handler 规则：精确路径模式 → 同路径端点集合（一个路径可挂多个方法）。
-    trie_: Trie<EndpointSet<C, S, R, Arc<A>>>,
+    trie_: Trie<EndpointSet<C, S, R, A>>,
 
-    /// 子 router 规则：静态前缀 → 子 router 匹配器。
-    ///
-    /// 用 `Arc<A>` 而不是 `A` 作分配器：同路径追加端点时要从这里克隆分配器给新集合，
-    /// 而 `A: Allocator` 本身并不要求 `Clone`。
+    /// 子 router 规则：静态前缀 → 子 router 匹配器（与父层共用同一个分配器类型）。
     #[allow(clippy::type_complexity)]
-    routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C, S, R>>), Arc<A>>,
+    routers_: Vec<(&'static str, Arc<dyn TrRouteMatcher<C, S, R, A>>), A>,
+
+    /// 组默认元数据：绑定时继承给本 router 的每个端点（端点自己的标记优先）。
+    ///
+    /// 惰性创建：只有调用 [`RadixRouter::with_group_metadata`] 时才需要分配器。
+    group_metadata_: Option<EndpointMetadata<A>>,
 
     /// 请求路径上的中间件链（装配期构建、请求路径只读）。
-    pipeline_: Pipeline<C, S, R>,
+    pipeline_: Pipeline<C, S, R, A, A>,
 
     /// 连接作用域状态（每连接一份，跨 session 共享只读）。
     state_: Arc<S>,
 
     /// 连接级取消源：`MptpContext` 的请求级取消句柄从它派生。
     cancel_source_: Arc<CancellationSource>,
+
+    /// 错误观测回调（装配期设置，请求路径只读；缺省无）。
+    error_hook_: Option<ErrorHook>,
 }
 
 impl<C> RadixRouter<C, Global, ()>
@@ -118,10 +134,12 @@ where
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(Arc::new(Global)),
+            routers_: Vec::new_in(Global),
             pipeline_: Pipeline::new(),
             state_: Arc::new(()),
             cancel_source_: Arc::new(CancellationSource::new()),
+            error_hook_: Option::None,
+            group_metadata_: Option::None,
         }
     }
 }
@@ -129,17 +147,20 @@ where
 impl<C, A> RadixRouter<C, A, ()>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync + 'static,
+    // `Clone`：同一个分配器要分别交给子 router 列表与中间件链。
+    A: Allocator + Send + Sync + Clone + 'static,
 {
     /// 用根 handler 与显式分配器构造（无连接状态）。
     pub fn new_in(root: Arc<dyn TrEndpointHandler<C, ()>>, alloc: A) -> Self {
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(Arc::new(alloc)),
-            pipeline_: Pipeline::new(),
+            routers_: Vec::new_in(alloc.clone()),
+            pipeline_: Pipeline::new_in(alloc),
             state_: Arc::new(()),
             cancel_source_: Arc::new(CancellationSource::new()),
+            error_hook_: Option::None,
+            group_metadata_: Option::None,
         }
     }
 }
@@ -154,10 +175,12 @@ where
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(Arc::new(Global)),
+            routers_: Vec::new_in(Global),
             pipeline_: Pipeline::new(),
             state_: state,
             cancel_source_: Arc::new(CancellationSource::new()),
+            error_hook_: Option::None,
+            group_metadata_: Option::None,
         }
     }
 }
@@ -179,7 +202,8 @@ where
 impl<C, A, S, R> RadixRouter<C, A, S, R>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync + 'static,
+    // `Clone`：同一个分配器要分别交给子 router 列表与中间件链。
+    A: Allocator + Send + Sync + Clone + 'static,
     S: Send + Sync + 'static,
     R: Default + 'static,
 {
@@ -195,10 +219,12 @@ where
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(Arc::new(alloc)),
-            pipeline_: Pipeline::new(),
+            routers_: Vec::new_in(alloc.clone()),
+            pipeline_: Pipeline::new_in(alloc),
             state_: state,
             cancel_source_: Arc::new(CancellationSource::new()),
+            error_hook_: Option::None,
+            group_metadata_: Option::None,
         }
     }
 }
@@ -206,7 +232,8 @@ where
 impl<C, A, S> RadixRouter<C, A, S>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync + 'static,
+    // `Clone`：同一个分配器要分别交给子 router 列表与中间件链。
+    A: Allocator + Send + Sync + Clone + 'static,
     S: Send + Sync + 'static,
 {
     /// 用根 handler、连接状态与显式分配器构造（请求级状态为 `()`）。
@@ -218,10 +245,12 @@ where
         RadixRouter {
             root_: root,
             trie_: Trie::new(),
-            routers_: Vec::new_in(Arc::new(alloc)),
-            pipeline_: Pipeline::new(),
+            routers_: Vec::new_in(alloc.clone()),
+            pipeline_: Pipeline::new_in(alloc),
             state_: state,
             cancel_source_: Arc::new(CancellationSource::new()),
+            error_hook_: Option::None,
+            group_metadata_: Option::None,
         }
     }
 }
@@ -253,6 +282,82 @@ where
         self.cancel_source_.child_token()
     }
 
+    /// 在静态前缀下挂载一个子 router。
+    ///
+    /// 请求命中该前缀后，剩余路径交给子 router 递归匹配；本 router 不关心子 router 内部
+    /// 规则。当前不做「handler 规则与子 router 前缀重叠」的冲突检测，属后续 round。
+    pub fn bind_router(
+        mut self,
+        prefix: &'static str,
+        child: Arc<dyn TrRouteMatcher<C, S, R, A>>,
+    ) -> Self {
+        self.routers_.push((prefix, child));
+        self
+    }
+
+    /// 设置错误观测回调（缺省无）。
+    ///
+    /// 处理器 / 中间件返回错误时，框架先调用本回调上报，再把「尚未写出回复」的请求兜底成
+    /// 500；错误文本**不会**写到线上。回调应自行决定记录 / 计数 / 采样，并且不要 panic
+    /// （panic 会打断收尾）。重复调用以最后一次为准。
+    pub fn with_error_hook(mut self, hook: impl Fn(&ServeError) + Send + Sync + 'static) -> Self {
+        self.error_hook_ = Option::Some(Arc::new(hook));
+        self
+    }
+
+    /// 错误观测回调（crate 内使用）。
+    pub(crate) fn error_hook_(&self) -> Option<&ErrorHook> {
+        self.error_hook_.as_ref()
+    }
+
+    /// 追加一个中间件（装配顺序即执行顺序）。
+    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C, S, R, A> + 'static) -> Self {
+        self.pipeline_ = self.pipeline_.use_middleware(middleware);
+        self
+    }
+
+    /// 本 router 的中间件链。
+    pub fn pipeline(&self) -> &Pipeline<C, S, R, A, A> {
+        &self.pipeline_
+    }
+}
+
+impl<C, A, S, R> RadixRouter<C, A, S, R>
+where
+    C: TrConfig + 'static,
+    // `Clone`：同路径追加端点 / 继承组元数据时，要把分配器克隆一份给新集合与端点。
+    A: Allocator + Send + Sync + Clone + 'static,
+    S: Send + Sync + 'static,
+    R: 'static,
+{
+    /// 设置一条组默认元数据：之后绑定到本 router 的每个端点都会继承它。
+    ///
+    /// 继承是「只补缺失类型」：端点自己用 [`Endpoint::with_metadata`] 声明的同类型标记
+    /// 优先。组元数据在绑定时快照进端点，因此**先设置组元数据、再绑定端点**。
+    ///
+    /// 子 router 的继承是显式的：用 [`group_metadata`](Self::group_metadata) 取出父层
+    /// 组元数据，在构造子 router 时调用本方法（`dyn TrRouteMatcher` 已经把子 router 类型
+    /// 擦除，父层无法在 `bind_router` 时改写它）。
+    pub fn with_group_metadata<T>(mut self, value: T) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        match &mut self.group_metadata_ {
+            Option::Some(group) => group.insert(value),
+            Option::None => {
+                let mut group = EndpointMetadata::new_in(self.routers_.allocator().clone());
+                group.insert(value);
+                self.group_metadata_ = Option::Some(group);
+            }
+        }
+        self
+    }
+
+    /// 本 router 的组默认元数据（供装配者传给子 router）。
+    pub fn group_metadata(&self) -> Option<&EndpointMetadata<A>> {
+        self.group_metadata_.as_ref()
+    }
+
     /// 绑定一条 handler 规则：`pattern` + 方法集合 + 终端处理器。
     ///
     /// 消费式构建；`pattern` 是相对本 router 根的路径模式（支持 `{name}` / `{*rest}`）。
@@ -265,7 +370,8 @@ where
         methods: MethodSet,
         handler: impl TrEndpointHandler<C, S, R> + 'static,
     ) -> Result<Self, matchit_route::InsertError> {
-        let endpoint = Endpoint::new(pattern, methods, Arc::new(handler));
+        let alloc = self.routers_.allocator().clone();
+        let endpoint = Endpoint::new_in(pattern, methods, Arc::new(handler), alloc);
         self.bind_endpoint(endpoint)
     }
 
@@ -280,8 +386,12 @@ where
     /// 约定），因此一条路径可以同时挂多个不同方法集合的端点。
     pub fn bind_endpoint(
         mut self,
-        endpoint: Endpoint<C, S, R>,
+        mut endpoint: Endpoint<C, S, R, A>,
     ) -> Result<Self, matchit_route::InsertError> {
+        // 组默认元数据只补端点没有的类型（端点自己的声明优先）。
+        if let Option::Some(group) = &self.group_metadata_ {
+            endpoint.inherit_metadata(group);
+        }
         let normalized = normalize_(endpoint.pattern());
         // 同路径已有端点时取出集合追加；没有则用本 router 的分配器新建集合。
         // 先 `remove` 再 `insert` 是 `matchit_route` 目前唯一的「按路由模式取回值」路径，
@@ -367,33 +477,9 @@ where
     ) -> Result<Self, matchit_route::InsertError> {
         self.bind(pattern, MethodSet::CALL, handler)
     }
-
-    /// 在静态前缀下挂载一个子 router。
-    ///
-    /// 请求命中该前缀后，剩余路径交给子 router 递归匹配；本 router 不关心子 router 内部
-    /// 规则。当前不做「handler 规则与子 router 前缀重叠」的冲突检测，属后续 round。
-    pub fn bind_router(
-        mut self,
-        prefix: &'static str,
-        child: Arc<dyn TrRouteMatcher<C, S, R>>,
-    ) -> Self {
-        self.routers_.push((prefix, child));
-        self
-    }
-
-    /// 追加一个中间件（装配顺序即执行顺序）。
-    pub fn use_middleware(mut self, middleware: impl TrMiddleware<C, S, R> + 'static) -> Self {
-        self.pipeline_ = self.pipeline_.use_middleware(middleware);
-        self
-    }
-
-    /// 本 router 的中间件链。
-    pub fn pipeline(&self) -> &Pipeline<C, S, R> {
-        &self.pipeline_
-    }
 }
 
-impl<C, A, S, R> TrRouteMatcher<C, S, R> for RadixRouter<C, A, S, R>
+impl<C, A, S, R> TrRouteMatcher<C, S, R, A> for RadixRouter<C, A, S, R>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync + 'static,
@@ -404,7 +490,7 @@ where
         &'f self,
         method: AccessMethod,
         location: &'f str,
-    ) -> MatchOutcome<'f, C, S, R> {
+    ) -> MatchOutcome<'f, C, S, R, A> {
         // 1. 本层 handler 规则：路径 + 方法精确命中（同路径多端点按方法选一个）。
         match match_method_(
             &self.trie_,
