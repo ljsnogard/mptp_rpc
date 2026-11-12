@@ -21,10 +21,9 @@ pub use connection_::MptpConnection;
 pub use handler_::{LegacyHandler, TrServeHandler};
 pub use prep_ctx_::ServingPrepCtx;
 pub use servlet_::{
-    K_TMP_ALLOW_HEADER_KEY, K_TMP_ALLOW_HEADER_NAME, MptpServlet, ServeOutcome,
-    close_channel_async,
+    K_TMP_ALLOW_HEADER_KEY, K_TMP_ALLOW_HEADER_NAME, MptpServlet, ServeOutcome, close_channel_async,
 };
 pub use session_::{
-    RequestBodyRead, RequestSuffixRead, ResponseBodyWriter, ResponseBuilder, ServingSession,
-    SuffixStream,
+    RequestBodyAsync, RequestBodyRead, RequestSuffixAsync, RequestSuffixRead, ResponseBodyWriter,
+    ResponseBuilder, ServingSession, SuffixStream,
 };

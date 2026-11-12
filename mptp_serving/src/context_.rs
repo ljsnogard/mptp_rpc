@@ -16,9 +16,13 @@
 //! there is no self-reference. `S` is per-connection state owned by the connection object,
 //! handed to handlers/middleware as a shared `&S`.
 
-use abs_mptp::spec::access_method::AccessMethod;
+use abs_buff::{TrBuffRead, buffer::TrConsumerState};
+use abs_mptp::spec::{Status, access_method::AccessMethod};
 use bumpalo::Bump;
-use mptp_smux::serving::{ServingSession, config::TrConfig};
+use mptp_smux::serving::{
+    RequestBodyAsync, RequestSuffixAsync, ResponseBuilder, ServingSession,
+    config::{ChannelRx, TrConfig},
+};
 
 use super::{RequestCancel, route_params_::RouteParams};
 
@@ -104,9 +108,26 @@ where
     /// 请求头表（只读）。
     ///
     /// 处理器 / 中间件经它读取请求头（例如 `#[from_header]` 参数来源）；需要改写头表时用
-    /// [`session_mut`](Self::session_mut)。
+    /// [`headers_mut`](Self::headers_mut)。
     pub fn headers(&self) -> &mptp_smux::Headers {
         self.session_.headers()
+    }
+
+    /// 请求头表（可变）。
+    ///
+    /// 改写的是会话持有的请求头副本，**不**写回已经解码好的请求前缀；因此可以用它做
+    /// 「中间件把规范化后的头交给后续处理器」这类请求内改写。
+    pub fn headers_mut(&mut self) -> &mut mptp_smux::Headers {
+        self.session_.headers_mut()
+    }
+
+    /// 本次请求是否已经写出回复前缀（即回复已经开始）。
+    ///
+    /// 供中间件 / 收尾逻辑判断「处理器是否真的回复了」：返回 `false` 说明还来得及写兜底
+    /// 回复（Phase E 的兜底 500 依赖它）。判定复用会话的只读查询
+    /// [`ServingSession::sent_response_prefix`]，装配期零成本。
+    pub fn reply_written(&self) -> bool {
+        self.session_.sent_response_prefix().is_some()
     }
 
     /// 只读会话视图。
@@ -115,8 +136,58 @@ where
     }
 
     /// 可变会话视图（读请求体 / 写回复）。
+    ///
+    /// 这是逃逸口：多数处理器应优先用 [`req_body_async`](Self::req_body_async) /
+    /// [`req_suffix_async`](Self::req_suffix_async) / [`response`](Self::response) 这些
+    /// 一级 helper，只有需要会话层面的操作（如 `finish_async`、`take_parts`）时才用它。
     pub fn session_mut(&mut self) -> &mut ServingSession<C> {
         self.session_
+    }
+
+    /// 按请求前缀声明的体边界取请求体读视图。
+    ///
+    /// 委托 [`ServingSession::req_body_async`]：返回的 future 可 `.await` 得到
+    /// `RequestBodyRead`，也可经 `may_cancel_with` 施加请求级取消令牌。
+    ///
+    /// # Errors
+    ///
+    /// `await` 后可能返回 [`mptp_smux::ServeError`]：会话状态不允许读体、请求前缀缺失或
+    /// 底层传输读失败。
+    pub fn req_body_async<'a>(&'a mut self) -> RequestBodyAsync<'a, 'a, C>
+    where
+        C: 'a,
+        ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
+    {
+        self.session_.req_body_async()
+    }
+
+    /// 丢弃未读完的请求体，然后把接收半边当裸后缀流交出去。
+    ///
+    /// 委托 [`ServingSession::req_suffix_async`]；请求级的「先排空体、再读后缀」顺序由会话
+    /// 保证，处理器不需要自己处理。
+    ///
+    /// # Errors
+    ///
+    /// `await` 后可能返回 [`mptp_smux::ServeError`]：会话状态不允许读后缀、请求前缀缺失或
+    /// 排空请求体时传输失败。
+    pub fn req_suffix_async<'a>(&'a mut self) -> RequestSuffixAsync<'a, 'a, C>
+    where
+        C: 'a,
+        ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
+    {
+        self.session_.req_suffix_async()
+    }
+
+    /// 构造回复 helper（状态码 + 头 + 无体 / 定长体 / 分块体 / 后缀流）。
+    ///
+    /// 委托 [`ServingSession::response`]；前缀在 helper 被终结时才写出，因此在 `.await`
+    /// 之前都可以继续加回复头。
+    ///
+    /// ```text
+    /// ctx.response(Status::Ok).no_body_async().await?;
+    /// ```
+    pub fn response(&mut self, status: Status) -> ResponseBuilder<'_, C> {
+        self.session_.response(status)
     }
 
     /// 连接作用域状态（共享借用）。
