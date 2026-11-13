@@ -88,9 +88,9 @@ fn free_install_into_(names: &HandlerNames_, method: &EndpointMethodModel_) -> :
     quote! {
         #[doc(hidden)]
         pub fn install_into<C, S, R>(
-            router: RadixRouter<C, ::std::alloc::Global, S, R>,
+            router: RadixRouter<C, S, R, ::std::alloc::Global>,
         ) -> Result<
-            RadixRouter<C, ::std::alloc::Global, S, R>,
+            RadixRouter<C, S, R, ::std::alloc::Global>,
             ::mptp_serving::x_deps::matchit_route::InsertError,
         >
         where
@@ -456,10 +456,10 @@ fn install_into_(self_ident: &syn::Ident, model: &ControllerModel_) -> ::zyn::To
     quote! {
         #[doc(hidden)]
         pub fn install_into<C, S, R>(
-            router: RadixRouter<C, ::std::alloc::Global, S, R>,
+            router: RadixRouter<C, S, R, ::std::alloc::Global>,
             svc: ::std::sync::Arc<#self_ty>,
         ) -> Result<
-            RadixRouter<C, ::std::alloc::Global, S, R>,
+            RadixRouter<C, S, R, ::std::alloc::Global>,
             ::mptp_serving::x_deps::matchit_route::InsertError,
         >
         where

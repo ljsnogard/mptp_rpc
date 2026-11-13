@@ -346,7 +346,8 @@ impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for SceneRoot {
 
 /// 场景路由类型：请求级状态固定为 [`SceneRequestState`]。
 ///
-/// `C = ServingCfg` / 全局分配器 / 无连接状态 / 请求级状态 `SceneRequestState`。
+/// `C = ServingCfg` / 无连接状态 `S = ()` / 请求级状态 `R = SceneRequestState` /
+/// 全局分配器 `A = Global`。
 pub type SceneRouter = mptp_serving::RadixRouter<
     crate::scene::cfg_::ServingCfg,
     (),
