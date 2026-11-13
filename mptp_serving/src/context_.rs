@@ -16,9 +16,10 @@
 //! there is no self-reference. `S` is per-connection state owned by the connection object,
 //! handed to handlers/middleware as a shared `&S`.
 
+use bumpalo::Bump;
+
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
-use bumpalo::Bump;
 use mptp_smux::serving::{
     RequestBodyAsync, RequestSuffixAsync, ResponseBuilder, ServingSession,
     config::{ChannelRx, TrConfig},

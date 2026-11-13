@@ -43,6 +43,8 @@
 //!   （[`RadixRouter::with_group_metadata`]，端点自己的标记优先）。
 
 #![no_std]
+
+#![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
 
 extern crate alloc;

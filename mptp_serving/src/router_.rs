@@ -15,23 +15,24 @@
 //! is an allocator-parameterised `Vec` built at assembly time. `S` is per-connection state,
 //! held by the router as `Arc<S>` and handed to handlers/middleware as a shared `&S`.
 
-use alloc::alloc::Global;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::alloc::Allocator;
-use core::any::Any;
+use alloc::{alloc::Global, sync::Arc, vec::Vec};
+use core::{alloc::{Allocator, AllocatorClone}, any::Any};
 
 use abs_mptp::spec::access_method::AccessMethod;
 use matchit_route::Router as Trie;
-use mptp_smux::serving::config::TrConfig;
-use mptp_smux::{MethodSet, ServeError};
+use mptp_smux::{
+    serving::config::TrConfig,
+    MethodSet, ServeError,
+};
 
-use super::endpoint_::{Endpoint, EndpointSet};
-use super::handler_::TrEndpointHandler;
-use super::metadata_::EndpointMetadata;
-use super::middleware_::{Pipeline, TrMiddleware};
-use super::route_params_::RouteParams;
-use super::{CancellationSource, RequestCancel};
+use super::{
+    endpoint_::{Endpoint, EndpointSet},
+    handler_::TrEndpointHandler,
+    metadata_::EndpointMetadata,
+    middleware_::{Pipeline, TrMiddleware},
+    route_params_::RouteParams,
+    CancellationSource, RequestCancel,
+};
 
 /// 一次匹配的结果，泛型于端点值类型 `V`（便于纯逻辑单测）。
 ///
@@ -90,12 +91,12 @@ where
 /// `C` 是服务端配置类型，`A` 是子 router 列表与同路径端点集合的分配器（缺省 [`Global`]），
 /// `S` 是连接作用域状态（缺省 `()`），`R` 是请求级运行期状态（缺省 `()`）。当前是**装配期**构建（消费式 `bind` / `bind_router`，无运行期增删）；
 /// 运行期增删需要 no_std 读多写少锁，属后续 round。
-pub struct RadixRouter<C, A = Global, S = (), R = ()>
+pub struct RadixRouter<C, S = (), R = (), A = Global>
 where
-    C: TrConfig + 'static,
-    A: Allocator + Send + Sync + 'static,
-    S: Send + Sync + 'static,
+    C: 'static + TrConfig,
+    S: 'static + Send + Sync,
     R: 'static,
+    A: 'static + Allocator + Send + Sync,
 {
     /// 本层根 endpoint：所有未命中的请求都由它兜底。
     root_: Arc<dyn TrEndpointHandler<C, S, R>>,
@@ -125,7 +126,7 @@ where
     error_hook_: Option<ErrorHook>,
 }
 
-impl<C> RadixRouter<C, Global, ()>
+impl<C> RadixRouter<C, (), (), Global>
 where
     C: TrConfig + 'static,
 {
@@ -144,7 +145,7 @@ where
     }
 }
 
-impl<C, A> RadixRouter<C, A, ()>
+impl<C, A> RadixRouter<C, (), (), A>
 where
     C: TrConfig + 'static,
     // `Clone`：同一个分配器要分别交给子 router 列表与中间件链。
@@ -165,7 +166,7 @@ where
     }
 }
 
-impl<C, S> RadixRouter<C, Global, S>
+impl<C, S> RadixRouter<C, S, (), Global>
 where
     C: TrConfig + 'static,
     S: Send + Sync + 'static,
@@ -185,7 +186,7 @@ where
     }
 }
 
-impl<C, R> RadixRouter<C, Global, (), R>
+impl<C, R> RadixRouter<C, (), R, Global>
 where
     C: TrConfig + 'static,
     R: Default + 'static,
@@ -199,7 +200,7 @@ where
     }
 }
 
-impl<C, A, S, R> RadixRouter<C, A, S, R>
+impl<C, S, R, A> RadixRouter<C, S, R, A>
 where
     C: TrConfig + 'static,
     // `Clone`：同一个分配器要分别交给子 router 列表与中间件链。
@@ -229,12 +230,12 @@ where
     }
 }
 
-impl<C, A, S> RadixRouter<C, A, S>
+impl<C, S, A> RadixRouter<C, S, (), A>
 where
-    C: TrConfig + 'static,
+    C: 'static + TrConfig,
+    S: 'static + Send + Sync,
     // `Clone`：同一个分配器要分别交给子 router 列表与中间件链。
-    A: Allocator + Send + Sync + Clone + 'static,
-    S: Send + Sync + 'static,
+    A: 'static + AllocatorClone + Send + Sync,
 {
     /// 用根 handler、连接状态与显式分配器构造（请求级状态为 `()`）。
     pub fn new_in_with_state(
@@ -255,12 +256,12 @@ where
     }
 }
 
-impl<C, A, S, R> RadixRouter<C, A, S, R>
+impl<C, S, R, A> RadixRouter<C, S, R, A>
 where
-    C: TrConfig + 'static,
-    A: Allocator + Send + Sync + 'static,
-    S: Send + Sync + 'static,
+    C: 'static + TrConfig,
+    S: 'static + Send + Sync,
     R: 'static,
+    A: 'static + Allocator + Send + Sync,
 {
     /// 本层根 handler。
     pub fn root(&self) -> &Arc<dyn TrEndpointHandler<C, S, R>> {
@@ -322,13 +323,13 @@ where
     }
 }
 
-impl<C, A, S, R> RadixRouter<C, A, S, R>
+impl<C, S, R, A> RadixRouter<C, S, R, A>
 where
-    C: TrConfig + 'static,
-    // `Clone`：同路径追加端点 / 继承组元数据时，要把分配器克隆一份给新集合与端点。
-    A: Allocator + Send + Sync + Clone + 'static,
-    S: Send + Sync + 'static,
+    C: 'static + TrConfig,
+    S: 'static + Send + Sync,
     R: 'static,
+    // `Clone`：同路径追加端点 / 继承组元数据时，要把分配器克隆一份给新集合与端点。
+    A: 'static + AllocatorClone + Send + Sync,
 {
     /// 设置一条组默认元数据：之后绑定到本 router 的每个端点都会继承它。
     ///
@@ -479,7 +480,7 @@ where
     }
 }
 
-impl<C, A, S, R> TrRouteMatcher<C, S, R, A> for RadixRouter<C, A, S, R>
+impl<C, S, R, A> TrRouteMatcher<C, S, R, A> for RadixRouter<C, S, R, A>
 where
     C: TrConfig + 'static,
     A: Allocator + Send + Sync + 'static,

@@ -349,9 +349,9 @@ impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for SceneRoot {
 /// `C = ServingCfg` / 全局分配器 / 无连接状态 / 请求级状态 `SceneRequestState`。
 pub type SceneRouter = mptp_serving::RadixRouter<
     crate::scene::cfg_::ServingCfg,
-    std::alloc::Global,
     (),
     crate::scene::req_state_::SceneRequestState,
+    std::alloc::Global,
 >;
 
 /// 把 controller 端点与手写端点装配进一个 [`mptp_serving::RadixRouter`]。

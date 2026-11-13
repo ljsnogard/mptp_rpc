@@ -12,30 +12,36 @@
 use alloc::alloc::Global;
 use core::alloc::Allocator;
 
-use abs_cancel::{TrCancellationToken, TrMayCancel};
-use abs_mptp::spec::Status;
-use abs_mptp::spec::access_method::AccessMethod;
-use abs_str::str_alloc::String as AbsString;
 use bumpalo::Bump;
+
+use abs_cancel::{TrCancellationToken, TrMayCancel};
+use abs_mptp::spec::{Status, access_method::AccessMethod};
+use abs_str::str_alloc::String as AbsString;
+
 use gen_mcf2::gen_may_cancel_future;
-use mptp_smux::serving::config::TrConfig;
-use mptp_smux::serving::{K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler};
-use mptp_smux::{HeaderVal, ResponsePrefix, ServeError};
+use mptp_smux::{
+    HeaderVal, ResponsePrefix, ServeError,
+    serving::{
+        config::TrConfig,
+        K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler,
+    },
+};
 
-use super::router_::ErrorHook;
-use super::{MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher};
+use super::{
+    router_::ErrorHook,
+    MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher,
+};
 
-impl<C, A, S, R> TrServeHandler<C> for RadixRouter<C, A, S, R>
+impl<C, S, R, A> TrServeHandler<C> for RadixRouter<C, S, R, A>
 where
     C: TrConfig + 'static,
-    A: Allocator + Send + Sync + 'static,
     S: Send + Sync + 'static,
     R: Default + 'static,
+    A: Allocator + Send + Sync + 'static,
 {
     type Err = ServeError;
 
-    type HandleAsync<'f>
-        = RouterHandleAsync<'f, 'f, C, A, S, R>
+    type HandleAsync<'f> = RouterHandleAsync<'f, 'f, C, S, R, A>
     where
         Self: 'f,
         C: 'f,
@@ -53,8 +59,8 @@ where
 /// [`RadixRouter`] 作为 [`TrServeHandler`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(RouterHandle, pub, new(pub(crate)))]
-async fn router_handle_async_<'f, C, A, S, R, K>(
-    router: &'f RadixRouter<C, A, S, R>,
+async fn router_handle_async_<'f, C, S, R, A, K>(
+    router: &'f RadixRouter<C, S, R, A>,
     method: AccessMethod,
     session: &'f mut ServingSession<C>,
     cancel: K,

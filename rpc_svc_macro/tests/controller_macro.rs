@@ -19,8 +19,9 @@ use core::{
 };
 
 use abs_cancel::{NonCancellableToken, TrMayCancel};
+use abs_mptp::spec::Status;
 use mptp_serving::TrEndpointHandler;
-use rpc_core_v1::{serving::TrReplyError, x_deps::abs_mptp::spec::Status};
+use rpc_core_v1::{serving::TrReplyError, x_deps::abs_mptp};
 use rpc_svc_macro::rpc;
 
 /// 加入场景的请求体。

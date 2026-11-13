@@ -138,8 +138,7 @@ impl TrPrepFactory for ClientPrepFactory {
         }
     }
 
-    type GetPreparedAsync<'f>
-        = PrepareClientAsync<'f, 'f>
+    type GetPreparedAsync<'f> = PrepareClientAsync<'f, 'f>
     where
         Self: 'f;
 
@@ -151,12 +150,12 @@ impl TrPrepFactory for ClientPrepFactory {
 /// `ClientPrepFactory::get_prepared_async` 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(PrepareClient, pub, new(pub(crate)))]
-async fn prepare_client_async_<'f, TyTok>(
+async fn prepare_client_async_<'f, K>(
     factory: &'f mut ClientPrepFactory,
-    cancel: TyTok,
+    cancel: K,
 ) -> Result<RingBuffs<RingBuff>, Infallible>
 where
-    TyTok: TrCancellationToken,
+    K: TrCancellationToken,
 {
     let _ = cancel;
     let cap = factory.cap_;

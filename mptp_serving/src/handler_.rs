@@ -8,13 +8,11 @@
 //! The terminal handler only writes business replies. It sees the request context and knows
 //! nothing about the routing tree or middleware.
 
-use core::future::Future;
-use core::pin::Pin;
+use core::{future::Future, pin::Pin};
 
-use bumpalo::Bump;
-use bumpalo::boxed::Box as BumpBox;
-use mptp_smux::ServeError;
-use mptp_smux::serving::config::TrConfig;
+use bumpalo::{Bump, boxed::Box as BumpBox};
+
+use mptp_smux::{ServeError, serving::config::TrConfig};
 
 use super::context_::MptpContext;
 

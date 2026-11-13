@@ -33,7 +33,8 @@ use mptp_wire::{Headers, RequestPrefix};
 use crate::{
     client as rpc_client,
     messaging::body_::{
-        BodyRing_, K_BODY_RING_CAP_, decode_from_async_, encode_into_async_, read_body_async_,
+        BodyRing_, K_BODY_RING_CAP_,
+        decode_from_async_, encode_into_async_, read_body_async_,
     },
     messaging::{RpcError, RpcResult, TrRpcInterface, concat_location},
     x_deps::{abs_cancel, abs_mptp, gen_mcf2},
@@ -278,24 +279,24 @@ where
     Req: TrEncodable + 'f,
     Rep: TrDecodableOwned + 'f,
 {
-    EndpointCallAsync::<'f, 'f, C, Req, Rep>::new(client, method, path.to_string(), request)
+    EndpointCallAsync::new(client, method, path.to_string(), request)
 }
 
 /// [`call_endpoint_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(EndpointCall, pub(crate), new(pub(crate)))]
-async fn endpoint_call_async_<'f, C, Req, Rep, TyTok>(
+async fn endpoint_call_async_<'f, C, Req, Rep, K>(
     client: &'f MptpClient<C>,
     method: AccessMethod,
     location: String,
     request: Req,
-    cancel: TyTok,
+    cancel: K,
 ) -> RpcResult<Rep>
 where
     C: crate::client::TrRpcClientConfig + 'f,
     Req: TrEncodable + 'f,
     Rep: TrDecodableOwned + 'f,
-    TyTok: TrCancellationToken,
+    K: TrCancellationToken,
 {
     let mut headers = Headers::new();
     headers.set_num(
