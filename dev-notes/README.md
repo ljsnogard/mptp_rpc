@@ -69,6 +69,15 @@
   上述差距计划的实施记录（round 27–31 / Phase A–F）：C1 泛型请求级状态 `R`、D1 `next`
   回调洋葱的 arena 放置方案、兜底 500 与观测 hook、元数据分配器参数化与组元数据继承，
   以及遗留缺口（宏的非 Pull 端点参数来源、跨 router 自动继承等）。
+- [`rpc-code-first-trait-20261113-1230.md`](rpc-code-first-trait-20261113-1230.md)：
+  恢复「用 trait 定义 RPC 协议」的 code-first 能力调研：先拆解 ASP.NET Core /
+  protobuf-net.Grpc 的「interface → `Method` 描述符 → per-method Endpoint → handler →
+  activator」链路，再给出 mptp_rpc 的落点——`#[rpc(service)]` / `#[rpc(namespace, services)]` /
+  `#[rpc(impl_of)]` 恢复为「trait 方法 = 一个 `Endpoint`」，用 `constcat` 编译期拼
+  `NAMESPACE/SERVICE_NAME/OPERATION`、每方法一个 owned 请求结构体、服务端 handler 由
+  `impl_of` 生成；含 2026-11-13 评审决策（不兼容旧格式、独立 `rpc_serv_ext`、
+  `RpcEndpointInfo`、去 `path` 术语、denco `()` 支持）、完整样式代码、P0–P5 计划与
+  公开 API 变更清单。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。
