@@ -1764,3 +1764,122 @@ impl RoomService for RoomServiceImpl { ... }
   `namespace`，需要更新 examples / tests / README；code-first 尚未实现，现在改成本最低。
 - **多前缀**：见 11.5；不要把多个前缀硬塞进单 marker。
 - **重复前缀**：每个 trait 重复写 `im/v1`；接受这个重复，换掉 namespace 的一层概念。
+
+---
+
+## 12. 选项：Call 请求信封（body enum）与 operation header
+
+> 本节记录 2026-11-14 的另一个候选，**尚未采用**。现行设计仍是 §11 的
+> per-service marker + 每方法一个 pattern；`CC-01..CC-15` 不变。
+
+### 12.1 旧做法
+
+旧设计把同一个 service 的所有 `CALL` 方法放在**一个路由** `/{namespace}/{service}` 上，
+请求 body 是一个生成的枚举：
+
+```rust
+#[derive(TrEncodable, TrDecodable)]
+pub enum RoomServiceCall {
+    ListMyRooms,
+    CreateRoom(__Req_create_room), // 或 CreateRoom { name, topic }
+    JoinRoom(u64),
+    SendMessage(__Req_send_message),
+}
+```
+
+客户端代理按方法构造对应变体；服务端 handler 解码枚举、match 变体、调用 impl。
+路径空间只占一条 `/{service_prefix}`。
+
+### 12.2 可行性
+
+可以恢复，且不改 trait API：
+
+- trait 宏生成 `XxxServiceCall`（`#[doc(hidden)]`）；0 参 → unit 变体，1 参 → newtype
+  变体，≥2 参 → newtype 包裹 `__Req_*`；用 `#[denco(rename = "<method>")]` 保证线上
+  变体名就是方法名。
+- 客户端代理把方法参数装进变体，发到 `/{prefix}`；服务端 `impl_of` 生成**一个**
+  `TrEndpointHandler`，解码枚举后 match 到 impl 方法。
+- 非 `CALL` 端点（View/Pull/Push/Drop）不受影响，仍是每方法一个 pattern。
+
+### 12.3 收益
+
+- 一个 service 只占一条路径；大量 Call 方法不再各占一段 path；
+- 方法名不会与资源路径的 `{param}` 混在同一层（虽然 `matchit` 的 static 优先已经
+  降低这个风险）；
+- 更接近 JSON-RPC / gRPC 的“service + method”模型，trait 方法与 wire 分派一一对应。
+
+### 12.4 代价（关键）
+
+1. **`RpcDataTypeInfo` 是 per-endpoint 的**：一个 service 端点有 N 种请求 / N 种响应
+   类型，而 `RpcDataTypeInfo` 只有一组 `request_body` / `response_body` / `accept`。
+   枚举模式下无法在端点元信息里声明“每个方法各自的类型”；通用
+   `validate_request_types` / `validate_response_types` 不能覆盖到方法级，校验必须
+   移进生成的 dispatcher。
+2. **`RpcEndpointInfo.operation` 变成运行期值**：注册时只有一个 service 端点，
+   operation 要解码 body（或读 header）才知道；`operation` 级中间件 / 授权 / 限流
+   无法在 body 解码前按方法执行。
+3. **405 / Allow 退化**：一个 `CALL` 端点，没有 per-method 的 `Allow`。
+4. **类型 ID 变粗**：两种子选项——
+   - A. `Data_Type_Id = XxxServiceCall` 的 ID：简单，通用校验可用；但**任一方法
+     变化都会改变整个枚举 ID**，所有客户端一起升级。
+   - B. `Data_Type_Id = 选中变体的内层 payload`（`__Req_*` / scalar / `()`）：
+     方法级 ID 不变，演进更好；但校验必须在 dispatcher 里做（先解码枚举、match
+     变体、再比较 header 与内层 ID），框架的 pre-handler 校验被绕过。
+5. **响应类型随变体变化**：服务端 dispatcher 按变体写对应响应头；端点元信息无法
+   预先声明。
+6. **中间件/审计**：按 operation 的策略需要在 dispatcher 内或解码后执行；如果既要
+   省 path 又要 pre-body 策略，需要额外的 operation header（见 §12.5）。
+
+结论：**枚举模式能省 path，但会把“每方法一个端点”的 typed metadata / 中间件粒度
+换掉**。这与 2026-11-13 决策 1（方法级 Endpoint）相反，不是纯收益。
+
+### 12.5 更优的折中：operation header
+
+如果目标只是“一个 service 一条路径”，可以不改 body 形状：
+
+```text
+CALL /im/v1/room
+X-Mptp-Operation: create_room
+Data_Type_Id: <__Req_create_room 的 ID>
+Accept: <RoomSummary 的 ID>
+body: __Req_create_room
+```
+
+- 路径仍只有 `/{prefix}`；operation 在 header；
+- body 仍是 per-method 类型，`Data_Type_Id` / `Accept` 仍是方法级；
+- 中间件可以在 body 解码前读 `X-Mptp-Operation` 做授权 / 限流；
+- 服务端 dispatcher 按 header 选方法、校验 header 与 body 类型、调用 impl；
+- 代价：新增一个 header 契约；`RpcEndpointInfo.operation` 仍是运行期/动态；
+  405/Allow 仍是 service 级；客户端代理要写 header。
+
+与 body enum 相比，operation header **保留了方法级类型 ID 和 pre-body 策略**，只牺牲
+了路由层的 per-operation endpoint。如果“侵占 path 空间”是唯一动机，这个折中比枚举
+更小代价。
+
+### 12.6 建议
+
+- **默认仍用 §11 的每方法 pattern**：typed metadata、per-operation 中间件、405、
+  `RpcEndpointInfo` 都是现成能力；path 树多几个 static 叶子成本很低。
+- 如果确实需要“一个 service 一条路径”，优先做 **operation header**（§12.5），
+  而不是 body enum；它不破坏类型头模型。
+- 如果决定恢复 body enum，建议作为 **per-service opt-in**（如
+  `#[rpc(service = ..., api = ..., dispatch = "envelope")]`），而不是默认；验收另立
+  `CE-*`（草案见 §12.7），并明确接受 §12.4 的 1–5 条。
+- 无论选哪种，trait API 不变；变化只在宏生成的 wire 形状与 dispatcher。
+
+### 12.7 `CE-*` 验收草案（仅当采用 envelope 模式）
+
+| ID | 验收项 | 判定 |
+| --- | --- | --- |
+| CE-01 | `#[rpc(service = ..., api = X, dispatch = "envelope")]` 生成 `XxxServiceCall` | 编译；枚举变体名 = 方法名 |
+| CE-02 | 0/1/多参变体：unit / newtype / `__Req_*` newtype | 编解码 roundtrip |
+| CE-03 | 客户端代理写 `/{prefix}` + 正确变体 | 服务端命中 dispatcher |
+| CE-04 | 服务端解码、match、调用 impl | 每个方法命中 |
+| CE-05 | `Data_Type_Id` 采用子选项 A 或 B；dispatcher 校验 | 正确通过；错误 400/406 |
+| CE-06 | 响应按变体写对应类型头；客户端校验 | 正确通过 / 406 |
+| CE-07 | `RpcEndpointInfo` 为 service 级；operation 动态 | 记录字段 |
+| CE-08 | 一个 CALL 端点，无 per-method `Allow` | 文档化 |
+| CE-09 | 子选项 B 下新增方法不改变既有内层 ID | golden 不变 |
+| CE-10 | 重复 / 非法方法形状编译失败 | trybuild |
+| CE-11 | 与非 CALL 的每方法 path 混挂 | 路由不冲突 |
+| CE-12 | 子选项 A 下枚举 ID / golden 随方法变化 | golden 更新 |
