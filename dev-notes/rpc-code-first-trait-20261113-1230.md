@@ -28,7 +28,7 @@
 | 4 | **增加 `RpcEndpointInfo`** 方法级元数据 | §3.8、§4.5 |
 | 5 | `#[rpc(service_of(...))]` **改名 `#[rpc(impl_of(...))]`** | 全文（legacy 历史引用保留旧名） |
 | 6 | **协议层禁用 `path` 一词**：改为 `namespace` / `service` / `operation` / `pattern`；区分「pattern」与「router 挂载点」 | §3.1、§3.3.1、§3.8 |
-| 7 | **denco 为 `()` 增加 `TrEncodable` / `TrDecodable`**，`RpcResult<()>` 可直接使用 | §3.7 |
+| 7 | **denco 已实现 `()` 的 `TrEncodable` / `TrDecodable`**，`RpcResult<()>` 可直接使用（已落地） | §3.7、§3.4 |
 
 > 第 6 条的因果链：用户指出「具体 path 由 router 挂载时决定」，因此协议宏再声明一个叫
 > `path` 的字符串会与挂载位置冲突/混淆。本文把协议层的东西改名为
@@ -69,7 +69,7 @@ C# 的 code-first gRPC（protobuf-net.Grpc）把 **interface 方法在绑定期�
 - **方法粒度 Endpoint**：每个方法一个 `TrEndpointHandler`，用
   `MethodSet::CALL` 绑进同一个 `RadixRouter`，与 controller / 自由函数 / 手写 handler
   **混挂在同一张路由表上**；
-- **请求体**：每个方法一个隐藏的 owned 请求结构体（字段按位置 `f0`、`f1`…），
+- **请求体**：按方法参数个数选择 `()` / 单参数 owned 类型 / 多参数字段结构体（`f0`、`f1`…），
   不再用「一个 service 一个 body enum」；
 - **pattern 拼接**：`#[rpc(impl_of(I))]` 展开时 `I` 与具体 impl 都是**具体类型**，
   用 `constcat::concat!(<I as TrRpcInterface>::NAMESPACE, "/",
@@ -101,8 +101,8 @@ Endpoint**。
    约束，不是本次新增。
 5. **只支持 `CALL`**：trait 方法固定绑 `MethodSet::CALL`；其它方法访问同一 pattern 会
    得到框架统一的 `405`（`mptp_serving/src/serve_handler_.rs:102-118`）。
-6. **`RpcResult<()>` 可用（已决策）**：由 denco 为 `()` 增加 `TrEncodable` /
-   `TrDecodable` 实现；mptp_rpc 侧不需要为「空成功类型」写特例，服务端照常
+6. **`RpcResult<()>` 可用（已落地）**：denco 已为 `()` 实现 `TrEncodable` /
+   `TrDecodable`；mptp_rpc 侧不需要为「空成功类型」写特例，服务端照常
    `write_ok_async(&())`，客户端照常解码 `()`（§3.7）。
 
 ---
@@ -494,40 +494,63 @@ const PATTERN: &'static str = ::rpc_core_v1::x_deps::constcat::concat!(
 > `mptp_serving` 的嵌套 router 行为，建议单独立项。本文按「`NAMESPACE` 是契约 key、
 > `MOUNT` 是装配前缀」记录，避免把两者混成一个 `path`。
 
-### 3.4 请求体：每方法一个 owned 请求结构体
+### 3.4 请求体：按方法参数个数选择 `()` / 单参数类型 / 多参数字段结构体
 
-旧形状的 body enum 有两个问题：方法不能独立类型校验；impl_of 在别的 crate 里
-无法命名 hidden 模块里的 enum（除非再引入一层 trait 隐藏方法）。新形状改为：
+旧形状的 body enum 有两个问题：方法不能独立类型校验；`impl_of` 在别的 crate 里
+无法命名 hidden 模块里的 enum（除非再引入一层 trait 隐藏方法）。denco 已经支持
+`()` 的编解码，因此新形状可以按参数个数直接选请求类型，不再为每个方法都造结构体：
+
+| 参数个数 | 请求类型 | 说明 |
+| --- | --- | --- |
+| 0 | `()` | 无业务参；客户端发 unit，服务端解码 unit 后调用 |
+| 1 | 该参数的 owned 类型 | `&str`→`String`、`&[u8]`→`Vec<u8>`、`&Copy`→标量、owned 业务类型原样 |
+| ≥2 | 隐藏结构体 `__Req_<operation> { f0, f1, … }` | 字段按位置命名，derive `TrEncodable`/`TrDecodable` |
 
 ```rust
 #[doc(hidden)]
 #[allow(non_camel_case_types)]
 pub mod __rpc_service_WorkspaceService {
+    /// 仅多参数方法需要；单参数直接用参数类型，0 参数用 `()`。
     #[derive(TrEncodable, TrDecodable)]
-    pub struct __Req_create_workspace {
-        pub f0: ::alloc::string::String,
+    pub struct __Req_create_session {
+        pub f0: u64,
+        pub f1: ::alloc::string::String,
     }
+}
 
-    #[derive(TrEncodable, TrDecodable)]
-    pub struct __Req_list_workspaces;
+pub trait WorkspaceService {
+    // 0 参 → ()
+    #[doc(hidden)]
+    type __Req_list_workspaces = ();
+    // 1 参 → 直接使用 owned 类型
+    #[doc(hidden)]
+    type __Req_create_workspace = ::alloc::string::String;
+    #[doc(hidden)]
+    type __Req_get_workspace = u64;
+    // ≥2 参 → hidden 结构体
+    #[doc(hidden)]
+    type __Req_create_session =
+        __rpc_service_WorkspaceService::__Req_create_session;
+    // ...
 }
 ```
 
 要点：
 
-- **字段按位置命名 `f0`、`f1`…**，不沿用参数名。原因：`impl_of` 看到的是 **impl**
-  的方法签名，参数名允许与 trait 声明不同；按位置命名让 trait 宏与 impl 宏无需共享
-  参数名。
+- **多参数字段按位置命名 `f0`、`f1`…**，不沿用参数名。原因：`impl_of` 看到的是
+  **impl** 的方法签名，参数名允许与 trait 声明不同；按位置命名让 trait 宏与 impl 宏
+  无需共享参数名。
 - 借用参数按旧规则转 owned：`&str` → `String`、`&[u8]` / `&Vec<u8>` → `Vec<u8>`、
   `&String` → `String`、`&Copy` 标量 → 标量；其它借用继续拒绝（旧分析器规则）。
-- 0 参数方法生成 unit struct，客户端发空结构体，服务端解码后忽略。
-- 每方法一个类型，`AcceptType` / 类型校验中间件第一次可以按方法粒度工作。
+- `()` / 单参数类型的规则让 `AcceptType` / 类型校验中间件可以直接使用业务类型，
+  不必再为每个方法生成一个 wrapper。
 - 新增 / 重命名参数会改变该方法的 body（破坏兼容）；重命名 **Rust 参数名**不影响线上
-  字段名（始终是 `f0`…），这是位置命名的额外好处。
+  字段名（多参时始终是 `f0`…），这是位置命名的额外好处。
+- **多参数字段顺序**：`f0`、`f1`… 的顺序 = trait 声明顺序。新增参数只能追加在末尾；
+  重排 / 删除属于破坏性变更，需要写进 README。
 
-**字段顺序**：`f0`、`f1`… 的顺序 = trait 声明顺序。新增参数只能追加在末尾；重排 /
-删除属于破坏性变更。这一点与旧 body enum「变体顺序即线上顺序」的纪律一致，需要写进
-README。
+**返回值 `()`（决策 7，denco 已实现）**：`RpcResult<()>` 直接走 `write_ok_async(&())`，
+客户端 `Rep = ()` 正常解码，不需要宏特例。
 
 ### 3.5 服务端代码生成的职责划分
 
@@ -537,7 +560,7 @@ legacy 正是用 `abs_rpc_serv::service::TrRpcCallCtx` 把协议层与服务端�
 
 | 展开点 | 所在 crate | 生成内容 | 依赖 |
 | --- | --- | --- | --- |
-| `#[rpc(service)]` trait | 协议 crate | `SERVICE_NAME`、每方法请求结构体、关联类型桥、`impl Trait for ClientProxy` | `rpc_core_v1` |
+| `#[rpc(service)]` trait | 协议 crate | `SERVICE_NAME`、每方法请求类型、关联类型桥、`impl Trait for ClientProxy` | `rpc_core_v1` |
 | `#[rpc(namespace, services)]` interface | 协议 crate | `TrRpcInterface`、`ServiceSelector` | `rpc_core_v1` |
 | `#[rpc(impl_of(I))]` impl | 服务端 crate | 每方法 `TrEndpointHandler` + `install_into` + 端点元数据 | `mptp_serving` + `rpc_core_v1` |
 
@@ -553,8 +576,14 @@ pub trait WorkspaceService {
     const SERVICE_NAME: &'static str = "workspace";
 
     #[doc(hidden)]
-    type __Req_create_workspace =
-        __rpc_service_WorkspaceService::__Req_create_workspace;
+    type __Req_create_workspace = ::alloc::string::String;
+    #[doc(hidden)]
+    type __Req_list_workspaces = ();
+    #[doc(hidden)]
+    type __Req_get_workspace = u64;
+    #[doc(hidden)]
+    type __Req_create_session =
+        __rpc_service_WorkspaceService::__Req_create_session;
 
     // ... 用户方法
 }
@@ -592,11 +621,10 @@ where
         '_,
         MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<Workspace>,
     > {
-        let request = __rpc_service_WorkspaceService::__Req_create_workspace { f0: name };
         ::rpc_core_v1::client::call_unary_async::<__C, __I, _, Workspace>(
             self,
             "workspace/create_workspace",
-            request,
+            name,
         )
     }
 }
@@ -642,9 +670,9 @@ match result {
 - `decode_body_async` 当前内部用 `NonCancellableToken`
   （`rpc_core_v1/src/serving/body_.rs:59`）；若要求「请求级取消能中断解码」，需要给
   body helper 增加可取消变体，属后续增强，不是本次恢复的阻塞项；
-- **`RpcResult<()>`（决策 7）**：denco 侧为 `()` 增加 `TrEncodable` / `TrDecodable` 后，
-  `write_ok_async(ctx.session_mut(), &())` 与客户端 `Rep = ()` 解码都走普通路径，
-  宏不需要为「空成功体」生成特例；这属于对 `denco` 仓库的依赖改动，mptp_rpc 只消费。
+- **`RpcResult<()>`（决策 7，已落地）**：denco 已为 `()` 实现 `TrEncodable` /
+  `TrDecodable`，`write_ok_async(ctx.session_mut(), &())` 与客户端 `Rep = ()` 解码都走
+  普通路径，宏不需要为「空成功体」生成特例；`impl_of` 的测试可以直接覆盖 `RpcResult<()>`。
 
 ### 3.8 元数据、中间件与共存
 
@@ -771,6 +799,150 @@ let router = rpc_serv_ext::interface::<ApiV1>(router)
 > 备选（不采用）：在 `impl_of` 里生成 `impl TrRpcServiceOf<I> for Impl`，让 builder 支持
 > `.add_service::<Impl>(svc)`。它更好看，但会把 `rpc_serv_ext`（或至少它的 trait）变成
 > 业务 impl crate 的必选依赖，与决策 3 的「减少业务 crate 依赖」相冲突。
+
+### 3.10 一个 trait 的多个方法如何对应多个访问点
+
+这是本方案的核心关系模型：**trait 不是一条路由，而是一组访问点的契约与共同 key**。
+
+#### 3.10.1 身份三元组
+
+每个 RPC 访问点由三个键唯一确定：
+
+| 键 | 来源 | 例子 |
+| --- | --- | --- |
+| `NAMESPACE` | interface marker `namespace = "..."` | `api/v1` |
+| `SERVICE_NAME` | service trait 的 `#[rpc(service = "...")]` | `workspace` |
+| `OPERATION` | trait 方法名（`unraw` 后） | `create_workspace` |
+
+- `(NAMESPACE, SERVICE_NAME)` 是「这个 RPC API / service」的身份；
+- `OPERATION` 是「这个 service 的哪一个方法」的身份；
+- 访问点 `PATTERN = NAMESPACE/SERVICE_NAME/OPERATION`（相对 router 根，§3.3.1）。
+
+因此 service 不是第四条路由，而是这组访问点的**公共 key**；router 仍然只看到一条条
+具体 endpoint，不需要理解 trait。
+
+#### 3.10.2 编译期：一次展开、一一对应
+
+`#[rpc(impl_of(ApiV1))] impl WorkspaceService for WorkspaceServiceImpl` 展开时：
+
+1. 枚举 impl 块中属于该 trait 的所有 `&self` 方法；
+2. 每个方法生成一个 handler + 一个 `Endpoint`（pattern 由三元组拼成）；
+3. 所有 handler 共享同一个 `Arc<WorkspaceServiceImpl>`；
+4. 所有 `Endpoint` 由同一个 `install_into` 安装；
+5. 生成代码全部在同一个 hidden 模块里（模块名含 impl 与 interface）。
+
+所以「trait 方法 ↔ 访问点」的关系不是运行期查表，而是**编译期生成的一一对应**：
+
+| trait 项 | 是否访问点 | 请求类型 | operation |
+| --- | --- | --- | --- |
+| `&self` 方法（0 参） | 是 | `()` | 方法名 |
+| `&self` 方法（1 参） | 是 | owned 参数类型 | 方法名 |
+| `&self` 方法（≥2 参） | 是 | `__Req_<op>` 结构体 | 方法名 |
+| 关联 const / type | 否 | — | — |
+| supertrait（如 `Send + Sync`） | 否 | — | — |
+| 非 `&self` 方法 | 拒绝 | — | — |
+| 带默认实现的 trait 方法 | 拒绝（v1） | — | — |
+
+Rust 的类型系统负责兜底：trait 增加一个方法，impl 必须实现它；宏在同一个 impl 块上
+展开，看到的方法集合就是生成的端点集合，不会出现「trait 有方法、服务端漏挂」的情况。
+客户端的 `impl Trait for ClientProxy` 由同一个 trait 宏生成，同样是「每方法一个代理
+方法」，因此两端的 operation 集合天然一致。
+
+**默认实现必须在分析层拒绝**：`impl_of` 依赖 impl 块枚举方法；如果 trait 方法有默认
+实现且 impl 没有重写，impl 块里就不会出现该方法，服务端会漏挂端点，而客户端的 trait
+宏仍然会生成对应代理方法。为保持两端一致，`#[rpc(service)]` 的方法必须是纯声明
+（无 body）；helper 逻辑放在 impl 类型自己的固有 impl 或另一个普通 trait 里。
+supertrait 的方法也不属于本 service 的 operation，需要显式写进 service trait。
+
+带 `#[cfg]` 的方法：分析层把方法上的 `cfg` 继承到请求类型 / 关联类型 / 客户端代理方法；
+`impl_of` 把 impl 方法上的同一组 `cfg` 继承到 handler / endpoint 绑定。两端的 cfg 必须
+一致（它们来自同一个协议 crate 的条件编译），否则会退化成「一端有、一端没有」。
+
+#### 3.10.3 运行期：service key 在元数据里，而不是在 router 里
+
+每个生成的 `Endpoint` 挂：
+
+```rust
+RpcEndpointInfo {
+    namespace: "api/v1",
+    service: "workspace",
+    operation: "create_workspace",
+    pattern: "api/v1/workspace/create_workspace",
+}
+```
+
+中间件可以按三个粒度分组：
+
+- `operation`：单方法策略（限流键、审计、指标）；
+- `service`：整组方法策略（例如「workspace 服务只允许某个角色」）；
+- `namespace`：版本 / 租户级策略。
+
+router 本身不为 service 增加任何结构：它只按 pattern 匹配。service 的「实体」在装配期
+由 generated installer 表示，在运行期由 `(namespace, service)` 元数据表示。
+
+> 可选增强（不在本期范围）：`impl_of` 额外生成一个静态的
+> `RpcServiceDef { namespace, service, operations: &[RpcOperationDef] }`，用于内省、
+> 文档生成、测试「trait 方法数 = 端点数」。它不需要参与路由，也不改变本节的关联模型；
+> 若团队需要，再加。
+
+#### 3.10.4 注册单元：一个 installer = 一个 service 的全部访问点
+
+`install_into(router, Arc<Impl>)` 是唯一（宏生成的）服务端注册入口：
+
+- 一次绑定该 service 的全部 operation endpoint；
+- 消费式 `RadixRouter`：任一端点绑定失败（pattern 冲突 / 非法）就返回 `Err`，router 被
+  drop，**不会留下半个 service**；
+- 同一个 `Arc<Impl>` 被所有 operation handler 共享，因此 trait 方法看到的是同一份
+  业务状态（与 legacy 的 service 实例语义一致）。
+
+同一 impl + trait 注册到多个 interface 时，每个 interface 生成一个独立 installer 和
+一组 endpoint；`NAMESPACE` 不同，`(namespace, service)` 不同，互不覆盖：
+
+```rust
+let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, ws.clone())?;
+let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV2::install_into(router, ws)?;
+```
+
+同一 impl 实现多个 trait 时，每个 trait 是一个独立 service（不同的 `SERVICE_NAME`），
+各自 installer；它们可以共享同一个 `Arc<Impl>`，也可以各自构造。
+
+#### 3.10.5 客户端：调用点与访问点同源
+
+`client.call::<ApiV1>()` 返回的 `ClientProxy` 实现该 interface 下的每个 service trait；
+每个代理方法体把 `(SERVICE_NAME, OPERATION)` 作为相对路由键交给
+`call_unary_async`，`NAMESPACE` 由 `I` 提供。因此：
+
+```text
+WorkspaceService::create_workspace  ──►  api/v1/workspace/create_workspace
+WorkspaceService::list_workspaces   ──►  api/v1/workspace/list_workspaces
+```
+
+调用点是 trait 方法，访问点是 pattern；两者由同一份宏输入推导，不需要手写映射表。
+
+#### 3.10.6 为什么不是「一个 service 一条路由 + body 选方法」
+
+| 维度 | service 级单访问点 | 方法级访问点（本方案） |
+| --- | --- | --- |
+| trait ↔ 路由 | 1 : 1 | 1 : N（按 `(namespace, service)` 分组） |
+| 方法选择 | body enum 变体 | pattern 最后一段 |
+| 中间件看到的 operation | 解码 body 之后才知道 | 进入 handler 前就知道 |
+| 每方法 metadata / 405 / 类型校验 | 做不了或只能宽匹配 | 每端点独立 |
+| 路由匹配依赖 body | 是（必须先解码） | 否 |
+| 与 controller / 手写端点共存 | 需要独立分派器 | 同一 `RadixRouter` |
+
+service 级单访问点的唯一优点是「trait 与路由一一对应、关系简单」；代价是重新引入
+「路由之外的第二层分派器」，这正是重构已经删除的模型。ASP.NET Core 的 code-first 也
+是 service → 多个 method endpoint，而不是 service 一个 endpoint（§2.4）。
+
+#### 3.10.7 冲突与命名
+
+- 同一个 trait 内方法名唯一（Rust 保证），因此 operation 不会重复；
+- 两个 trait 使用相同 `SERVICE_NAME` + 相同 `NAMESPACE` 且方法同名时，pattern 会冲突；
+  当前 `RadixRouter::bind_endpoint` 不报冲突（同 pattern 同方法先到先得），需要文档约定
+  「同一 namespace 下 service 名唯一」，或在测试 / 装配层做一次 pattern 唯一性检查；
+- 同一 impl 的同一 trait 挂到不同 namespace 是合法的，不构成冲突；
+- 重命名 trait 方法 = 改 operation 段 = 改线上路由；本次不引入
+  `#[rpc(name = "...")]`，需要稳定路由时应在 trait 设计阶段固定方法名。
 
 ---
 
@@ -926,15 +1098,18 @@ pub fn build_router(
 pub trait WorkspaceService {
     const SERVICE_NAME: &'static str = "workspace";
 
+    // 0 参 → ()
     #[doc(hidden)]
-    type __Req_create_workspace =
-        __rpc_service_WorkspaceService::__Req_create_workspace;
+    type __Req_list_workspaces = ();
+    // 1 参 → 直接使用 owned 参数类型
     #[doc(hidden)]
-    type __Req_list_workspaces =
-        __rpc_service_WorkspaceService::__Req_list_workspaces;
+    type __Req_create_workspace = ::alloc::string::String;
     #[doc(hidden)]
-    type __Req_get_workspace =
-        __rpc_service_WorkspaceService::__Req_get_workspace;
+    type __Req_get_workspace = u64;
+    // ≥2 参 → hidden 位置字段结构体
+    #[doc(hidden)]
+    type __Req_create_session =
+        __rpc_service_WorkspaceService::__Req_create_session;
 
     fn create_workspace(
         &self,
@@ -948,26 +1123,14 @@ pub trait WorkspaceService {
 pub mod __rpc_service_WorkspaceService {
     use super::*;
 
+    /// 只有多参数方法需要请求结构体；单参数 / 0 参数不生成。
     #[derive(
         ::rpc_core_v1::x_deps::denco_macro::TrEncodable,
         ::rpc_core_v1::x_deps::denco_macro::TrDecodable,
     )]
-    pub struct __Req_create_workspace {
-        pub f0: ::alloc::string::String,
-    }
-
-    #[derive(
-        ::rpc_core_v1::x_deps::denco_macro::TrEncodable,
-        ::rpc_core_v1::x_deps::denco_macro::TrDecodable,
-    )]
-    pub struct __Req_list_workspaces;
-
-    #[derive(
-        ::rpc_core_v1::x_deps::denco_macro::TrEncodable,
-        ::rpc_core_v1::x_deps::denco_macro::TrDecodable,
-    )]
-    pub struct __Req_get_workspace {
+    pub struct __Req_create_session {
         pub f0: u64,
+        pub f1: ::alloc::string::String,
     }
 }
 
@@ -984,11 +1147,10 @@ where
         '_,
         MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<Workspace>,
     > {
-        let request = __rpc_service_WorkspaceService::__Req_create_workspace { f0: name };
         ::rpc_core_v1::client::call_unary_async::<__C, __I, _, Workspace>(
             self,
             "workspace/create_workspace",
-            request,
+            name,
         )
     }
 
@@ -998,11 +1160,10 @@ where
         '_,
         MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<Vec<Workspace>>,
     > {
-        let request = __rpc_service_WorkspaceService::__Req_list_workspaces;
         ::rpc_core_v1::client::call_unary_async::<__C, __I, _, Vec<Workspace>>(
             self,
             "workspace/list_workspaces",
-            request,
+            (),
         )
     }
 
@@ -1053,7 +1214,7 @@ pub mod __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1 {
 
                 let result = <WorkspaceServiceImpl as WorkspaceService>::create_workspace(
                     &*self.svc_,
-                    req.f0,
+                    req,
                 )
                 .may_cancel_with(ctx.cancel().child_token())
                 .await;
@@ -1178,11 +1339,11 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
 4. 新增独立 crate `rpc_serv_ext`（决策 3）：只含 `InterfaceBuilder` + 闭包式
    `service()` + `finish()`；依赖 `rpc_core_v1` + `mptp_serving`；不依赖
    `rpc_svc_macro` / 协议 crate；
-5. 依赖侧：denco 仓库为 `()` 增加 `TrEncodable` / `TrDecodable`（决策 7；mptp_rpc
-   只消费，不实现）。
+5. 依赖侧：denco 仓库的 `()` `TrEncodable` / `TrDecodable` 已实现（决策 7）；
+   本期直接加一个 `RpcResult<()>` 的端到端 / 集成用例验证。
 
 **验收**：`cargo check --workspace` 不回归；constcat 在生成代码路径里可用；
-`rpc_serv_ext` 能独立编译；`RpcResult<()>` 的编解码在 denco 侧可用。
+`rpc_serv_ext` 能独立编译；`RpcResult<()>` 的端到端用例通过。
 
 ### P1：恢复分析层（`rpc_svc_macro/src/model_.rs` / `analyze_.rs`）
 
@@ -1190,7 +1351,8 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
 
 - `parse_rpc_args_` 恢复 `Service { namespace }` / `Interface { namespace, services }` /
   `ImplOf { interface }` 三个分支；
-- `analyze_service_`：校验非泛型 trait、`&self` 方法、返回
+- `analyze_service_`：校验非泛型 trait、`&self` 方法、**无默认实现**（`TraitItemFn.default`
+  必须为 `None`，否则拒绝并提示「helper 放到固有 impl / 普通 trait」）、返回
   `impl TrMayCancel<'f, MayCancelOutput = RpcResult<T>>`、参数 owned / 借用的白名单；
   注入 `SERVICE_NAME`、每方法请求类型（关联类型）；
 - `analyze_interface_`：单元结构体、非空 `services`、namespace 校验；
@@ -1225,7 +1387,10 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
   crate trait impl（决策 3），人体工学 builder 在 `rpc_serv_ext` 里通过闭包组合。
 
 **验收**：编译期验证生成代码；一个最小 `mptp_serving` 集成测试把生成的端点挂到
-`RadixRouter` 并断言 pattern / 方法集合 / 元数据；不建立真实连接。
+`RadixRouter` 并断言 pattern / 方法集合 / 元数据；不建立真实连接。另加一个关系测试：
+对同一 trait 的 N 个 `&self` 方法，`install_into` 后应能枚举/命中 N 个 operation，
+且每个端点的 `RpcEndpointInfo.operation` 与 trait 方法名一一对应（若本期生成
+`RpcServiceDef`，直接断言其 `operations` 表；否则用 test-only 的 operation 常量表）。
 
 ### P4：端到端迁移 `mptp_cs_smoke`
 
@@ -1261,7 +1426,7 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
 | `rpc_core_v1` 增加 `constcat` 依赖并 `x_deps` 重导出 | 依赖变更 | 不改变 `mptp_serving` 公开 API |
 | `rpc_core_v1::serving::RpcEndpointInfo` | 新增 | 决策 4；方法级元数据 |
 | 新 crate `rpc_serv_ext` | 新增 crate | 决策 3；只含闭包式 `InterfaceBuilder`，依赖 `rpc_core_v1` + `mptp_serving` |
-| denco 为 `()` 增加 `TrEncodable` / `TrDecodable` | 外部依赖变更 | 决策 7；mptp_rpc 只消费 |
+| denco 的 `()` `TrEncodable` / `TrDecodable` | 已完成 | 决策 7；mptp_rpc 只需消费 |
 | 线上格式：pattern 增加 `/{operation}`，body 变为每方法结构体 | **破坏** | 决策 1：不兼容旧格式、不生成别名端点 |
 | `mptp_cs_smoke` 协议 / 服务端装配迁移 | 仓库外变更 | interface 属性 `path`→`namespace`、服务端 `impl_of` + `RadixRouter`；客户端调用逻辑不变 |
 
@@ -1304,14 +1469,13 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
 5. **宏命名**：`#[rpc(impl_of(...))]`（决策 5）。
 6. **术语**：协议层不用 `path`；使用 `namespace` / `service` / `operation` / `pattern`，
    并单独定义 `MOUNT`（决策 6，§3.3.1）。
-7. **`RpcResult<()>`**：denco 为 `()` 补 `TrEncodable` / `TrDecodable`（决策 7）。
+7. **`RpcResult<()>`**：denco 已实现 `()` 的 `TrEncodable` / `TrDecodable`（决策 7）。
 
 ### 7.2 剩余实现级问题（不阻塞设计）
 
 - `rpc_serv_ext` 的最终 crate 名与发布位置（工作区成员 / 独立仓库）。
 - 是否让 `impl_of` 额外生成一个 `Impl::install_into_via_<I>` 固有方法，减少装配处写
   hidden 模块路径；它不增加依赖，纯属宏糖。
-- denco `()` 实现的发布时间；在它落地前，`RpcResult<()>` 的端到端测试需要等依赖更新。
 - 是否引入 `#[rpc(name = "...")]` 让 operation 名与 Rust 方法名解耦（本次不做）。
 
 ---
@@ -1337,8 +1501,8 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
 7. **`Endpoint` 拥有 pattern 的借用坑**：`pattern() -> &str` 后先 `set.push(endpoint)`
    再 `trie.insert(normalized, ...)` 会 `E0505`；需要先复制 key。本文的 constcat 方案
    不触发这个问题。
-8. **denco `()`**：本次未在 mptp_rpc 侧验证；它是决策 7 的依赖侧工作（denco 仓库补
-   `TrEncodable` / `TrDecodable`），落地前 `RpcResult<()>` 的端到端用例暂不可跑。
+8. **denco `()`**：用户已确认 denco 实现对 `()` 的 `TrEncodable` / `TrDecodable`；本期
+   只需在 `impl_of` 的集成用例里覆盖 0 参请求与 `RpcResult<()>` 返回。
 
 ---
 
@@ -1391,10 +1555,19 @@ the `mptp_serving` dependency. Patterns are concatenated at compile time with
 currently never executed) is required. `NAMESPACE` is a contract key, not an absolute URL
 path: the effective wire route is the router's mount prefix plus the generated pattern.
 
+A trait with N methods becomes N operation endpoints sharing the service key
+`(NAMESPACE, SERVICE_NAME)`: the `impl_of` expansion emits one handler and one endpoint per
+method, all handlers share the same `Arc<Impl>`, and the whole set is bound by one generated
+`install_into` (the service-level unit). Each endpoint carries `RpcEndpointInfo` with
+`namespace`, `service`, `operation` and `pattern`, so middleware can group by namespace,
+service or operation. The router itself remains endpoint-only; there is no service-level
+route and no second dispatcher.
+
 Per the 2026-11-13 review: legacy wire compatibility is explicitly dropped (no alias
 endpoint), the extra `associated_type_defaults` feature is accepted, `RpcEndpointInfo` is
 added, the macro is named `impl_of`, the word `path` is removed from the protocol surface
-in favour of `namespace`/`service`/`operation`/`pattern`, denco will implement
-`TrEncodable`/`TrDecodable` for `()`, and the ergonomic interface builder lives in a
-separate `rpc_serv_ext` crate that only the assembly crate depends on — the protocol crate
-and the service-implementation crate stay free of it.
+in favour of `namespace`/`service`/`operation`/`pattern`, denco now implements
+`TrEncodable`/`TrDecodable` for `()` (so 0-arg requests and `RpcResult<()>` need no wrapper),
+and the ergonomic interface builder lives in a separate `rpc_serv_ext` crate that only the
+assembly crate depends on — the protocol crate and the service-implementation crate stay
+free of it.

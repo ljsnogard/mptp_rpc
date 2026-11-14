@@ -16,17 +16,16 @@ use alloc::{
     vec::Vec,
 };
 
+use abs_cancel::{NonCancellableToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
+use abs_mptp::spec::Status;
 use mp_denco::{MpDecoder, MpEncoder};
 use mptp_smux::{
     ServeError,
     serving::{ServingSession, SuffixStream, config::TrConfig},
 };
 
-use crate::x_deps::{
-    abs_cancel::{NonCancellableToken, TrMayCancel},
-    abs_mptp::spec::Status,
-};
+use crate::x_deps::{abs_cancel, abs_mptp};
 
 /// 编码暂存区容量：业务体超过它时明确失败而不是悄悄截断。
 const K_ENCODE_CAP_: usize = 64usize * 1024usize;

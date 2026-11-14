@@ -43,6 +43,15 @@ mptp_wire / abs_mptp / smux_v1
 编译期校验）、连接状态 `S` 与请求级取消令牌（P3）、demo 迁移、`!Send`（compio）传输的
 非 `Send` handler 变体。
 
+## 示例
+
+- [`examples/im_session.rs`](examples/im_session.rs)：按 `mptp_im_demo` 的 `im/v1`
+  演示端点元数据、类型校验中间件、Call / Pull / Push handler 与 router 装配；可运行：
+
+  ```bash
+  cargo run -p mptp_serving --example im_session
+  ```
+
 ## 设计文档
 
 - [`dev-notes/mptp-serving-framework-20261112-1845.md`](../dev-notes/mptp-serving-framework-20261112-1845.md)

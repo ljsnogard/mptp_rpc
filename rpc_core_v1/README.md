@@ -135,6 +135,16 @@ Versioning:
 Do **not** use `core::any::TypeId`, a type-name hash, or a runtime registry: those values are
 not stable across processes or versions.
 
+## Examples
+
+- [`examples/im_session.rs`](examples/im_session.rs)：以一个 IM 会话为背景，演示
+  `Call` 类型头、typed `Pull` / `Push`、类型不匹配 `406`、取消，以及「一端动作之后
+  对端看到什么」。可运行：
+
+  ```bash
+  cargo run -p rpc_core_v1 --example im_session
+  ```
+
 ## What?
 
 There are many protocols can carry RPC payload, for example, `gRPC` over `HTTP/2`.
