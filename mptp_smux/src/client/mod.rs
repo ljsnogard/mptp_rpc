@@ -22,4 +22,7 @@ pub use crate::error_::ClientError;
 pub use client_::MptpClient;
 pub use method_::{RequestBuilder, Response};
 pub use prep_ctx_::ClientPrepCtx;
-pub use session::{MptpSession, RespBodyError, RespBodyRead, RespSuffixRead};
+pub use session::{
+    IntoRespSuffixAsync, MptpSession, RequestSuffixFinishAsync, RequestSuffixStream,
+    RequestSuffixWriteAsync, RequestSuffixWriter, RespBodyError, RespBodyRead, RespSuffixRead,
+};

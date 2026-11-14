@@ -35,8 +35,9 @@
 use alloc::string::ToString;
 
 use abs_buff::{
-    TrBuffRead,
+    Demand, TrBuffFlush, TrBuffRead, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite,
     buffer::TrConsumerState,
+    x_deps::anylr::SomeOf,
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
@@ -54,7 +55,10 @@ use crate::{
     session_core_::SessionCore,
     x_deps::{abs_buff, abs_cancel, gen_mcf2},
 };
-use super::config::{ChannelRx, ChannelTx, RespPrefix, TrConfig};
+use super::{
+    config::{ChannelRx, ChannelTx, RespPrefix, TrConfig},
+    method_::Response,
+};
 
 /// 回复体的读视图。
 pub type RespBodyRead<'f, C> = BodyRead<'f, ChannelRx<C>>;
@@ -124,6 +128,272 @@ where
     {
         CloseReqAsync::new(self)
     }
+
+    /// 把整个会话消费掉，排出未读完的回复体，然后交出**拥有接收半边**的后缀读口。
+    ///
+    /// 客户端 typed Pull 需要拥有这个读口（而不是借 `Response`），否则「flux 拥有
+    /// reader」会变成自引用。返回的 [`ChannelRx`](super::config::ChannelRx) 已经实现
+    /// `TrBuffRead<u8>` / `TrConsumerState`，可以直接交给 `rpc_core_v1` 的类型化 flux。
+    ///
+    /// # Errors
+    ///
+    /// 会话状态不是 `PrefixReady` / `BodyReady`（还没读回复前缀）时返回
+    /// [`ClientError::State`]；排空回复体失败时返回协议 / 传输错误。
+    pub fn into_resp_suffix_async<'f>(self) -> IntoRespSuffixAsync<'f, 'f, C>
+    where
+        C: 'f,
+    {
+        IntoRespSuffixAsync::new(self)
+    }
+
+    /// 为有限 Push 取走发送半边：此后由 [`RequestSuffixStream`] 逐 chunk 写请求后缀。
+    ///
+    /// 只允许在请求前缀已写出、且请求没有 body（处于 `WaitingResp`）时调用。
+    pub(crate) fn take_tx_for_suffix_(
+        mut self,
+    ) -> Result<(Self, ChannelTx<C>), ClientError> {
+        if self.state_ != SessionState::WaitingResp {
+            let actual = self.state_;
+            return Result::Err(ClientError::State(StateError::Client { actual }));
+        }
+        let tx = self
+            .core_
+            .take_tx_()
+            .ok_or(StateError::ChannelTaken)?;
+        self.state_ = SessionState::SendingSuffix;
+        Result::Ok((self, tx))
+    }
+}
+
+/// 服务端 / 客户端都需要的「拥有写端」的请求后缀流。
+///
+/// 它由 [`RequestSuffixStream::new`] 从已发出请求前缀的 [`MptpSession`] 构造：拥有会话与发送半边，
+/// 逐 chunk 写请求后缀；[`finish_async`](Self::finish_async) 丢弃发送半边（半关闭），
+/// 再读回复前缀，交出 [`Response`]。
+///
+/// 本类型只做字节搬运，不依赖 denco / 类型头；typed Push 由 `rpc_core_v1` 在其上实现。
+pub struct RequestSuffixStream<C>
+where
+    C: TrConfig,
+{
+    /// 拥有接收半边与会话状态的会话；发送半边已在本类型里。
+    session_: MptpSession<C>,
+
+    /// 请求后缀发送半边；`finish` / drop 时丢弃即半关闭。
+    tx_: ChannelTx<C>,
+}
+
+impl<C> RequestSuffixStream<C>
+where
+    C: TrConfig,
+{
+    /// 由已发出请求前缀的会话构造。
+    ///
+    /// # Errors
+    ///
+    /// 会话不在 `WaitingResp`（例如请求还有 body 未发）时返回 [`ClientError::State`]。
+    pub fn new(session: MptpSession<C>) -> Result<Self, ClientError> {
+        let (session_, tx_) = session.take_tx_for_suffix_()?;
+        Result::Ok(RequestSuffixStream { session_, tx_ })
+    }
+
+    /// 借出底层发送半边，作为标准 [`TrBuffWrite`] / [`TrBuffFlush`] 使用。
+    ///
+    /// 调用者不需要自己准备缓冲：这里的 view 直接借用会话自带的 ring / buff。
+    /// [`TrBuffFlush::close_async`] 只**半关闭请求后缀写侧**，不会读回复；
+    /// 读回复仍由 [`finish_async`](Self::finish_async) 完成。
+    /// 返回的 view 存活期间不能再调用 `finish_async`；先 drop view。
+    pub fn writer(&mut self) -> RequestSuffixWriter<'_, C>
+    where
+        ChannelTx<C>: TrBuffWrite<u8>,
+    {
+        RequestSuffixWriter { tx_: &mut self.tx_ }
+    }
+
+    /// 追加一个请求后缀 chunk；**不**关闭写端。
+    ///
+    /// # Errors
+    ///
+    /// 写端已被 `finish` 取走时返回 [`ClientError::State`]；写失败或取消返回传输 /
+    /// 协议错误。
+    pub fn write_chunk_async<'f>(
+        &'f mut self,
+        chunk: &'f [u8],
+    ) -> RequestSuffixWriteAsync<'f, 'f, C>
+    where
+        C: 'f,
+    {
+        RequestSuffixWriteAsync::new(self, chunk)
+    }
+
+    /// 半关闭请求后缀并读回复前缀，交出 [`Response`]。
+    pub fn finish_async<'f>(self) -> RequestSuffixFinishAsync<'f, 'f, C>
+    where
+        C: 'f,
+    {
+        RequestSuffixFinishAsync::new(self)
+    }
+}
+
+/// 借用 [`RequestSuffixStream`] 发送半边的标准 [`TrBuffWrite`] 视图。
+///
+/// 它不拥有会话，也不定义关闭语义：drop 视图后仍由
+/// [`RequestSuffixStream::finish_async`] 半关闭并读回复。这样调用者可以直接把
+/// `&mut writer` 交给 denco 编码，不必自备 `Vec` / 暂存区。
+pub struct RequestSuffixWriter<'a, C>
+where
+    C: TrConfig,
+{
+    /// 会话自带的发送半边。
+    tx_: &'a mut ChannelTx<C>,
+}
+
+impl<'a, C> TrBuffTryWrite<u8> for RequestSuffixWriter<'a, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffWrite<u8>,
+{
+    type SegmMut<'f>
+        = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
+    where
+        Self: 'f;
+
+    type Err = <ChannelTx<C> as TrBuffTryWrite<u8>>::Err;
+
+    fn try_write<'f>(&'f mut self, demand: &'f Demand<usize>) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
+        <ChannelTx<C> as TrBuffTryWrite<u8>>::try_write(self.tx_, demand)
+    }
+}
+
+impl<C> TrBuffWrite<u8> for RequestSuffixWriter<'_, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffWrite<u8>,
+{
+    type WriteAsync<'f>
+        = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
+    where
+        Self: 'f;
+
+    fn write_async<'f>(&'f mut self, demand: &'f Demand<usize>) -> Self::WriteAsync<'f> {
+        <ChannelTx<C> as TrBuffWrite<u8>>::write_async(self.tx_, demand)
+    }
+}
+
+impl<C> TrBuffTryFlush<u8> for RequestSuffixWriter<'_, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffFlush<u8>,
+{
+    fn try_flush(&mut self) -> Result<(), Self::Err> {
+        <ChannelTx<C> as TrBuffTryFlush<u8>>::try_flush(self.tx_)
+    }
+
+    fn close(&mut self) -> Result<(), Self::Err> {
+        <ChannelTx<C> as TrBuffTryFlush<u8>>::close(self.tx_)
+    }
+}
+
+impl<C> TrBuffFlush<u8> for RequestSuffixWriter<'_, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffFlush<u8>,
+{
+    type FlushAsync<'f>
+        = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
+    where
+        Self: 'f;
+
+    type CloseAsync<'f>
+        = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
+    where
+        Self: 'f;
+
+    fn flush_async(&mut self) -> Self::FlushAsync<'_> {
+        <ChannelTx<C> as TrBuffFlush<u8>>::flush_async(self.tx_)
+    }
+
+    fn close_async(&mut self) -> Self::CloseAsync<'_> {
+        <ChannelTx<C> as TrBuffFlush<u8>>::close_async(self.tx_)
+    }
+}
+
+/// [`RequestSuffixStream::write_chunk_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(RequestSuffixWrite, pub, new(pub(crate)))]
+async fn request_suffix_write_async_<'f, C, K>(
+    stream: &'f mut RequestSuffixStream<C>,
+    chunk: &'f [u8],
+    cancel: K,
+) -> Result<(), ClientError>
+where
+    C: TrConfig + 'f,
+    K: TrCancellationToken,
+{
+    let size = chunk.len();
+    let mut src = chunk;
+    let _ = copy_sized_async_(&mut src, &mut stream.tx_, size, cancel)
+        .await
+        .map_err(req_copy_error_)?;
+    Result::Ok(())
+}
+
+/// [`RequestSuffixStream::finish_async`] 的 step 函数。
+#[gen_may_cancel_future(RequestSuffixFinish, pub, new(pub(crate)))]
+async fn request_suffix_finish_async_<'f, C, K>(
+    stream: RequestSuffixStream<C>,
+    cancel: K,
+) -> Result<Response<C>, ClientError>
+where
+    C: TrConfig + 'f,
+    ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
+    K: TrCancellationToken,
+{
+    let RequestSuffixStream { mut session_, tx_ } = stream;
+    // 丢弃发送半边即半关闭请求后缀；服务端据此结束请求并回复。
+    drop(tx_);
+    let prefix = session_
+        .recv_resp_prefix_async()
+        .may_cancel_with(cancel.child_token())
+        .await?;
+    Result::Ok(Response::from_parts_(session_, prefix))
+}
+
+/// [`MptpSession::into_resp_suffix_async`] 的 step 函数。
+#[gen_may_cancel_future(IntoRespSuffix, pub, new(pub(crate)))]
+async fn into_resp_suffix_async_<'f, C, K>(
+    mut session: MptpSession<C>,
+    cancel: K,
+) -> Result<ChannelRx<C>, ClientError>
+where
+    C: TrConfig + 'f,
+    ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
+    K: TrCancellationToken,
+{
+    if !matches!(
+        session.state_,
+        SessionState::PrefixReady | SessionState::BodyReady
+    ) {
+        let actual = session.state_;
+        return Result::Err(ClientError::State(StateError::Client { actual }));
+    }
+    let plan = session
+        .core_
+        .body_plan_()
+        .ok_or(StateError::NoRequestPrefix)?;
+    {
+        let (rx, body_state) = session.core_.rx_and_body_mut_()?;
+        crate::session_core_::drain_body_async_(plan, body_state, rx, cancel.child_token())
+            .await
+            .map_err(ClientError::Protocol)?;
+    }
+    session.core_.set_body_state_(BodyState::Fresh);
+    session.state_ = SessionState::SuffixReady;
+    let rx = session
+        .core_
+        .take_rx_()
+        .ok_or(StateError::ChannelTaken)?;
+    Result::Ok(rx)
 }
 
 impl<C> TrMptpSession<C> for MptpSession<C>

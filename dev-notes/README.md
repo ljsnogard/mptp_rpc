@@ -91,3 +91,9 @@
 - **模块类文档**：主题取模块名，例如 `connection-20261002-0548.md`；
 - **非模块类文档**：主题取文档自身的性质或方向，用小写英文短语，例如
   `outlook-concurrency-20261002-2322.md`。
+- [`rpc-typed-push-pull-20261114-1300.md`](rpc-typed-push-pull-20261114-1300.md)：
+  类型化 Pull / Push 与类型头协议的设计 + 实施记录：A-01 生命周期 spike（不改
+  `TrAsyncIterator` GAT，用共享守卫状态）、`Just` / `Slot` 语义、显式 64 位
+  `DataTypeId` 与版本规则、`Call` / `Post` / `Pull` / `Push` 方向表、
+  `RpcDataTypeInfo` / `RpcEndpointInfo`、有限 Push 边界、`mptp_smux` 增量
+  （`RequestSuffixStream` / `into_resp_suffix_async`）与未决风险。

@@ -34,7 +34,7 @@ use super::handler_::box_future_;
 
 /// 中间件 `call` 返回的 future：分配在请求级 arena 里、类型擦除的 [`BumpBox`]。
 ///
-/// 不带 `Send`：与 [`TrEndpointHandler`] 一致，future 链天然 `!Send`，`Send` 边界在分派层。
+/// 不带 `Send`：与 [`TrEndpointHandler`](crate::TrEndpointHandler) 一致，future 链天然 `!Send`，`Send` 边界在分派层。
 pub type MiddlewareFuture<'f> =
     Pin<BumpBox<'f, dyn Future<Output = Result<Option<Status>, ServeError>> + 'f>>;
 

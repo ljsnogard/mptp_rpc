@@ -10,10 +10,12 @@
 //! - 服务端 body 编解码辅助 [`crate::serving`]：请求体解码、回复体 / 后缀流写出、
 //!   业务错误 → 状态映射（[`crate::serving::TrReplyError`]）；
 //! - 常用类型与宏集中在 [`preludes`]：`use rpc_core_v1::preludes::*;` 即可覆盖协议、
-//!   客户端与服务端的大部分入口。
+//!   客户端与服务端的大部分入口；
+//! - 类型化 Pull / Push 在 [`stream`]：一次性守卫 `Just` / `Slot`、逐项 flux，以及
+//!   `Data_Type_Id` / `Accept` / `Body_Type` 的类型头协议与端点元信息。
 //!
-//! 服务端的路由与处理器由 `mptp_serving` 的 [`RadixRouter`](mptp_serving::RadixRouter) 承担；
-//! `#[rpc]` 宏（`rpc_svc_macro`）为每个端点生成 [`TrEndpointHandler`](mptp_serving::TrEndpointHandler)
+//! 服务端的路由与处理器由 `mptp_serving` 的 `RadixRouter` 承担；
+//! `#[rpc]` 宏（`rpc_svc_macro`）为每个端点生成 `TrEndpointHandler`
 //! 并登记进路由表。线上格式由 `mptp_wire` 拥有，本 crate 不再重复实现。
 //!
 //! # 为什么两端在同一个库里
@@ -40,6 +42,7 @@ pub mod client;
 pub mod messaging;
 pub mod preludes;
 pub mod serving;
+pub mod stream;
 
 mod config_;
 pub mod prep;

@@ -41,8 +41,8 @@ use super::{
     client_::MptpClient,
     config::{ChannelRx, Dock, TrConfig},
     session::{
-        MptpSession, RespBodyRead, RespSuffixRead, SendRequestBodyAsync,
-        SendRequestSuffixAsync,
+        IntoRespSuffixAsync, MptpSession, RespBodyRead, RespSuffixRead,
+        SendRequestBodyAsync, SendRequestSuffixAsync,
     },
 };
 
@@ -509,6 +509,25 @@ where
     /// 拿回会话，自己按旧原语驱动。
     pub fn into_session(self) -> MptpSession<C> {
         self.session_
+    }
+
+    /// 排出未读完的回复体，把**拥有接收半边**的后缀读口交出去。
+    ///
+    /// 这是 typed Pull 的入口：消费 `Response` 后返回的 reader 不再借用会话，
+    /// 因此可以直接被 `rpc_core_v1` 的类型化 flux 拥有。
+    pub fn into_resp_suffix_async<'f>(self) -> IntoRespSuffixAsync<'f, 'f, C>
+    where
+        C: 'f,
+    {
+        self.session_.into_resp_suffix_async()
+    }
+
+    /// 由两半构造回复；供 crate 内的后缀写端在 `finish` 后组装。
+    pub(crate) const fn from_parts_(session: MptpSession<C>, prefix: ResponsePrefix) -> Self {
+        Response {
+            session_: session,
+            prefix_: prefix,
+        }
     }
 }
 

@@ -21,9 +21,11 @@ use abs_smux::chan::TrChannelHalf;
 
 use crate::x_deps::{abs_buff, abs_smux};
 
-use super::config::{ChannelHandle, ChannelRx, DockBinding, MuxCfg, TrConfig};
-use super::handler_::TrServeHandler;
-use super::servlet_::{MptpServlet, ServeListenerAsync};
+use super::{
+    config::{ChannelHandle, ChannelRx, DockBinding, MuxCfg, TrConfig},
+    handler_::TrServeHandler,
+    servlet_::{MptpServlet, ServeListenerAsync},
+};
 
 /// 一条 MPTP 连接的 owner。
 ///

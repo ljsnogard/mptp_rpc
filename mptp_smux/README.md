@@ -97,6 +97,47 @@ let value = decode(&mut body).await?;
 `Body_Size` / `Body_Transfer` 由 `.body_bytes` / `.body_sized` / `.body_chunked` 写入；
 `.suffix` 只挂请求后缀源，不写头。
 
+### 逐 chunk 写请求后缀
+
+`.suffix` 收的是一个**已完整存在的读源**：`send_async` 会把整段搬完再读回复，因此不能在
+它运行期间继续追加 chunk。需要「边算边写」的有限 Push 用新的拥有型写端：
+
+```rust
+use abs_mptp::client::TrMptpClient;
+
+let prefix = RequestPrefix::with_headers(AccessMethod::Push, "/chat/push", Some(headers));
+let session = client.request_async(prefix).await?;
+let mut suffix = RequestSuffixStream::new(session)?;
+suffix.write_chunk_async(&chunk).await?;
+let response = suffix.finish_async().await?; // 半关闭请求后缀 → 读回复
+```
+
+对应地，客户端 Pull 可以消费 `Response` 拿到**拥有接收半边**的后缀读口：
+
+```rust
+let reader = response.into_resp_suffix_async().await?;
+```
+
+两者都只搬运字节：不定义对象边界、不序列化、不依赖 denco。`RequestSuffixStream`
+只支持**有限** Push（`finish_async` 之后才读回复）；无限 Push / 全双工需要新的会话 API。
+
+### 把后缀写端直接当 `TrBuffWrite` 用
+
+两个写端都提供短生命周期的标准 buff view，调用者不需要自备 `Vec` / 暂存区：
+
+```rust
+let mut writer = request_suffix.writer();      // RequestSuffixWriter
+value.encode_async(MpEncoder::new(&mut writer)).await?;
+writer.close_async().await?;                   // 只半关闭写侧
+drop(writer);
+let response = request_suffix.finish_async().await?;
+```
+
+服务端对应 `SuffixStream::writer()`（`ResponseSuffixWriter`）。view 只借用会话自带的
+`ChannelTx`，同时实现 `TrBuffTryWrite` / `TrBuffWrite` / `TrBuffTryFlush` / `TrBuffFlush`。
+`close` / `close_async` 只**半关闭写侧**，不隐含读回复；读回复 / 收尾仍由
+`finish_async` 负责。
+
 ## 服务端：`MptpServlet` + 单一 handler
 
 ```rust

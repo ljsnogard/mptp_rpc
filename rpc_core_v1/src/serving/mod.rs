@@ -1,4 +1,4 @@
-//! 服务端侧：配置与面向 [`ServingSession`] 的 body 编解码辅助。
+//! 服务端侧：配置与面向 `ServingSession` 的 body 编解码辅助。
 //!
 //! 这一层提供新 controller 形态 handler 所需的底座：
 //!
@@ -14,6 +14,7 @@
 //! these helpers to decode the request body and write replies.
 
 mod body_;
+mod types_;
 
 pub mod config;
 
@@ -21,3 +22,10 @@ pub use body_::{
     TrReplyError, decode_body_async, write_ok_async, write_status_async, write_stream_item_async,
 };
 pub use config::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfig};
+pub use types_::{
+    AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, TrDataTypeId,
+    TypeHeaderError, TypePolicy, TypeRejection, apply_request_type_headers,
+    apply_response_type_headers, read_accept, read_body_codec, read_data_type_id, typed_response,
+    validate_request_types, validate_response_types, write_accept, write_body_codec,
+    write_data_type_id,
+};

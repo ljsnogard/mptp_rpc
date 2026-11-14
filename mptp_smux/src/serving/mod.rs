@@ -25,5 +25,5 @@ pub use servlet_::{
 };
 pub use session_::{
     RequestBodyAsync, RequestBodyRead, RequestSuffixAsync, RequestSuffixRead, ResponseBodyWriter,
-    ResponseBuilder, ServingSession, SuffixStream,
+    ResponseBuilder, ResponseSuffixWriter, ServingSession, SuffixStream,
 };

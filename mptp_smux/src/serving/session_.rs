@@ -13,8 +13,9 @@
 use alloc::string::{String, ToString};
 
 use abs_buff::{
-    TrBuffRead,
+    Demand, TrBuffFlush, TrBuffRead, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite,
     buffer::TrConsumerState,
+    x_deps::anylr::SomeOf,
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
@@ -722,6 +723,110 @@ where
         C: 'a,
     {
         SuffixFinishAsync::new(self)
+    }
+
+    /// 借出底层发送半边，作为标准 [`TrBuffWrite`] / [`TrBuffFlush`] 使用。
+    ///
+    /// 调用者不需要自己准备缓冲：view 直接借用会话自带的 ring / buff。
+    /// [`TrBuffFlush::close_async`] 只**半关闭回复后缀写侧**，不读尽请求；收尾仍由
+    /// [`finish_async`](Self::finish_async) 完成。返回的 view 存活期间不能再调用
+    /// `finish_async`；先 drop view。
+    ///
+    /// # Errors
+    ///
+    /// 会话的两个半边已经被 `take_parts` 取走时返回 [`ServeError::State`]。
+    pub fn writer(&mut self) -> Result<ResponseSuffixWriter<'_, C>, ServeError>
+    where
+        ChannelTx<C>: TrBuffWrite<u8>,
+    {
+        let tx = self.session_.core_.tx_mut_().map_err(ServeError::State)?;
+        Result::Ok(ResponseSuffixWriter { tx_: tx })
+    }
+}
+
+/// 借用 [`SuffixStream`] 发送半边的标准 [`TrBuffWrite`] 视图。
+///
+/// 它不拥有会话，也不定义关闭语义：drop 视图后仍由 [`SuffixStream::finish_async`]
+/// 半关闭并收尾。这样调用者可以直接把 `&mut writer` 交给 denco 编码，不必自备
+/// `Vec` / 暂存区。
+pub struct ResponseSuffixWriter<'a, C>
+where
+    C: TrConfig,
+{
+    /// 会话自带的发送半边。
+    tx_: &'a mut ChannelTx<C>,
+}
+
+impl<'a, C> TrBuffTryWrite<u8> for ResponseSuffixWriter<'a, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffWrite<u8>,
+{
+    type SegmMut<'f>
+        = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
+    where
+        Self: 'f;
+
+    type Err = <ChannelTx<C> as TrBuffTryWrite<u8>>::Err;
+
+    fn try_write<'f>(
+        &'f mut self,
+        demand: &'f Demand<usize>,
+    ) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
+        <ChannelTx<C> as TrBuffTryWrite<u8>>::try_write(self.tx_, demand)
+    }
+}
+
+impl<C> TrBuffWrite<u8> for ResponseSuffixWriter<'_, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffWrite<u8>,
+{
+    type WriteAsync<'f>
+        = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
+    where
+        Self: 'f;
+
+    fn write_async<'f>(&'f mut self, demand: &'f Demand<usize>) -> Self::WriteAsync<'f> {
+        <ChannelTx<C> as TrBuffWrite<u8>>::write_async(self.tx_, demand)
+    }
+}
+
+impl<C> TrBuffTryFlush<u8> for ResponseSuffixWriter<'_, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffFlush<u8>,
+{
+    fn try_flush(&mut self) -> Result<(), Self::Err> {
+        <ChannelTx<C> as TrBuffTryFlush<u8>>::try_flush(self.tx_)
+    }
+
+    fn close(&mut self) -> Result<(), Self::Err> {
+        <ChannelTx<C> as TrBuffTryFlush<u8>>::close(self.tx_)
+    }
+}
+
+impl<C> TrBuffFlush<u8> for ResponseSuffixWriter<'_, C>
+where
+    C: TrConfig,
+    ChannelTx<C>: TrBuffFlush<u8>,
+{
+    type FlushAsync<'f>
+        = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
+    where
+        Self: 'f;
+
+    type CloseAsync<'f>
+        = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
+    where
+        Self: 'f;
+
+    fn flush_async(&mut self) -> Self::FlushAsync<'_> {
+        <ChannelTx<C> as TrBuffFlush<u8>>::flush_async(self.tx_)
+    }
+
+    fn close_async(&mut self) -> Self::CloseAsync<'_> {
+        <ChannelTx<C> as TrBuffFlush<u8>>::close_async(self.tx_)
     }
 }
 

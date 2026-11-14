@@ -20,6 +20,9 @@
 //! - 服务端：`MptpServlet` + 新框架 body 辅助（`decode_body_async` / `write_ok_async` /
 //!   `write_status_async` / `write_stream_item_async` / `TrReplyError`）；
 //! - 协议与错误：`RpcError` / `RpcResult` / `TrRpcInterface` / `Status`；
+//! - 类型化流：`Just` / `Slot` / `TypedJustFlux` / `TypedSlotFlux` / `open_pull_async` /
+//!   `open_push_async`，以及类型头契约 `DataTypeId` / `TrDataTypeId` / `AcceptType` /
+//!   `RpcDataTypeInfo` / `TypePolicy`；
 //! - 取消：`TrMayCancel` / `TrCancellationToken` / `NonCancellableToken`；
 //! - 宏与派生：`gen_may_cancel_future` / `TrEncodable` / `TrDecodable`；
 //! - 常用底座：`Shared` / `CoreAlloc` / `TrConnection`。
@@ -34,14 +37,20 @@ pub use crate::{
     ClientConfig, ServingConfig, TrDefaultDock, TrUserConn,
     client::{
         ClientProxy, DefaultRpcAllocConfig, ServiceSelector, TrRpcClientConfig, TrRpcClientExt,
-        call_endpoint_async,
+        call_endpoint_async, open_pull_async, open_push_async,
     },
     messaging::{RpcError, RpcResult, TrRpcInterface},
     serving::{
-        DefaultServingAllocConfig, TrReplyError, TrServingAllocConfig, TrServingConfig,
-        decode_body_async, write_ok_async, write_status_async, write_stream_item_async,
+        DefaultServingAllocConfig, RpcDataTypeInfo, RpcEndpointInfo, TrReplyError,
+        TrServingAllocConfig, TrServingConfig, decode_body_async, typed_response,
+        validate_request_types, write_ok_async, write_status_async, write_stream_item_async,
+    },
+    stream::{
+        AcceptType, BodyCodec, DataTypeId, Just, Slot, TrDataTypeId, TypePolicy, TypedJustFlux,
+        TypedSlotFlux,
     },
     x_deps::{
+        abs_async_iter::{TrAsyncIterator, TrFlux},
         abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel},
         abs_mm::CoreAlloc,
         abs_mptp::{serving::TrReqHandler, spec::Status},
