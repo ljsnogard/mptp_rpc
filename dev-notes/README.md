@@ -97,3 +97,8 @@
   `DataTypeId` 与版本规则、`Call` / `Post` / `Pull` / `Push` 方向表、
   `RpcDataTypeInfo` / `RpcEndpointInfo`、有限 Push 边界、`mptp_smux` 增量
   （`RequestSuffixStream` / `into_resp_suffix_async`）与未决风险。
+- [`type-id-denco-20261114-1945.md`](type-id-denco-20261114-1945.md)：用 denco 的结构化
+  TypeId 统一 `Data_Type_Id` 的提案 + 决策记录：`rpc_core_v1/type-id` facade 默认开、
+  `TrDataTypeId` blanket impl、`DataTypeId::from_nonzero_u64`、线上 ID 破坏的迁移、
+  golden / 冲突检测、`rpc_svc_macro` 的 opt-in 提案（未实施，A-08 仍 GAP）与其余子项目
+  的“改 / 不改”结论。
