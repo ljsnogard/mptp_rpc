@@ -30,6 +30,7 @@
 | 6 | **协议层禁用 `path` 一词**：改为 `namespace` / `service` / `operation` / `pattern`；区分「pattern」与「router 挂载点」 | §3.1、§3.3.1、§3.8 |
 | 7 | **denco 已实现 `()` 的 `TrEncodable` / `TrDecodable`**，`RpcResult<()>` 可直接使用（已落地） | §3.7、§3.4 |
 | 8 | **客户端挂载点改为 service trait 自己生成的 marker，并取消 namespace 概念**：`#[rpc(service = "im/v1/room", api = X)]` 生成 `X`；`service` 是**完整服务前缀**；客户端 `client.call::<X>()`。`TrRpcInterface` 只携带 `PREFIX`；interface marker 不再需要 | §11 |
+| 9 | **Call 使用 service 级路径 + 生成的请求枚举**：`CALL /im/v1/room`，body 是 `RoomServiceCall` 枚举；不再为每个 Call 方法分配 path。`RpcEndpointInfo` 重构为 service + 方法表；方法级校验在解码 payload 前完成 | §12 |
 
 > 第 6 条的因果链：用户指出「具体 path 由 router 挂载时决定」，因此协议宏再声明一个叫
 > `path` 的字符串会与挂载位置冲突/混淆。本文把协议层的东西改名为
@@ -348,8 +349,9 @@ protobuf-net 的规则（实现见 `Internal/ContractOperation.cs` 与 `ServerIn
 ### 3.1 目标用户形状
 
 > **2026-11-14 修订**：客户端挂载点改为每个 service trait 自己生成的 marker（§11），
-> 并**取消 namespace 概念**：`service` 是完整服务前缀（如 `im/v1/room`）。下面
-> `ApiV1` / `WorkspaceService` 的 interface marker 形状是历史设计；单 service 直接写
+> 并**取消 namespace 概念**：`service` 是完整服务前缀（如 `im/v1/room`）。Call 的
+> wire 形状改为 service 级路径 + 请求枚举（§12）。下面 `ApiV1` / `WorkspaceService`
+> 的 interface marker 形状是历史设计；单 service 直接写
 > `#[rpc(service = "im/v1/workspace", api = WorkspaceSvc)]`，客户端
 > `client.call::<WorkspaceSvc>()`。
 
@@ -1438,7 +1440,8 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
 | 协议 crate 需要 `#![feature(associated_type_defaults)]` | 新增约束 | 决策 2 接受；用于隐藏请求类型的跨 crate 投影 |
 | `TrRpcInterface::PATH` 改名 `PREFIX` | **破坏（改名）** | 决策 8；常量是完整服务前缀（`im/v1/room`），`concat_location(I::PREFIX, operation)` |
 | `rpc_core_v1` 增加 `constcat` 依赖并 `x_deps` 重导出 | 依赖变更 | 不改变 `mptp_serving` 公开 API |
-| `rpc_core_v1::serving::RpcEndpointInfo { service, operation, pattern }` | 新增 / 去 `namespace` | 决策 4 + 8；方法级元数据 |
+| `rpc_core_v1::serving::RpcEndpointInfo { service, pattern, methods }` + `RpcMethodInfo { operation, data }` | 新增 / 去 `namespace` / 去单 `operation` | 决策 4 + 8 + 9；service 级元数据 + 方法表 |
+| 生成的 `XxxServiceCall` 枚举 + service dispatcher | 新增（宏生成） | 决策 9；Call 一条路径，方法在 body 枚举；方法级校验在 payload 解码前 |
 | 新 crate `rpc_serv_ext` | 新增 crate | 决策 3；只含闭包式 `InterfaceBuilder`，依赖 `rpc_core_v1` + `mptp_serving` |
 | denco 的 `()` `TrEncodable` / `TrDecodable` | 已完成 | 决策 7；mptp_rpc 只需消费 |
 | 线上格式：pattern 增加 `/{operation}`，body 变为每方法结构体 | **破坏** | 决策 1：不兼容旧格式、不生成别名端点 |
@@ -1732,26 +1735,8 @@ impl RoomService for RoomServiceImpl { ... }
 
 ### 11.6 验收标准（code-first Call）
 
-以下编号 `CC-xx` 是本轮新增的 Call 验收口径；`mptp_im_demo/ACCEPTANCE.md` §6.6 使用
-同一组编号（`C-xx` 已被客户端测试占用）。
-
-| ID | 验收项 | 判定 |
-| --- | --- | --- |
-| CC-01 | 语法：`#[rpc(service = "im/v1/room", api = RoomSvc)] pub trait RoomService` 可编译 | 生成 `RoomSvc`；trait 原方法、`__Req_*` 都在；不再生成 `SERVICE_NAME` |
-| CC-02 | marker：`RoomSvc` 是零大小、可见性与 trait 一致、实现 `TrRpcInterface::PREFIX = "im/v1/room"` | 类型检查；`RoomSvc::PREFIX` 断言 |
-| CC-03 | 客户端挂载：`client.call::<RoomSvc>()` 返回 `ClientProxy<'_, C, RoomSvc>`，且实现 `RoomService` | 编译 + 调用 `create_room` |
-| CC-04 | 调用点不出现 `ImV1` / pattern / 前缀 / body 编解码 | 源码检查；`CC-01` 示例逐字通过 |
-| CC-05 | 服务端：`#[rpc(impl_of(RoomSvc))]` 生成 per-method endpoint；pattern = `im/v1/room/<operation>` | router 命中；`RpcEndpointInfo { service, operation, pattern }` 正确 |
-| CC-06 | 请求类型：0 参 → `()`；1 参 → 该 owned 类型；≥2 参 → `__Req_<op> { f0.. }`；借用参数回填 | 编译 + 编解码 roundtrip；`__Req_*` 实现 `TrHasTypeId` |
-| CC-07 | 类型头：请求 `Body_Type` + `Data_Type_Id=Req` + `Accept=Resp`；响应 `Body_Type` + `Data_Type_Id=Resp`；strict | 正确头通过；缺失 / 错误在 handler 前 400/406 |
-| CC-08 | 跨 crate：`im_client` 只依赖协议 crate；`im_server` 只依赖协议 + `mptp_serving` | `cargo tree -p im_client --depth 1` 无 `im_server` |
-| CC-09 | 多 service：`SessionSvc` / `RoomSvc` / `DiagSvc` 各自挂载、前缀可以共享 `im/v1`；不需要 interface marker | 三个 `client.call::<...>()` 都能调；pattern 不冲突 |
-| CC-10 | 错误 marker：在 `RoomSvc` 代理上调用 `SessionService` 方法编译失败 | `trybuild` / `compile_fail` |
-| CC-11 | 名字冲突：`api = X` 与已有类型同名时给出可读编译错误 | compile-fail 用例 |
-| CC-12 | 取消：每个客户端方法返回 `impl TrMayCancel`，可 `.may_cancel_with(token)` | 编译 + 取消用例 |
-| CC-13 | 清单：生成的 `__Req_*` 进入 `denco_type_ids!` / golden；客户端 / 服务端不手写 ID | 清单长度 + golden |
-| CC-14 | installer：每个 `impl_of` 只生成一个 `install_into`；同一 `Arc` 被所有方法共享 | 装配测试 |
-| CC-15 | 多前缀（`DiagV1` / `DiagV2`）：另立决策；本期只要求单组 `service` + `api` 主路径 | 设计决策记录；不阻塞 `CC-01..CC-14` |
+验收表已按 §12（service 级路径 + 请求枚举）更新，编号 `CC-01..CC-18`，见 §12.10。
+**§11 的 marker / 客户端挂载 / `PREFIX` 条款仍然有效；§12 只改 wire 形状与校验时机。**
 
 ### 11.7 风险
 
@@ -1761,125 +1746,190 @@ impl RoomService for RoomServiceImpl { ... }
   `call::<X>()`；文档要求协议 trait 与 marker 放在 `pub` 模块。
 - **语法歧义**：裸 ident 形式与未来参数（如 `typed`）容易冲突；推荐 `api = X`。
 - **公开 API 变更**：`TrRpcInterface::PATH` → `PREFIX`、`RpcEndpointInfo` 去
-  `namespace`，需要更新 examples / tests / README；code-first 尚未实现，现在改成本最低。
+  `namespace` / 单 `operation` 并新增 `methods`、`RpcMethodInfo`，需要更新 examples /
+  tests / README；code-first 尚未实现，现在改成本最低。
 - **多前缀**：见 11.5；不要把多个前缀硬塞进单 marker。
 - **重复前缀**：每个 trait 重复写 `im/v1`；接受这个重复，换掉 namespace 的一层概念。
 
 ---
 
-## 12. 选项：Call 请求信封（body enum）与 operation header
+## 12. Call 请求信封（body enum）——2026-11-14 决定
 
-> 本节记录 2026-11-14 的另一个候选，**尚未采用**。现行设计仍是 §11 的
-> per-service marker + 每方法一个 pattern；`CC-01..CC-15` 不变。
+> 本节是现行设计，取代 §11 里“每方法一个 Call pattern”的 wire 形状。trait API、
+> per-service marker、`PREFIX`、取消 namespace 都不变；变的是 Call 的路由/校验/
+> 元信息组织。
 
-### 12.1 旧做法
+### 12.1 决定
 
-旧设计把同一个 service 的所有 `CALL` 方法放在**一个路由** `/{namespace}/{service}` 上，
-请求 body 是一个生成的枚举：
+- 同一个 service 的所有 `CALL` 方法共用**一条路径** `/{prefix}`（如 `im/v1/room`）；
+- 请求 body 是一个生成的枚举 `XxxServiceCall`，变体 = 方法，变体载荷 = 该方法的请求；
+- 不再为每个 Call 方法分配 path；非 `CALL`（View/Pull/Push/Drop）仍每方法一个 path；
+- `RpcEndpointInfo` 从“一个 endpoint 一个 operation”重构为“一个 service endpoint +
+  方法表”；
+- 方法级类型校验在**解码变体载荷之前**完成；`Data_Type_Id` 仍是方法 payload 的类型，
+  不是外层枚举的类型。
+
+### 12.2 为什么之前的顾虑不成立
+
+1. **方法级校验**：枚举的变体名是 body 的第 1 个值。dispatcher 先读变体名 → 选中
+   `RpcMethodInfo` → 用该方法的 `RpcDataTypeInfo` 跑 `validate_request_types`
+   （`Body_Type` / `Data_Type_Id` / `Accept` / strict）→ 通过后才解码变体载荷 →
+   调用 impl。校验发生在业务 handler 之前，和 JSON-RPC “先解析/校验 body 再进
+   handler”完全同构；不需要把 operation 塞进 header。
+2. **`RpcEndpointInfo`**：HTTP / JSON-RPC 也是“一个端点 + 方法在 body 里”。把
+   `RpcEndpointInfo` 理解为“service endpoint + `methods` 表”即可；operation 是表项，
+   不是 endpoint 字段。方法级中间件在变体名读取后、载荷解码前运行（service 级中间件
+   仍在 router 层）。
+3. **header 表达力**：operation / payload 结构放 body 才是 RPC 的自然形状；header 只
+   保留 codec / `Data_Type_Id` / `Accept` / policy 这类传输协商信息。不再考虑
+   operation header 折中。
+4. **剩余真实代价**：405 / `Allow` 是 service 级（Call trait 只有 CALL，不影响）；
+   操作级中间件从 router 层移到 dispatcher 的“读变体后”阶段；这两点见 §12.6。
+
+### 12.3 生成形状
+
+```rust
+#[rpc(service = "im/v1/room", api = RoomSvc)]
+pub trait RoomService { ... }
+```
+
+生成（`#[doc(hidden)]`）：
 
 ```rust
 #[derive(TrEncodable, TrDecodable)]
 pub enum RoomServiceCall {
-    ListMyRooms,
-    CreateRoom(__Req_create_room), // 或 CreateRoom { name, topic }
-    JoinRoom(u64),
+    #[denco(rename = "list_my_rooms")]
+    ListMyRooms,                       // 0 参 → unit
+    #[denco(rename = "create_room")]
+    CreateRoom(__Req_create_room),     // ≥2 参 → newtype 包 __Req_*
+    #[denco(rename = "join_room")]
+    JoinRoom(u64),                    // 1 参 → newtype
+    #[denco(rename = "send_message")]
     SendMessage(__Req_send_message),
 }
 ```
 
-客户端代理按方法构造对应变体；服务端 handler 解码枚举、match 变体、调用 impl。
-路径空间只占一条 `/{service_prefix}`。
+- 变体线上名 = trait 方法名（`#[denco(rename)]`）；重命名方法 = 线上破坏；
+- 枚举只是**分派信封**：不 derive `TrHasTypeId`，不作为 `Data_Type_Id`；payload 的
+  类型 ID 才是线上类型；
+- 客户端代理的每个方法：写 `/{prefix}`、`Body_Type`、`Data_Type_Id = payload ID`、
+  `Accept = response ID`，body 是枚举对应变体；
+- 响应没有外层信封：单个方法响应值 + 响应 `Data_Type_Id`。
 
-### 12.2 可行性
-
-可以恢复，且不改 trait API：
-
-- trait 宏生成 `XxxServiceCall`（`#[doc(hidden)]`）；0 参 → unit 变体，1 参 → newtype
-  变体，≥2 参 → newtype 包裹 `__Req_*`；用 `#[denco(rename = "<method>")]` 保证线上
-  变体名就是方法名。
-- 客户端代理把方法参数装进变体，发到 `/{prefix}`；服务端 `impl_of` 生成**一个**
-  `TrEndpointHandler`，解码枚举后 match 到 impl 方法。
-- 非 `CALL` 端点（View/Pull/Push/Drop）不受影响，仍是每方法一个 pattern。
-
-### 12.3 收益
-
-- 一个 service 只占一条路径；大量 Call 方法不再各占一段 path；
-- 方法名不会与资源路径的 `{param}` 混在同一层（虽然 `matchit` 的 static 优先已经
-  降低这个风险）；
-- 更接近 JSON-RPC / gRPC 的“service + method”模型，trait 方法与 wire 分派一一对应。
-
-### 12.4 代价（关键）
-
-1. **`RpcDataTypeInfo` 是 per-endpoint 的**：一个 service 端点有 N 种请求 / N 种响应
-   类型，而 `RpcDataTypeInfo` 只有一组 `request_body` / `response_body` / `accept`。
-   枚举模式下无法在端点元信息里声明“每个方法各自的类型”；通用
-   `validate_request_types` / `validate_response_types` 不能覆盖到方法级，校验必须
-   移进生成的 dispatcher。
-2. **`RpcEndpointInfo.operation` 变成运行期值**：注册时只有一个 service 端点，
-   operation 要解码 body（或读 header）才知道；`operation` 级中间件 / 授权 / 限流
-   无法在 body 解码前按方法执行。
-3. **405 / Allow 退化**：一个 `CALL` 端点，没有 per-method 的 `Allow`。
-4. **类型 ID 变粗**：两种子选项——
-   - A. `Data_Type_Id = XxxServiceCall` 的 ID：简单，通用校验可用；但**任一方法
-     变化都会改变整个枚举 ID**，所有客户端一起升级。
-   - B. `Data_Type_Id = 选中变体的内层 payload`（`__Req_*` / scalar / `()`）：
-     方法级 ID 不变，演进更好；但校验必须在 dispatcher 里做（先解码枚举、match
-     变体、再比较 header 与内层 ID），框架的 pre-handler 校验被绕过。
-5. **响应类型随变体变化**：服务端 dispatcher 按变体写对应响应头；端点元信息无法
-   预先声明。
-6. **中间件/审计**：按 operation 的策略需要在 dispatcher 内或解码后执行；如果既要
-   省 path 又要 pre-body 策略，需要额外的 operation header（见 §12.5）。
-
-结论：**枚举模式能省 path，但会把“每方法一个端点”的 typed metadata / 中间件粒度
-换掉**。这与 2026-11-13 决策 1（方法级 Endpoint）相反，不是纯收益。
-
-### 12.5 更优的折中：operation header
-
-如果目标只是“一个 service 一条路径”，可以不改 body 形状：
+### 12.4 服务端两阶段
 
 ```text
-CALL /im/v1/room
-X-Mptp-Operation: create_room
-Data_Type_Id: <__Req_create_room 的 ID>
-Accept: <RoomSummary 的 ID>
-body: __Req_create_room
+1. 读 body 第 1 个值：variant name（String）
+2. match 到 RpcMethodInfo { operation, data: RpcDataTypeInfo }
+3. validate_request_types(CALL, headers, &method.data)   // 400 / 406 / 未知操作
+4. 解码该变体的 payload（() / T / __Req_*）
+5. 调用 impl 方法；按 method.data.response_body 写响应头
 ```
 
-- 路径仍只有 `/{prefix}`；operation 在 header；
-- body 仍是 per-method 类型，`Data_Type_Id` / `Accept` 仍是方法级；
-- 中间件可以在 body 解码前读 `X-Mptp-Operation` 做授权 / 限流；
-- 服务端 dispatcher 按 header 选方法、校验 header 与 body 类型、调用 impl；
-- 代价：新增一个 header 契约；`RpcEndpointInfo.operation` 仍是运行期/动态；
-  405/Allow 仍是 service 级；客户端代理要写 header。
+- 第 1 步只读变体名，不解 payload；第 3 步在 payload 解码前完成；
+- 未知变体：404（或 400，按团队约定；建议 404，因为“方法不存在”）；
+- `Data_Type_Id` 与变体不匹配：406，在 payload 解码前；
+- `Accept` 与方法响应类型不匹配：406；
+- 0 参方法的 payload 是 `()`；仍走同一流程；
+- 枚举的编码是 variant name + payload（denco 枚举的现有形状）；dispatcher 的两阶段
+  读取与它一致。
 
-与 body enum 相比，operation header **保留了方法级类型 ID 和 pre-body 策略**，只牺牲
-了路由层的 per-operation endpoint。如果“侵占 path 空间”是唯一动机，这个折中比枚举
-更小代价。
+### 12.5 `RpcEndpointInfo` 重构
 
-### 12.6 建议
+```rust
+pub struct RpcEndpointInfo {
+    /// 完整服务前缀，如 `im/v1/room`。
+    pub service: &'static str,
+    pub pattern: &'static str,          // 与 service 相同（相对 router 根）
+    pub methods: &'static [RpcMethodInfo],
+}
 
-- **默认仍用 §11 的每方法 pattern**：typed metadata、per-operation 中间件、405、
-  `RpcEndpointInfo` 都是现成能力；path 树多几个 static 叶子成本很低。
-- 如果确实需要“一个 service 一条路径”，优先做 **operation header**（§12.5），
-  而不是 body enum；它不破坏类型头模型。
-- 如果决定恢复 body enum，建议作为 **per-service opt-in**（如
-  `#[rpc(service = ..., api = ..., dispatch = "envelope")]`），而不是默认；验收另立
-  `CE-*`（草案见 §12.7），并明确接受 §12.4 的 1–5 条。
-- 无论选哪种，trait API 不变；变化只在宏生成的 wire 形状与 dispatcher。
+pub struct RpcMethodInfo {
+    pub operation: &'static str,        // "create_room"
+    pub data: RpcDataTypeInfo,          // request / response ID, codec, policy
+}
+```
 
-### 12.7 `CE-*` 验收草案（仅当采用 envelope 模式）
+- `RpcEndpointInfo` 是 service 级；`RpcMethodInfo` 是方法级；
+- 方法级中间件 / 授权 / 限流：dispatcher 读到变体名后，选中 `RpcMethodInfo`，在
+  payload 解码前执行；service 级中间件仍在 router；
+- 旧的 `RpcEndpointInfo { namespace, service, operation, pattern }` 删除
+  `namespace` / `operation`，新增 `methods`；这是公开 API 变更，code-first 未实现，
+  现在改成本最低；
+- 非 Call 端点（controller/Pull/Push/Drop）可继续用 `RpcDataTypeInfo`；
+  若也挂 `RpcEndpointInfo`，`methods` 只有一项。
+
+### 12.6 405 / Allow 与中间件
+
+- service 端点只有 `CALL`；`Allow: CALL`。Call trait 的方法都是 CALL，不存在
+  per-method `Allow`；
+- 需要 VIEW/POST/DROP 的方法不属于 Call，走 controller 的 per-method path；
+- service 级中间件：router 层，读 `RpcEndpointInfo.methods`，但还不知道 operation；
+- 操作级中间件：dispatcher 读到变体名后、payload 解码前执行；框架提供
+  `RpcMethodInfo` + 一个方法级 hook / `DispatchContext`；
+- 这与 HTTP/JSON-RPC 的“解析 operation 后再做方法级策略”一致。
+
+### 12.7 类型 ID / 清单
+
+- `Data_Type_Id` = 方法 payload 类型（`__Req_*` / scalar / `()`），方法级稳定；
+- 新增方法只增加一个新变体 + 新 payload ID，**不改变已有方法的内层 ID**；
+- 枚举本身不参与 `denco_type_ids!`；清单列每方法的 request / response 类型；
+- 变体名（operation 名）是 wire 契约的一部分；改名/删除方法破坏旧客户端；
+- `Accept` = 方法响应类型；strict 在 §12.4 第 3 步校验。
+
+### 12.8 客户端
+
+```rust
+let room = client.call::<RoomSvc>();
+let summary = room.create_room("rust".into(), None).await?;
+```
+
+- 调用点不出现 path / 变体 / 编码；
+- 代理内部：`RoomServiceCall::CreateRoom(__Req_create_room { ... })` + `/{prefix}` +
+  方法级 `Data_Type_Id` / `Accept`；
+- 响应按方法返回类型解码并校验 `Data_Type_Id`。
+
+### 12.9 非 Call
+
+View / Pull / Push / Drop 保持 §11 + endpoint-design 的每方法 path 与
+`RpcDataTypeInfo`；Call 的 service 级路径不会与它们冲突（例如 `CALL /im/v1/room`
+与 `VIEW /im/v1/room/list` 是不同 pattern + 方法）。
+
+### 12.10 验收标准（code-first Call）
 
 | ID | 验收项 | 判定 |
 | --- | --- | --- |
-| CE-01 | `#[rpc(service = ..., api = X, dispatch = "envelope")]` 生成 `XxxServiceCall` | 编译；枚举变体名 = 方法名 |
-| CE-02 | 0/1/多参变体：unit / newtype / `__Req_*` newtype | 编解码 roundtrip |
-| CE-03 | 客户端代理写 `/{prefix}` + 正确变体 | 服务端命中 dispatcher |
-| CE-04 | 服务端解码、match、调用 impl | 每个方法命中 |
-| CE-05 | `Data_Type_Id` 采用子选项 A 或 B；dispatcher 校验 | 正确通过；错误 400/406 |
-| CE-06 | 响应按变体写对应类型头；客户端校验 | 正确通过 / 406 |
-| CE-07 | `RpcEndpointInfo` 为 service 级；operation 动态 | 记录字段 |
-| CE-08 | 一个 CALL 端点，无 per-method `Allow` | 文档化 |
-| CE-09 | 子选项 B 下新增方法不改变既有内层 ID | golden 不变 |
-| CE-10 | 重复 / 非法方法形状编译失败 | trybuild |
-| CE-11 | 与非 CALL 的每方法 path 混挂 | 路由不冲突 |
-| CE-12 | 子选项 A 下枚举 ID / golden 随方法变化 | golden 更新 |
+| CC-01 | 语法：`#[rpc(service = "im/v1/room", api = RoomSvc)] pub trait RoomService` 可编译 | 生成 `RoomSvc` + `RoomServiceCall`；trait 原方法、`__Req_*` 都在 |
+| CC-02 | marker：`RoomSvc` 零大小、可见性同 trait、`TrRpcInterface::PREFIX = "im/v1/room"` | `RoomSvc::PREFIX` 断言 |
+| CC-03 | 客户端挂载：`client.call::<RoomSvc>()` 返回实现 `RoomService` 的代理 | 编译 + 调用 |
+| CC-04 | 调用点无 path / operation / 变体 / body 编解码 | 源码检查 |
+| CC-05 | 路由：Call 只有 `CALL /im/v1/room`；**没有** `CALL /im/v1/room/<operation>` | 路由表断言 |
+| CC-06 | 枚举：0 参 unit、1 参 newtype、≥2 参 `__Req_*` newtype；变体线上名 = 方法名 | 编解码 roundtrip；`denco(rename)` |
+| CC-07 | 两阶段校验：先读变体名 → 选 `RpcMethodInfo` → `validate_request_types` → 再解码 payload；缺失/错误 400/406 在 impl 前 | 错误用例断言 handler 未运行 |
+| CC-08 | 未知变体：404（或约定状态），在 payload 解码前；连接仍可用 | 原始探针 |
+| CC-09 | dispatcher：变体 → impl 方法；响应按方法 `response_body` 写头；同一 `Arc` 共享 | 每方法命中；响应头正确 |
+| CC-10 | 类型 ID：`Data_Type_Id` = 方法 payload ID（不是枚举 ID）；新增方法不改变已有方法 ID | golden / 清单 |
+| CC-11 | `RpcEndpointInfo { service, pattern, methods }`；`RpcMethodInfo { operation, data }` 正确 | 探针中间件 |
+| CC-12 | 方法级中间件在变体名读取后、payload 解码前运行；service 级中间件在 router 层 | 探针顺序断言 |
+| CC-13 | 405 / `Allow` 是 service 级 `CALL`；Call trait 不出现 per-method 方法集 | 原始探针 |
+| CC-14 | 客户端响应校验：响应 `Data_Type_Id` 与方法返回类型不一致 → 406 / 解码错误 | 错误用例 |
+| CC-15 | 跨 crate：`im_client` 只依赖协议 crate；`im_server` 依赖协议 + `mptp_serving` | `cargo tree` |
+| CC-16 | 错误 marker：`RoomSvc` 代理上调用 `SessionService` 方法编译失败 | trybuild |
+| CC-17 | 重复 / 非法变体（同名方法、默认实现、泛型方法等）编译失败 | trybuild |
+| CC-18 | 非 Call 混挂：`CALL /im/v1/room` 与 `VIEW /im/v1/room/list` / `PULL .../events/{id}` 共存 | 路由命中 |
+| CC-19 | 取消：每个方法可 `.may_cancel_with(token)` | 编译 + 取消用例 |
+| CC-20 | 多前缀：`DiagV1` / `DiagV2` 两个 marker，各自 `CALL /im/v1/diag` / `CALL /im/v2/diag` | 路由 + 客户端挂载 |
+
+### 12.11 风险
+
+- **枚举 schema 变化**：新增变体对旧客户端是兼容的（旧客户端不发送新变体）；删除/
+  改名变体是破坏。枚举不参与类型 ID，避免“任一方法变动就全量 ID 变化”。
+- **两阶段解码**：dispatcher 必须按 denco 枚举的“variant name + payload”形状读；
+  0 参变体没有 payload，读到名字即完成。实现要固定这个顺序，不能依赖完整枚举解码。
+- **方法级中间件**：需要 `DispatchContext` / `RpcMethodInfo` 的框架支持；在落地前，
+  方法级策略只能放 dispatcher 内联。
+- **405**：service 级；Call trait 的方法不能混入其他访问方法。
+- **`RpcEndpointInfo` 公开 API 变更**：删 `namespace`/`operation`，加 `methods`；
+  code-first 未实现，现在改成本最低。
+- **path 冲突**：`CALL /im/v1/room` 与 `VIEW /im/v1/room` 同 pattern 不同方法可共存；
+  若 controller 也注册 `CALL /im/v1/room` 才是冲突。
