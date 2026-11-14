@@ -29,7 +29,7 @@
 | 5 | `#[rpc(service_of(...))]` **改名 `#[rpc(impl_of(...))]`** | 全文（legacy 历史引用保留旧名） |
 | 6 | **协议层禁用 `path` 一词**：改为 `namespace` / `service` / `operation` / `pattern`；区分「pattern」与「router 挂载点」 | §3.1、§3.3.1、§3.8 |
 | 7 | **denco 已实现 `()` 的 `TrEncodable` / `TrDecodable`**，`RpcResult<()>` 可直接使用（已落地） | §3.7、§3.4 |
-| 8 | **客户端挂载点改为 service trait 自己生成的 marker**：`#[rpc(namespace = "...", service = "...", api = X)]` 生成 `X`；客户端写 `client.call::<X>()`。interface marker 只保留为**可选**的多 service / 多 namespace 分组 | §11 |
+| 8 | **客户端挂载点改为 service trait 自己生成的 marker，并取消 namespace 概念**：`#[rpc(service = "im/v1/room", api = X)]` 生成 `X`；`service` 是**完整服务前缀**；客户端 `client.call::<X>()`。`TrRpcInterface` 只携带 `PREFIX`；interface marker 不再需要 | §11 |
 
 > 第 6 条的因果链：用户指出「具体 path 由 router 挂载时决定」，因此协议宏再声明一个叫
 > `path` 的字符串会与挂载位置冲突/混淆。本文把协议层的东西改名为
@@ -347,10 +347,11 @@ protobuf-net 的规则（实现见 `Internal/ContractOperation.cs` 与 `ServerIn
 
 ### 3.1 目标用户形状
 
-> **2026-11-14 修订**：客户端挂载点改为每个 service trait 自己生成的 marker（§11）。
-> 下面 `ApiV1` / `WorkspaceService` 的 interface marker 形状保留为**可选**的多 service
-> 分组；单 service 直接写 `#[rpc(namespace = ..., service = ..., api = WorkspaceSvc)]`，
-> 客户端 `client.call::<WorkspaceSvc>()`，不再经过 `ApiV1`。
+> **2026-11-14 修订**：客户端挂载点改为每个 service trait 自己生成的 marker（§11），
+> 并**取消 namespace 概念**：`service` 是完整服务前缀（如 `im/v1/room`）。下面
+> `ApiV1` / `WorkspaceService` 的 interface marker 形状是历史设计；单 service 直接写
+> `#[rpc(service = "im/v1/workspace", api = WorkspaceSvc)]`，客户端
+> `client.call::<WorkspaceSvc>()`。
 
 协议 crate（客户端与服务端共享）保持 `mptp_cs_smoke` / `DESIGN_BLUEPRINT` 的形状：
 
@@ -1433,15 +1434,15 @@ let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, 
 
 | 变更 | 类型 | 说明 |
 | --- | --- | --- |
-| `#[rpc(service = ...)]` / `#[rpc(namespace = ..., services = ...)]` / `#[rpc(impl_of(...))]` 恢复 | 新增 | 不改动现有 controller / 自由函数形态；后两者相对 legacy 改名 |
+| `#[rpc(service = "im/v1/room", api = X)]` / `#[rpc(impl_of(X))]` 恢复；`#[rpc(namespace = ..., services = ...)]` **不再需要** | 新增 | 决策 8：per-service marker + 完整前缀；不改动现有 controller / 自由函数形态 |
 | 协议 crate 需要 `#![feature(associated_type_defaults)]` | 新增约束 | 决策 2 接受；用于隐藏请求类型的跨 crate 投影 |
-| `TrRpcInterface::PATH` 改名 `NAMESPACE` | **破坏（改名）** | 决策 6；协议层不再用 `path`，`concat_location(I::NAMESPACE, service)` 语义不变 |
+| `TrRpcInterface::PATH` 改名 `PREFIX` | **破坏（改名）** | 决策 8；常量是完整服务前缀（`im/v1/room`），`concat_location(I::PREFIX, operation)` |
 | `rpc_core_v1` 增加 `constcat` 依赖并 `x_deps` 重导出 | 依赖变更 | 不改变 `mptp_serving` 公开 API |
-| `rpc_core_v1::serving::RpcEndpointInfo` | 新增 | 决策 4；方法级元数据 |
+| `rpc_core_v1::serving::RpcEndpointInfo { service, operation, pattern }` | 新增 / 去 `namespace` | 决策 4 + 8；方法级元数据 |
 | 新 crate `rpc_serv_ext` | 新增 crate | 决策 3；只含闭包式 `InterfaceBuilder`，依赖 `rpc_core_v1` + `mptp_serving` |
 | denco 的 `()` `TrEncodable` / `TrDecodable` | 已完成 | 决策 7；mptp_rpc 只需消费 |
 | 线上格式：pattern 增加 `/{operation}`，body 变为每方法结构体 | **破坏** | 决策 1：不兼容旧格式、不生成别名端点 |
-| `mptp_cs_smoke` 协议 / 服务端装配迁移 | 仓库外变更 | interface 属性 `path`→`namespace`、服务端 `impl_of` + `RadixRouter`；客户端调用逻辑不变 |
+| `mptp_cs_smoke` 协议 / 服务端装配迁移 | 仓库外变更 | trait 属性改为 per-service marker（`service` 完整前缀）、服务端 `impl_of(X)` + `RadixRouter`；客户端调用逻辑不变 |
 
 ### 6.2 风险
 
@@ -1587,11 +1588,12 @@ free of it.
 
 ---
 
-## 11. 2026-11-14 修订：per-service API marker
+## 11. 2026-11-14 修订：per-service API marker 与取消 namespace
 
-> 本节修订 §3.1 / §4.4 / §5 中「客户端必须经过 `ApiV1` / `ImV1` interface marker」的
-> 形状。单 service 的主路径不再需要 interface marker；多 service / 多 namespace 分组
-> 仍可用它（可选）。
+> 本节是**现行设计**，取代 §3.1 / §4.4 / §5 中「客户端必须经过 `ApiV1` / `ImV1`
+> interface marker」以及「`{namespace}/{service}/{operation}` 三段式」的写法。本文其余
+> 章节里的 `namespace` 是历史引用；按本节读作「完整 service 前缀里的一段」，不再有
+> 独立的 `namespace` 属性或字段。
 
 ### 11.1 动机
 
@@ -1604,7 +1606,7 @@ Rust 不允许把 trait 名当类型参数（`client.call::<RoomService>()` 不�
 trait 的声明自己给出一个**替代类型名**，由宏生成：
 
 ```rust
-#[rpc(namespace = "im/v1", service = "room", api = RoomSvc)]
+#[rpc(service = "im/v1/room", api = RoomSvc)]
 pub trait RoomService { ... }
 
 let room = client.call::<RoomSvc>();
@@ -1617,13 +1619,17 @@ let summary = room.create_room("rust".into(), None).await?;
 ### 11.2 可行性
 
 - `ClientProxy<'a, C, I>` 已经是 `I: TrRpcInterface` 的泛型结构，运行期只持
-  `&MptpClient<C>`；`I` 只提供一个 `NAMESPACE` 常量。换成一个 per-service marker
-  不需要改 `ClientProxy` 的字段或生命周期。
-- `TrRpcInterface` 当前只有 `PATH`；按决策 6 改名为 `NAMESPACE` 后，生成的
-  `RoomSvc` 实现它即可。没有运行期注册、没有反射、没有 `unsafe`。
-- trait 宏已经要注入 `SERVICE_NAME`；客户端方法把 `operation` 交给 `concat_location`
-  在调用时与 `RoomSvc::NAMESPACE` / `SERVICE_NAME` 拼成路径（客户端路径不需要
-  `constcat`；服务端的 `Endpoint::pattern` 仍是 `constcat` 编译期常量）。
+  `&MptpClient<C>`；`I` 只提供一个路径前缀常量。换成 per-service marker 不需要改
+  `ClientProxy` 的字段或生命周期。
+- `TrRpcInterface` 的常量改为 `PREFIX`（完整服务前缀，如 `im/v1/room`）；
+  `concat_location(PREFIX, operation)` 得到 `/im/v1/room/create_room`。没有运行期注册、
+  没有反射、没有 `unsafe`。
+- 取消 namespace 后不再需要单独的 `SERVICE_NAME`：`PREFIX` 已经是完整服务前缀
+  （`im/v1/room`），客户端方法用 `PREFIX + "/" + operation` 拼路径；`operation` 由
+  方法名提供。若诊断需要，可从 `PREFIX` 的最后一段派生，但不再参与路由。
+- `rpc_core_v1` 内部要把 `unary_call_async_` 的 `service: &'static str` 参数改成
+  `operation`，路径 = `concat_location(I::PREFIX, operation)`；这是内部改动，不影响
+  调用点。
 - 跨 crate：`RoomSvc` 与 trait 同在协议 crate；`im_client` 只依赖协议 crate；
   `im_server` 的 `#[rpc(impl_of(RoomSvc))]` 也引用它，不依赖 `im_client`。
 - marker 是普通 `struct` + `impl`，proc macro 完全可控；trait 的可见性决定 marker
@@ -1634,7 +1640,7 @@ let summary = room.create_room("rust".into(), None).await?;
 ### 11.3 语法与展开
 
 ```rust
-#[rpc(namespace = "im/v1", service = "room", api = RoomSvc)]
+#[rpc(service = "im/v1/room", api = RoomSvc)]
 pub trait RoomService {
     fn create_room(&self, name: String, topic: Option<String>)
         -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<RoomSummary>>;
@@ -1642,14 +1648,15 @@ pub trait RoomService {
 }
 ```
 
-生成（除原有 trait / `SERVICE_NAME` / `__Req_*` / 客户端方法外）：
+生成（除原有 trait / `__Req_*` / 客户端方法外）：
 
 ```rust
 #[derive(Clone, Copy, Debug)]
 pub struct RoomSvc;
 
 impl ::rpc_core_v1::messaging::TrRpcInterface for RoomSvc {
-    const NAMESPACE: &'static str = "im/v1";
+    /// 完整服务前缀；pattern = PREFIX + "/" + operation。
+    const PREFIX: &'static str = "im/v1/room";
 }
 ```
 
@@ -1670,41 +1677,58 @@ let summary = room.create_room("rust".into(), None).await?;
 impl RoomService for RoomServiceImpl { ... }
 ```
 
-每个方法的 pattern 仍是 `{namespace}/{service}/{operation}` =
-`im/v1/room/create_room`；`RpcEndpointInfo` 用 `RoomSvc::NAMESPACE` + trait 的
-`SERVICE_NAME` + 方法名。
+每个方法的 pattern = `im/v1/room/<operation>`；`RpcEndpointInfo` 用
+`RoomSvc::PREFIX` + 方法名。
 
 > 语法选择：推荐 `api = RoomSvc` 这种带 key 的形式；如果希望完全按
-> `#[rpc(service = "room", RoomSvc)]` 的裸 ident 写，也可以作为 sugar 解析，但它与
-> 未来新增参数容易歧义，不建议作为唯一形式。
+> `#[rpc(service = "im/v1/room", RoomSvc)]` 的裸 ident 写，也可以作为 sugar 解析，但
+> 它与未来新增参数容易歧义，不建议作为唯一形式。
 
-### 11.4 namespace 仍然存在，但不再是类型
+### 11.4 为什么可以取消 namespace
 
-- `ImV1` **类型**消失；namespace 变成 trait attribute 上的字符串。`RpcEndpointInfo`
-  仍然需要 namespace / service 分列，所以字符串保留。
-- 不写 `namespace` 时默认 `""`，pattern 变成 `room/<operation>`；demo 显式写
-  `im/v1`，保留版本前缀。
-- 多个 service 共享 namespace：各自写同一个 `namespace = "im/v1"`，不需要 interface
-  marker。
-- **同一个 service 挂多个 namespace**（demo 的 `ImV2`）：per-service marker 只有一个
-  namespace。三个选项：
-  1. **保留 interface marker 作为可选的多 namespace 分组**，只给 `ImV2` 这类场景用；
-  2. 增加 `apis = [(ImV1, "im/v1"), (ImV2, "im/v2")]`，一次生成多个 marker；
-  3. 定义两个 trait（不推荐，重复契约）。
-  本期 Call 验收只要求**单 service 单 namespace** 主路径（`api = X`）；`ImV2` 多
-  namespace 先用选项 1（可选 interface marker）跑通，选项 2（`apis = [...]`，一次生成
-  多个 marker）作为后续增强，不阻塞主验收。
-- `client.call::<RoomSvc>()` 返回的代理只实现 `RoomService`；在它上面调用
-  `SessionService` 的方法会编译失败——这是期望的隔离。
+没有协议层的理由：MPTP 的 pattern 就是一个字符串。namespace 只是一个约定，用来：
 
-### 11.5 与旧 interface marker 的关系
+1. 拼 `{namespace}/{service}/{operation}`；
+2. 让多个 service 共享一个前缀，减少重复；
+3. 给 `RpcEndpointInfo` 提供 namespace / service 两级分组。
 
-- 旧 `#[rpc(namespace = "...", services = [...])] struct ImV1;` 保留为**可选**的多
-  service 视图 / 多 namespace 分组；新代码不再需要它。
-- 两种形式可以共存：同一个 trait 对 `ClientProxy<C, ImV1>` 和
-  `ClientProxy<C, RoomSvc>` 是两个不同的 impl，不会冲突；服务端对应两个 installer，
-  注意不要重复绑定同一 pattern。
-- 旧形式标记为 deprecated（文档层），不立即删除；删除是后续主版本的事。
+改用完整 service 前缀后：
+
+- 拼接仍是 `prefix + "/" + operation`；
+- 多个 service 共享 `im/v1` 时，各自写 `service = "im/v1/xxx"`；重复的是字符串，
+  不是类型/逻辑；
+- `RpcEndpointInfo` 改为 `{ service: &'static str, operation: &'static str,
+  pattern: &'static str }`，`service` 就是完整前缀；中间件按 `service` 或 `pattern`
+  前缀分组即可。如果确实需要“版本段”，用 `service.rsplit_once('/')` 或
+  `starts_with("im/v1/")` 做字符串判断，不需要协议层字段。
+
+代价：
+
+- 版本前缀在每个 trait 上重复一次；改版本时逐个 trait 改（可以接受，trait 数量有限）；
+- 失去编译期的 `(namespace, service)` 结构化拆分；`RpcEndpointInfo` 只有 `service`
+  整段。需要拆分的中间件自己做字符串处理；
+- `TrRpcInterface::PATH` → `PREFIX`、`RpcEndpointInfo` 去 `namespace` 是公开 API 变更；
+  code-first 尚未实现，现在改成本最低。
+
+**结论：没有必须保留 namespace 的理由；取消它，`service` 用完整前缀。**
+
+### 11.5 多 service / 多前缀
+
+- **多个 service 共享 `im/v1`**：各自写 `service = "im/v1/session"` /
+  `"im/v1/room"`；不需要 interface marker。
+- **同一个 trait 挂多个前缀**（demo 的 `ImV2`）：per-service marker 只有一个 `PREFIX`。
+  推荐用**一个 attribute 列出多组**：
+  ```rust
+  #[rpc(apis = [(DiagV1, "im/v1/diag"), (DiagV2, "im/v2/diag")])]
+  pub trait DiagnosticsService { ... }
+  ```
+  宏生成 `DiagV1` / `DiagV2` 两个 marker、两份客户端 impl；服务端
+  `#[rpc(impl_of(DiagV1))]` / `#[rpc(impl_of(DiagV2))]`。单组时 `service` + `api` 是
+  它的 sugar。
+  - 该 `apis` 语法是后续增强；本期 Call 验收只要求单组
+    `service = "im/v1/room", api = RoomSvc`。多前缀不阻塞主验收。
+- **interface marker**：在没有 namespace 之后不再需要；`services = [...]` 的多 service
+  客户端视图可以保留为可选 ergonomics，但不作为主路径，也不要求实现。
 
 ### 11.6 验收标准（code-first Call）
 
@@ -1713,21 +1737,21 @@ impl RoomService for RoomServiceImpl { ... }
 
 | ID | 验收项 | 判定 |
 | --- | --- | --- |
-| CC-01 | 语法：`#[rpc(namespace = "im/v1", service = "room", api = RoomSvc)] pub trait RoomService` 可编译 | 生成 `RoomSvc`；trait 原方法、`SERVICE_NAME`、`__Req_*` 都在 |
-| CC-02 | marker：`RoomSvc` 是零大小、可见性与 trait 一致、实现 `TrRpcInterface::NAMESPACE = "im/v1"` | 类型检查；`RoomSvc::NAMESPACE` 断言 |
+| CC-01 | 语法：`#[rpc(service = "im/v1/room", api = RoomSvc)] pub trait RoomService` 可编译 | 生成 `RoomSvc`；trait 原方法、`__Req_*` 都在；不再生成 `SERVICE_NAME` |
+| CC-02 | marker：`RoomSvc` 是零大小、可见性与 trait 一致、实现 `TrRpcInterface::PREFIX = "im/v1/room"` | 类型检查；`RoomSvc::PREFIX` 断言 |
 | CC-03 | 客户端挂载：`client.call::<RoomSvc>()` 返回 `ClientProxy<'_, C, RoomSvc>`，且实现 `RoomService` | 编译 + 调用 `create_room` |
-| CC-04 | 调用点不出现 `ImV1` / pattern / namespace / body 编解码 | 源码检查；`CC-01` 示例逐字通过 |
-| CC-05 | 服务端：`#[rpc(impl_of(RoomSvc))]` 生成 per-method endpoint；pattern = `im/v1/room/<operation>` | router 命中；`RpcEndpointInfo` 四元组正确 |
+| CC-04 | 调用点不出现 `ImV1` / pattern / 前缀 / body 编解码 | 源码检查；`CC-01` 示例逐字通过 |
+| CC-05 | 服务端：`#[rpc(impl_of(RoomSvc))]` 生成 per-method endpoint；pattern = `im/v1/room/<operation>` | router 命中；`RpcEndpointInfo { service, operation, pattern }` 正确 |
 | CC-06 | 请求类型：0 参 → `()`；1 参 → 该 owned 类型；≥2 参 → `__Req_<op> { f0.. }`；借用参数回填 | 编译 + 编解码 roundtrip；`__Req_*` 实现 `TrHasTypeId` |
 | CC-07 | 类型头：请求 `Body_Type` + `Data_Type_Id=Req` + `Accept=Resp`；响应 `Body_Type` + `Data_Type_Id=Resp`；strict | 正确头通过；缺失 / 错误在 handler 前 400/406 |
 | CC-08 | 跨 crate：`im_client` 只依赖协议 crate；`im_server` 只依赖协议 + `mptp_serving` | `cargo tree -p im_client --depth 1` 无 `im_server` |
-| CC-09 | 多 service：`SessionSvc` 与 `RoomSvc` 各自挂载、同 namespace；不需要 interface marker | 两个 `client.call::<...>()` 都能调；pattern 不冲突 |
+| CC-09 | 多 service：`SessionSvc` / `RoomSvc` / `DiagSvc` 各自挂载、前缀可以共享 `im/v1`；不需要 interface marker | 三个 `client.call::<...>()` 都能调；pattern 不冲突 |
 | CC-10 | 错误 marker：在 `RoomSvc` 代理上调用 `SessionService` 方法编译失败 | `trybuild` / `compile_fail` |
 | CC-11 | 名字冲突：`api = X` 与已有类型同名时给出可读编译错误 | compile-fail 用例 |
 | CC-12 | 取消：每个客户端方法返回 `impl TrMayCancel`，可 `.may_cancel_with(token)` | 编译 + 取消用例 |
 | CC-13 | 清单：生成的 `__Req_*` 进入 `denco_type_ids!` / golden；客户端 / 服务端不手写 ID | 清单长度 + golden |
 | CC-14 | installer：每个 `impl_of` 只生成一个 `install_into`；同一 `Arc` 被所有方法共享 | 装配测试 |
-| CC-15 | 多 namespace（`ImV2`）：另立决策；本期只要求 interface marker 可选路径不回归 | 设计决策记录；不阻塞 CC-01..CC-14 |
+| CC-15 | 多前缀（`DiagV1` / `DiagV2`）：另立决策；本期只要求单组 `service` + `api` 主路径 | 设计决策记录；不阻塞 `CC-01..CC-14` |
 
 ### 11.7 风险
 
@@ -1736,7 +1760,7 @@ impl RoomService for RoomServiceImpl { ... }
 - **可见性**：`pub trait` 在私有模块里时，marker 也私有，客户端 crate 无法
   `call::<X>()`；文档要求协议 trait 与 marker 放在 `pub` 模块。
 - **语法歧义**：裸 ident 形式与未来参数（如 `typed`）容易冲突；推荐 `api = X`。
-- **多 namespace**：见 11.4；不要把 `ImV2` 硬塞进单 marker。
-- **旧 interface marker**：保留期间要避免同一 service 的两种客户端 impl 造成调用点
-  二义性（`client.call::<ImV1>()` vs `client.call::<RoomSvc>()` 都能调同一方法）；
-  文档明确新代码只用 per-service marker。
+- **公开 API 变更**：`TrRpcInterface::PATH` → `PREFIX`、`RpcEndpointInfo` 去
+  `namespace`，需要更新 examples / tests / README；code-first 尚未实现，现在改成本最低。
+- **多前缀**：见 11.5；不要把多个前缀硬塞进单 marker。
+- **重复前缀**：每个 trait 重复写 `im/v1`；接受这个重复，换掉 namespace 的一层概念。
