@@ -40,7 +40,7 @@ use abs_buff::{
 };
 use abs_cancel::{CancelledToken, TrMayCancel};
 use abs_mptp::spec::access_method::AccessMethod;
-use denco_macro::{TrDecodable, TrEncodable};
+use denco_macro::{TrDecodable, TrEncodable, TrHasTypeId};
 use futures::executor::block_on;
 use mptp_smux::Headers;
 use rpc_core_v1::{
@@ -59,7 +59,7 @@ use rpc_core_v1::{
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 一个用户。
-#[derive(Clone, Debug, PartialEq, TrDecodable, TrEncodable)]
+#[derive(Clone, Debug, PartialEq, TrDecodable, TrEncodable, TrHasTypeId)]
 struct User {
     /// 服务端分配的用户 ID。
     id: u64,
@@ -68,12 +68,8 @@ struct User {
     display_name: String,
 }
 
-impl TrDataTypeId for User {
-    const DATA_TYPE_ID: DataTypeId = DataTypeId::new(0x2001u64).unwrap();
-}
-
 /// 一条聊天消息。
-#[derive(Clone, Debug, PartialEq, TrDecodable, TrEncodable)]
+#[derive(Clone, Debug, PartialEq, TrDecodable, TrEncodable, TrHasTypeId)]
 struct ChatMessage {
     /// 房间 ID。
     room_id: u64,
@@ -85,12 +81,8 @@ struct ChatMessage {
     text: String,
 }
 
-impl TrDataTypeId for ChatMessage {
-    const DATA_TYPE_ID: DataTypeId = DataTypeId::new(0x2002u64).unwrap();
-}
-
 /// 房间事件流的一项。
-#[derive(Clone, Debug, PartialEq, TrDecodable, TrEncodable)]
+#[derive(Clone, Debug, PartialEq, TrDecodable, TrEncodable, TrHasTypeId)]
 enum RoomEvent {
     /// 订阅时的快照。
     Snapshot {
@@ -103,10 +95,6 @@ enum RoomEvent {
         /// 新消息。
         message: ChatMessage,
     },
-}
-
-impl TrDataTypeId for RoomEvent {
-    const DATA_TYPE_ID: DataTypeId = DataTypeId::new(0x2003u64).unwrap();
 }
 
 /// `im/v1` interface marker（真实项目里由 `#[rpc(namespace = "im/v1", ...)]` 生成）。
@@ -304,7 +292,10 @@ fn push_messages_() {
         .with_accept(AcceptType::new(BodyCodec::MsgPack, None));
     let mut headers = Headers::new();
     apply_request_type_headers(&mut headers, AccessMethod::Push, &info);
-    println!("  A → 请求头: Body_Type=MsgPack, Data_Type_Id=0x2002");
+    println!(
+        "  A → 请求头: Body_Type=MsgPack, Data_Type_Id={}",
+        ChatMessage::DATA_TYPE_ID
+    );
     println!(
         "  server 校验 Push 请求头: {:?}",
         validate_request_types(AccessMethod::Push, &headers, &info)
@@ -411,10 +402,15 @@ fn unary_headers_() {
         &mut headers,
         AcceptType::new(BodyCodec::MsgPack, Some(User::DATA_TYPE_ID)),
     );
-    println!("  A → Data_Type_Id=0x2001（请求体是 User），Accept=0x2001");
     println!(
-        "  server 校验 → {:?}；handler 写 200 + User(0x2001)",
-        validate_request_types(AccessMethod::Call, &headers, &request)
+        "  A → Data_Type_Id={}（请求体是 User），Accept={}",
+        User::DATA_TYPE_ID,
+        User::DATA_TYPE_ID
+    );
+    println!(
+        "  server 校验 → {:?}；handler 写 200 + User({})",
+        validate_request_types(AccessMethod::Call, &headers, &request),
+        User::DATA_TYPE_ID
     );
     let mut resp_headers = Headers::new();
     rpc_core_v1::stream::apply_response_type_headers(

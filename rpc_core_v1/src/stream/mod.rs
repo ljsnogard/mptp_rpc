@@ -38,6 +38,17 @@ pub use types_::{
     write_data_type_id,
 };
 
+/// denco 结构化 TypeId 的 facade。
+///
+/// 转出 trait / 注册表，让业务 crate 可以只写 `use rpc_core_v1::stream::TrHasTypeId;`。
+/// **不转出 `#[derive(TrHasTypeId)]`**：denco 的 derive 生成代码硬编码
+/// `abs_denco::...` 路径，使用 derive 的 crate 必须直接依赖 `abs_denco`。
+#[cfg(feature = "type-id")]
+pub use crate::x_deps::abs_denco::{
+    denco_type_ids,
+    type_id::{TrHasTypeId, TypeIdConflict, TypeIdEntry, check_unique},
+};
+
 /// 各处 flux / guard 共用的「生命周期 + 动量」标记。
 ///
 /// `&'f mut ()` 把 guard 绑在流生命周期上（不能 `'static` 逃逸），`fn() -> T` 只为把

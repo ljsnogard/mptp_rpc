@@ -33,6 +33,12 @@
 //! proxies, serving body helpers, cancellation traits, and the `denco` / `gen_mcf2` macros.
 //! This module only re-exports; it does not change visibility or behavior.
 
+/// denco 类型指纹的 facade（`type-id` feature）。
+///
+/// 与 `stream` 的转出一致：不转出 derive，使用 derive 的 crate 仍需直接依赖
+/// `abs_denco`（生成的代码硬编码 `abs_denco::...`）。
+#[cfg(feature = "type-id")]
+pub use crate::stream::{TrHasTypeId, TypeIdEntry, check_unique, denco_type_ids};
 pub use crate::{
     ClientConfig, ServingConfig, TrDefaultDock, TrUserConn,
     client::{

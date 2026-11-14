@@ -33,8 +33,12 @@ use crate::x_deps::{abs_mptp, mptp_wire};
 /// 一个跨进程、跨版本稳定的 RPC 数据类型标识。
 ///
 /// 取值 `0` 保留给「无类型 / 缺失」，不允许上线；因此本类型只能通过
-/// [`DataTypeId::new`] 构造出非零值。文本形态固定写 `0x` + 小写十六进制，
-/// 解析同时接受十进制与 `0x` / `0X` 十六进制。
+/// [`DataTypeId::new`] / [`DataTypeId::from_nonzero_u64`] 构造出非零值。文本形态固定写
+/// `0x` + 小写十六进制，解析同时接受十进制与 `0x` / `0X` 十六进制。
+///
+/// `type-id` feature 开启时，业务类型不应再手写 [`TrDataTypeId`]：denco 的
+/// `#[derive(TrHasTypeId)]` 给出结构化指纹，blanket impl 自动把它映射成
+/// `TYPE_ID_64`。手写只用于固定旧 ID（兼容）或打断递归。
 ///
 /// # Examples
 ///
@@ -45,6 +49,15 @@ use crate::x_deps::{abs_mptp, mptp_wire};
 /// assert_eq!(id.to_string(), "0x1234");
 /// assert_eq!("4660".parse::<DataTypeId>().unwrap(), id);
 /// assert!(DataTypeId::new(0).is_none());
+/// assert_eq!(DataTypeId::from_nonzero_u64(0x1234).into_inner(), 0x1234);
+/// ```
+///
+/// 零值在 `const` 上下文里直接编译失败：
+///
+/// ```compile_fail
+/// use rpc_core_v1::stream::DataTypeId;
+///
+/// const BAD: DataTypeId = DataTypeId::from_nonzero_u64(0);
 /// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DataTypeId(u64);
@@ -57,6 +70,22 @@ impl DataTypeId {
         } else {
             Option::Some(DataTypeId(raw))
         }
+    }
+
+    /// 由非零原始值构造；`0` 在 `const` 求值时直接 panic。
+    ///
+    /// 面向 `const` 消费方（例如 blanket impl 里的
+    /// `<T as TrHasTypeId>::TYPE_ID_64`）：这些位置没有 `Option` 可返回，而 `0` 是
+    /// 线上非法值，必须在编译期拒绝。
+    ///
+    /// # Panics
+    ///
+    /// `raw == 0` 时 panic；发生在 `const` 求值期即编译错误。
+    pub const fn from_nonzero_u64(raw: u64) -> Self {
+        if raw == 0u64 {
+            panic!("Data_Type_Id 不能为 0");
+        }
+        DataTypeId(raw)
     }
 
     /// 取原始 `u64`。
@@ -85,25 +114,64 @@ impl FromStr for DataTypeId {
 
 /// 一个类型在线上使用的稳定 ID 契约。
 ///
-/// 实现者显式声明常量；**不要**用 `core::any::TypeId`、类型名哈希或运行期注册表
-/// 生成它——那些值跨进程 / 跨版本不稳定。
+/// 这是 MPTP 线协议的**窄 facade**：只要求一个非零 [`DataTypeId`]，不关心 ID 怎么生成。
+///
+/// `type-id` feature 开启时，本 crate 提供
+/// `impl<T: abs_denco::type_id::TrHasTypeId> TrDataTypeId for T`，直接从 denco 的
+/// **结构化指纹** `TYPE_ID_64` 取值。业务类型应写：
+///
+/// ```text
+/// #[derive(denco_macro::TrEncodable, denco_macro::TrDecodable, denco_macro::TrHasTypeId)]
+/// pub struct User { /* ... */ }
+/// ```
+///
+/// 不要再手写 [`TrDataTypeId`]：
+///
+/// - 需要固定旧 ID（线上兼容）或打断递归时，改为手写
+///   `impl abs_denco::type_id::TrHasTypeId`，三个宽度都显式给值（可用
+///   `abs_denco::type_id::path_id_64`），这样 ID 仍只有一处定义；
+/// - 只有 **关闭** `type-id` feature、或类型不实现 `TrHasTypeId` 时，手写
+///   `TrDataTypeId` 才仍然可用。
+///
+/// # 版本契约
+///
+/// ID 由 denco 的 `TYPE_ID_VERSION` + `HASH_ALGORITHM` + 定义处 `module_path!()` 决定；
+/// 跨进程两端必须使用同一 denco rev / feature / hash。字段名、字段类型、字段顺序、
+/// 变体名或载荷变化都会改变 ID。
 ///
 /// # Examples
 ///
 /// ```
 /// use rpc_core_v1::stream::{DataTypeId, TrDataTypeId};
 ///
-/// struct ChatMessage;
+/// struct LegacyType;
 ///
-/// impl TrDataTypeId for ChatMessage {
-///     const DATA_TYPE_ID: DataTypeId = DataTypeId::new(0x1001).unwrap();
+/// impl TrDataTypeId for LegacyType {
+///     const DATA_TYPE_ID: DataTypeId = DataTypeId::from_nonzero_u64(0x1001);
 /// }
 ///
-/// assert_eq!(ChatMessage::DATA_TYPE_ID.to_string(), "0x1001");
+/// assert_eq!(LegacyType::DATA_TYPE_ID.to_string(), "0x1001");
 /// ```
 pub trait TrDataTypeId {
     /// 本类型的稳定线上 ID（非零）。
     const DATA_TYPE_ID: DataTypeId;
+}
+
+/// 由 denco 的结构化类型指纹自动派生 `Data_Type_Id`。
+///
+/// 只使用 `TYPE_ID_64`：MPTP 的 `Data_Type_Id` 是 `u64`，128 / 32 位不参与线上头。
+/// `TrHasTypeId` 的实现者保证三个宽度都非零，因此这里用
+/// [`DataTypeId::from_nonzero_u64`] 做 `const` 构造。
+///
+/// 同一个类型不要同时 derive `TrHasTypeId` 并手写 `TrDataTypeId`：两者会冲突。
+#[cfg(feature = "type-id")]
+impl<T> TrDataTypeId for T
+where
+    T: crate::x_deps::abs_denco::type_id::TrHasTypeId,
+{
+    const DATA_TYPE_ID: DataTypeId = DataTypeId::from_nonzero_u64(
+        <T as crate::x_deps::abs_denco::type_id::TrHasTypeId>::TYPE_ID_64,
+    );
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -1254,4 +1322,81 @@ mod tests_ {
         assert_eq!(rejection.status(), Status::NotAcceptable);
     }
 
+    /// 测试 `DataTypeId::from_nonzero_u64` 在运行期保留非零值。
+    /// Test that `DataTypeId::from_nonzero_u64` keeps a non-zero value at run time.
+    ///
+    /// - 手段：用 `0x1234` 构造并读回。
+    /// - 判断：原值返回；零值路径由下面的 `should_panic` 与 `compile_fail` doctest 固定。
+    ///
+    /// - Means: build from `0x1234` and read it back.
+    /// - Verdict: the value round-trips; the zero path is fixed by the `should_panic` test
+    ///   below and by a `compile_fail` doctest.
+    #[test]
+    fn data_type_id_from_nonzero_u64_() {
+        assert_eq!(DataTypeId::from_nonzero_u64(0x1234u64).into_inner(), 0x1234);
+    }
+
+    /// 测试 `DataTypeId::from_nonzero_u64(0)` 在运行期 panic。
+    /// Test that `DataTypeId::from_nonzero_u64(0)` panics at run time.
+    ///
+    /// - 手段：直接以 `0` 构造，交给测试框架捕获 panic。
+    /// - 判断：panic 消息包含「Data_Type_Id 不能为 0」。
+    ///
+    /// - Means: construct from `0` and let the test harness catch the panic.
+    /// - Verdict: the panic message contains "Data_Type_Id 不能为 0".
+    #[test]
+    #[should_panic(expected = "Data_Type_Id 不能为 0")]
+    fn data_type_id_from_nonzero_u64_rejects_zero_() {
+        let _ = DataTypeId::from_nonzero_u64(0u64);
+    }
+
+    /// 测试手写 `TrDataTypeId` 路径仍然可用（feature 关闭时的旧行为）。
+    /// Test that the hand-written `TrDataTypeId` path still works (the feature-off behavior).
+    ///
+    /// - 手段：为一个**没有** `TrHasTypeId` 的本地类型手写 impl，读常量。
+    /// - 判断：常量等于手写的 `0x4321`；blanket impl 不会与它冲突。
+    ///
+    /// - Means: hand-write the impl for a local type that has no `TrHasTypeId`, then read it.
+    /// - Verdict: the constant equals the hand-written `0x4321`; the blanket impl does not
+    ///   conflict with it.
+    #[test]
+    fn manual_tr_data_type_id_still_works_() {
+        struct ManualProbe;
+
+        impl TrDataTypeId for ManualProbe {
+            const DATA_TYPE_ID: DataTypeId = DataTypeId::from_nonzero_u64(0x4321u64);
+        }
+
+        assert_eq!(ManualProbe::DATA_TYPE_ID.into_inner(), 0x4321);
+    }
+
+    /// 测试 `type-id` 开启时 blanket impl 直接取 denco 的 `TYPE_ID_64`。
+    /// Test that with `type-id` the blanket impl uses denco's `TYPE_ID_64` directly.
+    ///
+    /// - 手段：本地 `Probe` derive `TrHasTypeId`，比较 facade 常量与 `TYPE_ID_64`。
+    /// - 判断：两者相等且非零；注册表把两个类型判为不冲突。
+    ///
+    /// - Means: derive `TrHasTypeId` for a local `Probe` and compare the facade constant
+    ///   with `TYPE_ID_64`.
+    /// - Verdict: they are equal and non-zero; the registry reports no conflict for two types.
+    #[cfg(feature = "type-id")]
+    #[test]
+    fn blanket_impl_uses_type_id_64_() {
+        #[derive(denco_macro::TrHasTypeId)]
+        #[expect(dead_code, reason = "字段只参与类型指纹计算，测试不读取其值")]
+        struct Probe {
+            id: u64,
+            name: String,
+        }
+
+        assert_eq!(
+            Probe::DATA_TYPE_ID.into_inner(),
+            <Probe as crate::x_deps::abs_denco::type_id::TrHasTypeId>::TYPE_ID_64
+        );
+        assert_ne!(Probe::DATA_TYPE_ID.into_inner(), 0);
+
+        // 通过 `stream` 的 facade 使用注册表宏，验证转出路径也被编译。
+        let entries = crate::stream::denco_type_ids![Probe, u64];
+        assert_eq!(crate::stream::check_unique(entries, 64), Result::Ok(()));
+    }
 }

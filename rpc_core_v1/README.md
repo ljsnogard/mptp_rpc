@@ -39,7 +39,8 @@ use rpc_core_v1::preludes::*;
 
 It re-exports the configuration types, client proxy traits, `MptpClient` / `MptpServlet`,
 cancellation traits, `Shared` / `CoreAlloc` / `TrConnection`, the unified error / result
-types, the typed-stream guards and type-id contract, and the
+types, the typed-stream guards and type-id contract (plus denco's `TrHasTypeId` /
+`denco_type_ids!` / `check_unique` when `type-id` is on), and the
 `gen_may_cancel_future` / `TrEncodable` / `TrDecodable` macros. Re-exports only; no
 visibility or behavior changes.
 
@@ -109,31 +110,58 @@ headers, never mismatches.
 
 ### Type id rules
 
-`DataTypeId` is an explicit, stable `u64`:
-
-- `0x0000_0000_0000_0000` is reserved for "untyped / absent" and must never go on the wire;
-- applications allocate `0x0000_0000_0000_0001` – `0x7FFF_FFFF_FFFF_FFFF` explicitly;
-- the high half is reserved for future generated / experimental ids;
-- implement `TrDataTypeId` for your type and write the id down in the protocol crate;
+`DataTypeId` is a non-zero, stable `u64` carried in `Data_Type_Id`. It is derived from
+**denco's structured type fingerprint**, not allocated by hand:
 
 ```rust
-use rpc_core_v1::stream::{DataTypeId, TrDataTypeId};
+use denco_macro::{TrDecodable, TrEncodable, TrHasTypeId};
 
-pub struct ChatMessage;
-
-impl TrDataTypeId for ChatMessage {
-    const DATA_TYPE_ID: DataTypeId = DataTypeId::new(0x1001).unwrap();
+#[derive(TrDecodable, TrEncodable, TrHasTypeId)]
+pub struct ChatMessage {
+    pub text: String,
 }
 ```
 
-Versioning:
+With the `type-id` feature (on by default) this crate provides:
 
-- renaming the Rust type without changing the wire shape keeps the id;
+```rust
+impl<T: abs_denco::type_id::TrHasTypeId> TrDataTypeId for T {
+    const DATA_TYPE_ID: DataTypeId = DataTypeId::from_nonzero_u64(T::TYPE_ID_64);
+}
+```
+
+so `ChatMessage::DATA_TYPE_ID` is exactly denco's `TYPE_ID_64`. `TrDataTypeId` stays as the
+narrow MPTP facade; the 128-bit and 32-bit denco widths are not used on the wire.
+
+Feature contract:
+
+| feature | effect |
+| --- | --- |
+| `type-id` (**default**) | enables `abs_denco/type-id` + `denco_macro/type-id` and the blanket impl |
+| `type-id-murmur3` | switches denco to Murmur3; implies `type-id`; never enable it by default |
+
+`abs_denco/type-id` and `denco_macro/type-id` must be enabled together. A workspace must use
+**one** hash family and one denco revision on both ends of a connection.
+
+If you must pin an old id (wire compatibility) or break a recursive type, hand-write
+`impl abs_denco::type_id::TrHasTypeId` with explicit `TYPE_ID_128` / `TYPE_ID_64` /
+`TYPE_ID_32` (or `path_id_64` for recursions). Do **not** hand-write `TrDataTypeId` for a type
+that implements `TrHasTypeId`: the blanket impl would conflict. With `type-id` disabled,
+hand-written `TrDataTypeId` impls still work.
+
+Versioning (denco `TYPE_ID_VERSION` / `HASH_ALGORITHM`):
+
+- renaming a Rust field changes the id (strict fingerprint); changing its wire name via
+  `#[denco(rename)]` also changes it;
 - adding / removing / reordering / retyping fields changes the id;
+- reordering enum variants without renaming them keeps the id;
+- `transparent` equals the inner type; `Box` / `Rc` / `Arc` / references / `Cow` forward to
+  the inner type; `String` and `str` are equivalent;
 - an id is never reused, and one id maps to one (codec, shape).
 
-Do **not** use `core::any::TypeId`, a type-name hash, or a runtime registry: those values are
-not stable across processes or versions.
+Do **not** use `core::any::TypeId`, a type-name hash, `DefaultHasher`, or a runtime registry:
+those values are not stable across processes or versions. denco's hash input is the
+compatibility contract; change it only by bumping `TYPE_ID_VERSION` (a breaking wire change).
 
 ## Examples
 
