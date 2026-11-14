@@ -1,34 +1,41 @@
 //! 面向 [`ServingSession`] 的 RPC body 编解码辅助（新框架 handler 用）。
 //!
 //! 新 controller 形态的 handler 通过 `MptpContext` 拿到 `&mut ServingSession`，再用这里的
-//! 辅助函数解码请求体、写回复体。业务体按 MessagePack 编解码；回复体走定长（sized）写，
-//! 与 `mptp_smux_v1_demo` 的简单路径一致——不预编码、不引入 ring/chunked 复杂度。
+//! 辅助函数解码请求体、写回复体。业务体按 MessagePack 编解码。
+//!
+//! # 为什么回复体也走 ring / chunked
+//!
+//! 业务消息**没有字节大小上限**：denco 的编码器只需要一个可写的 `TrBuffWrite`，底层
+//! buff 的容量只影响「一次能借出多少」，不影响能否编码完。旧实现为了走定长（sized）
+//! 回复把整个值编码进一块 **64 KiB 的 `Vec` 暂存区**，超过就报错——那不是协议限制，
+//! 是实现引入的 bug。现在回复体与请求体同构：
+//!
+//! - 编码器把字节写进一个很小的栈上 SPSC ring；
+//! - 发送侧（`chunked_async` / `write_chunks_async`）从另一半读走并成帧；
+//! - 两者在同一个 task 内 `join`，ring 只是并发窗口，**不是消息上限**。
 //!
 //! # `body_`: RPC body helpers over `ServingSession`
 //!
-//! The new controller-style handlers reach `&mut ServingSession` through `MptpContext` and
-//! use these helpers to decode the request body and write replies. Bodies are MessagePack;
-//! replies use the fixed-size (sized) path, matching the demo's simple approach.
+//! Bodies are MessagePack. Replies stream through a small stack ring exactly like request
+//! bodies: the ring is a concurrency window, never a message-size limit.
 
-use alloc::{
-    string::{String, ToString},
-    vec,
-    vec::Vec,
-};
+use alloc::string::{String, ToString};
+use core::mem::MaybeUninit;
 
 use abs_cancel::{NonCancellableToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use abs_mptp::spec::Status;
-use mp_denco::{MpDecoder, MpEncoder};
+use futures::future::join;
+use mp_denco::MpDecoder;
 use mptp_smux::{
     ServeError,
     serving::{ServingSession, SuffixStream, config::TrConfig},
 };
 
-use crate::x_deps::{abs_cancel, abs_mptp};
-
-/// 编码暂存区容量：业务体超过它时明确失败而不是悄悄截断。
-const K_ENCODE_CAP_: usize = 64usize * 1024usize;
+use crate::{
+    messaging::body_::{BodyRing_, K_BODY_RING_CAP_, encode_into_async_},
+    x_deps::{abs_cancel, abs_mptp},
+};
 
 /// 业务错误 → 状态回复的契约。
 ///
@@ -76,13 +83,25 @@ where
     C: TrConfig,
     T: ?Sized + TrEncodable,
 {
-    let mut bytes = encode_value_async_(value).await?;
-    let len = bytes.len();
-    let mut src: &mut [u8] = bytes.as_mut_slice();
-    session
-        .response(Status::Ok)
-        .sized_async(&mut src, len)
-        .await?;
+    let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
+    let (mut writer, mut reader) = BodyRing_::split(&mut ring);
+    let encode = async {
+        let result = encode_into_async_(value, &mut writer, NonCancellableToken::new()).await;
+        // 无论成功失败都关闭写端：读端据此看到 EOF，不会永久等待。
+        writer.close();
+        result
+    };
+    let send = async {
+        session
+            .response(Status::Ok)
+            .chunked_async(&mut reader)
+            .await
+    };
+    let (encoded, sent) = join(encode, send).await;
+    encoded.map_err(|err| ServeError::Target {
+        detail: err.to_string(),
+    })?;
+    sent?;
     Result::Ok(())
 }
 
@@ -120,29 +139,18 @@ where
     C: TrConfig,
     T: ?Sized + TrEncodable,
 {
-    let bytes = encode_value_async_(value).await?;
-    stream.write_chunk_async(bytes.as_slice()).await?;
-    Result::Ok(())
-}
-
-/// 把业务值编码成一段内存字节。
-async fn encode_value_async_<T>(value: &T) -> Result<Vec<u8>, ServeError>
-where
-    T: ?Sized + TrEncodable,
-{
-    let mut storage = vec![0u8; K_ENCODE_CAP_];
-    let written = {
-        let mut sink: &mut [u8] = storage.as_mut_slice();
-        let before = sink.len();
-        value
-            .encode_async(MpEncoder::new(&mut sink))
-            .may_cancel_with(NonCancellableToken::new())
-            .await
-            .map_err(|err| ServeError::Target {
-                detail: err.to_string(),
-            })?;
-        before - sink.len()
+    let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
+    let (mut writer, mut reader) = BodyRing_::split(&mut ring);
+    let encode = async {
+        let result = encode_into_async_(value, &mut writer, NonCancellableToken::new()).await;
+        writer.close();
+        result
     };
-    storage.truncate(written);
-    Result::Ok(storage)
+    let send = async { stream.write_chunks_async(&mut reader).await };
+    let (encoded, sent) = join(encode, send).await;
+    encoded.map_err(|err| ServeError::Target {
+        detail: err.to_string(),
+    })?;
+    sent?;
+    Result::Ok(())
 }

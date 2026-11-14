@@ -290,16 +290,30 @@ where
             // 段内的顺序就是线上顺序：先 2 字节大端长度，再内容。
             // `len <= cap <= K_MAX_CHUNK_PAYLOAD`，所以这里不会截断。
             let prefix = (len as u16).to_be_bytes();
-            let mut dst_child = dst_segm.as_segm_mut();
-            let head = dst_child.clone_items_from_buff(&prefix);
+            let head = {
+                let mut dst_child = dst_segm.as_segm_mut();
+                dst_child.clone_items_from_buff(&prefix)
+            };
             if head != 2usize {
                 return Result::Err(ChunkedEncodeError::Unsatisfied {
                     expected: 2usize + len,
                     got: head,
                 });
             }
-            let mut src_child = src_segm.as_segm_ref();
-            src_child.move_items_to_segm(&mut dst_child)
+            // 目标段可能只让出一段「当前连续窗口」（环形缓冲在回绕处会分成两段）。
+            // 因此不能假设一次 `move_items_to_segm` 就能搬完：每次重新借出两端，
+            // 直到本块的全部内容都写进目标段。
+            let mut moved_into_dst = 0usize;
+            while moved_into_dst < len {
+                let mut src_child = src_segm.as_segm_ref();
+                let mut dst_child = dst_segm.as_segm_mut();
+                let step = src_child.move_items_to_segm(&mut dst_child);
+                if step == 0usize {
+                    break;
+                }
+                moved_into_dst += step;
+            }
+            moved_into_dst
         };
         // 两端都在这里回收：目标结算 2 + len，源结算 len。
         drop(dst_segm);
