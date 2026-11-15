@@ -346,19 +346,19 @@ protobuf-net 的规则（实现见 `Internal/ContractOperation.cs` 与 `ServerIn
 
 ## 3. mptp_rpc 的落点与设计选择
 
+> 本章是 2026-11-14 讨论后的**现行设计**。它取代 2026-11-13 的「每个 Call 方法一个
+> endpoint / interface marker / namespace」写法；§3.2 说明为什么 Call 改回 service 级
+> 路径 + 请求枚举，而非 Call 仍保持每方法 endpoint。完整验收见 §12.10。
+
 ### 3.1 目标用户形状
 
-> **2026-11-14 修订**：客户端挂载点改为每个 service trait 自己生成的 marker（§11），
-> 并**取消 namespace 概念**：`service` 是完整服务前缀（如 `im/v1/room`）。Call 的
-> wire 形状改为 service 级路径 + 请求枚举（§12）。下面 `ApiV1` / `WorkspaceService`
-> 的 interface marker 形状是历史设计；单 service 直接写
-> `#[rpc(service = "im/v1/workspace", api = WorkspaceSvc)]`，客户端
-> `client.call::<WorkspaceSvc>()`。
-
-协议 crate（客户端与服务端共享）保持 `mptp_cs_smoke` / `DESIGN_BLUEPRINT` 的形状：
+协议 crate（客户端与服务端共享）：
 
 ```rust
-#[rpc(service = "workspace")]
+use rpc_core_v1::preludes::*;
+use rpc_svc_macro::rpc;
+
+#[rpc(service = "api/v1/workspace", api = WorkspaceSvc)]
 pub trait WorkspaceService {
     fn create_workspace(
         &self,
@@ -370,14 +370,16 @@ pub trait WorkspaceService {
     ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<Workspace>>>;
 }
 
-#[rpc(namespace = "api/v1", services = [WorkspaceService, SessionService])]
-pub struct ApiV1;
+#[rpc(service = "api/v1/session", api = SessionSvc)]
+pub trait SessionService {
+    fn whoami(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Option<User>>>;
+}
 ```
 
 服务端 crate：
 
 ```rust
-#[rpc(impl_of(ApiV1))]
+#[rpc(impl_of(WorkspaceSvc))]
 impl WorkspaceService for WorkspaceServiceImpl {
     fn create_workspace(
         &self,
@@ -391,237 +393,160 @@ impl WorkspaceService for WorkspaceServiceImpl {
 客户端 crate：
 
 ```rust
-let v1 = client.call::<ApiV1>();
-let workspace = v1
+let ws = client.call::<WorkspaceSvc>();
+let workspace = ws
     .create_workspace("alpha".to_string())
     .may_cancel_with(token)
     .await?;
 ```
 
-协议 crate 的 trait 方法签名与客户端调用点与重构前一致；改变的是 interface marker /
-服务端 attribute 的命名（`namespace` / `impl_of`，决策 5/6）和宏展开后的服务端实现。
+要点：
 
-### 3.2 粒度：方法级 Endpoint，而不是 service 级单端点
+- `service` 是**完整服务前缀**（`api/v1/workspace`），没有 namespace / interface
+  marker；版本段就是前缀的一部分；
+- `api = WorkspaceSvc` 由 trait 宏生成零大小 marker 与 `TrRpcInterface::PREFIX`；
+  客户端 `client.call::<WorkspaceSvc>()` 的代理只实现 `WorkspaceService`；
+- Call 的路由是 `CALL api/v1/workspace`；方法在 `WorkspaceServiceCall` 请求枚举的
+  变体里，不再各占一个 pattern；
+- 需要 VIEW / PULL / PUSH / DROP 的端点不走这个 trait，仍由 controller 的每方法
+  path 表达（§3.2）。
 
-| 维度 | 旧形状（service 级 + body enum） | 新建议（方法级 Endpoint） |
+### 3.2 粒度：Call = service endpoint + 方法表；非 Call = 每方法 endpoint
+
+2026-11-13 的决策 1 选择了「方法 = endpoint」，理由是 per-operation 路由、中间件、
+`RpcEndpointInfo` 与 405。2026-11-14 的讨论修正了 **Call 部分**：
+
+- Call 是 RPC 语义：`service` + `method` + payload，方法名放在请求体里更自然，也避免
+  方法名与资源路径的 `{param}` 混在同一层；一个 service 只占一条路径；
+- 方法级校验并没有丢失：请求枚举的**变体名是 body 的第一个值**，dispatcher 先读变体名，
+  选中方法的 `RpcMethodInfo`，用 `validate_request_types` 做方法级校验，通过后才解码
+  变体载荷、调用 impl。校验仍在业务 handler 之前；
+- `RpcEndpointInfo` 从「一个 endpoint 一个 operation」重构为「service endpoint + 方法
+  表」；operation 是表项，不是 path 段；
+- 非 Call（View / Head / Drop / Pull / Push / Post）保持每方法 endpoint：它们本身就是
+  资源 / 上下文 / 流式语义，per-method path、per-endpoint `RpcDataTypeInfo` 与 405
+  仍然合适。
+
+| 维度 | Call（现行） | 非 Call（现行） |
 | --- | --- | --- |
-| 路由规则 | `{namespace}/{service}` | `{namespace}/{service}/{operation}` |
-| 操作选择 | body enum 变体 | pattern 最后一段 |
-| 中间件粒度 | service | **operation** |
-| 端点元数据 | 无处安放 | 每方法一份 |
-| 405 | 自己不处理 | 框架统一 `405` + `Allow` |
-| `AcceptType` 类型校验 | 只能宽匹配 | 每端点可绑定请求类型 |
-| 与 controller 共存 | 需要独立 router | 同一 `RadixRouter` |
-| 兼容旧客户端 | 是 | **明确不要求**（决策 1） |
+| 路由 | `CALL /SERVICE_PREFIX` | `VIEW/PULL/PUSH/DROP/... /SERVICE_PREFIX/...` |
+| operation 位置 | 请求枚举变体（body） | pattern 段 |
+| 方法级校验 | dispatcher 读变体名后、payload 解码前 | router / middleware 在 handler 前 |
+| 端点元数据 | `RpcEndpointInfo { service, pattern, methods }` | per-endpoint `RpcDataTypeInfo` |
+| 方法级中间件 | 变体名读取后、payload 解码前 | endpoint 级中间件 |
+| 405 / `Allow` | service 级 `CALL` | per-method |
+| 类型 ID | 每方法 payload 类型 | 每方法 request / response 类型 |
+| path 占用 | 一个 service 一条 | 每方法一条 |
 
-结论：采用方法级 Endpoint。理由不是「新潮」，而是它正好复用了 `mptp_serving` 的
-既有能力；service 级单端点会重新造一个「路由表之外的分派器」，与
-`rpc-svc-macro-mptp-serving-20261112-2130.md` 已经确定的「方法 = 端点」方向相反。
+**不再生成 Call 的 `/{prefix}/{operation}` 别名**；Call 与旧 body enum 是同一个方向，
+但这次有生成的方法表 + 两阶段校验，不是旧 dispatcher 的“先解整个 body 再分派”。
 
-**不做兼容档（决策 1）**：不生成 `/{namespace}/{service}` 的 service 级别名端点，
-也不保留旧共享 `Call` enum；客户端与服务端一起升级。这样每个方法只有一套 handler，
-`AcceptType`、per-method metadata 和 405 都只有一条路径。
+### 3.3 路径与术语
 
-### 3.3 pattern 拼接：`constcat`（已验证，零框架改动）
-
-问题：`I` 的命名空间在 protocol crate 的 interface 宏里，`SERVICE_NAME` 在 trait 宏里，
-操作名在 service trait 里；`#[rpc(impl_of(I))]` 是第三次宏展开。三者分开写，
-无法用内建 `concat!`（只接受字面量）。
-
-但 `impl_of` 展开时，`I` 与 `impl` 类型都是**具体类型**，因此：
-
-```rust
-const PATTERN: &'static str = ::rpc_core_v1::x_deps::constcat::concat!(
-    <ApiV1 as ::rpc_core_v1::messaging::TrRpcInterface>::NAMESPACE,
-    "/",
-    <WorkspaceServiceImpl as WorkspaceService>::SERVICE_NAME,
-    "/",
-    "create_workspace",
-);
-```
-
-已验证：
-
-- `constcat 0.3.1 / 0.5 / 0.6.1` 都能对**具体类型的关联常量**做 const 拼接，
-  `no_std`、stable（MSRV 1.66）可用；
-- 外层函数可以是泛型（`install_into<C, S, R, A>`），只要 const 表达式里不出现
-  **泛型参数**；constcat 对 `<I as Trait>::CONST` 中 `I` 为泛型参数会报 `E0401`；
-- 生成的 `&'static str` 可直接传给现有的 `Endpoint::new`，**不需要改
-  `mptp_serving` 的 `Endpoint` pattern 类型**。
-
-备选（不推荐，除非未来需要运行期 / 多租户前缀）：
-
-1. **`Endpoint` 拥有 pattern**（`Cow<'static, str>` + `new_owned`），用
-   `concat_location` 在装配期拼 `String`。改动集中，但 `pattern()` 从
-   `&'static str` 变 `&str` 是公开 API 变更，且 `bind_endpoint` 里要先复制 key 再
-   move endpoint（否则 `E0505`）；
-2. **嵌套子 router**（interface router → service router）：`bind_router` 当前**不会**
-   执行子 router 的 `pipeline` / `root` / `state` / `cancel_source`；父层只调用
-   `child.match_route(...)` 并在第一个前缀命中后直接返回
-   （`mptp_serving/src/router_.rs:506-511`、`serve_handler_.rs:99`/`132`）。
-   因此子 router 上的中间件会静默不生效，不能用来承载 service 级中间件；
-3. **内建 `concat!`**：不接受关联常量，直接排除。
-
-`constcat` 的依赖落点：在 `rpc_core_v1` 的 `Cargo.toml` 加 `constcat`，并在
-`rpc_core_v1::x_deps` 重新导出（`pub use constcat;`）。生成代码通过
-`::rpc_core_v1::x_deps::constcat::concat!` 使用，下游协议 / 服务端 crate 不必各自声明
-依赖。这个引用方式已验证可跨 crate 解析宏。操作名进 pattern 前用
-`syn::ext::IdentExt::unraw()` 去掉 `r#` 前缀（legacy 的 hidden 模块命名也做了同样处理）。
-
-#### 3.3.1 术语与挂载点：`namespace` / `service` / `operation` / `pattern` / `mount`
-
-决策 6 要求协议层不再用 `path`。五个概念必须分开：
+Call 与非 Call 的术语分开：
 
 | 术语 | 谁定义 | 含义 |
 | --- | --- | --- |
-| `NAMESPACE` | interface marker 的 `namespace = "..."` | 协议命名空间（若干段），是**契约 key**，不是绝对 URL |
-| `SERVICE_NAME` | `#[rpc(service = "...")]` | 服务在 namespace 下的段 |
-| `OPERATION` | trait 方法名（`unraw` 后） | 操作段 |
-| `PATTERN` | `impl_of` 宏生成 | **相对 router 根**的路由规则 = `NAMESPACE/SERVICE_NAME/OPERATION` |
-| `MOUNT` | 装配期 router | 父 router 的前缀（`bind_router`）或根位置；协议宏不感知 |
+| `SERVICE_PREFIX` | `#[rpc(service = "api/v1/workspace")]` | 完整服务前缀；Call 的 pattern 就是它 |
+| `OPERATION` | trait 方法名（`unraw` 后） | Call：枚举变体 / 方法表键；非 Call：pattern 段 |
+| `PATTERN` | Call：trait 宏 / `impl_of`；非 Call：controller | 相对 router 根的路由规则 |
+| `MOUNT` | 装配期 router | 父 router 的前缀；协议宏不感知 |
 
-生效线上路径 = `MOUNT + "/" + PATTERN`（按 `RadixRouter` 的段规范化）。例如：
+生效线上路径 = `MOUNT + "/" + PATTERN`。例如：
 
-- 端点直接装在顶层 router（根）：`api/v1/workspace/create_workspace`；
-- 顶层 router 先被挂在 `tenant/a` 下：`tenant/a/api/v1/workspace/create_workspace`。
+- `CALL api/v1/workspace`（挂根）；
+- 挂在 `tenant/a` 下：`tenant/a/api/v1/workspace`；
+- 非 Call：`VIEW api/v1/room/list`。
 
-因此：
+`constcat` 不再需要参与 Call：`service` 是字面量，`PATTERN` 直接就是该
+`&'static str`；`impl_of` 不需要拼 `NAMESPACE + SERVICE_NAME + OPERATION`。
+非 Call 的 controller 路径仍是它自己的字面量。因此原计划为 Call 加到
+`rpc_core_v1` 的 `constcat` 依赖可以取消（除非后续非 Call 组合需要）。
 
-- 协议宏里的 `NAMESPACE` **不是**绝对 path，只是契约路由键的一段；这样它不会假装
-  知道 router 最终把服务挂在哪里；
-- `MOUNT` 由装配决定；若挂载点非空，客户端必须使用同一前缀（例如客户端连接 / 代理的
-  base prefix 配置），框架不做隐藏改写；
-- `PATTERN` 仍是 `&'static str`（`NAMESPACE` / `SERVICE_NAME` / `OPERATION` 都是编译期
-  常量）；`MOUNT` 由 router 在匹配时剥离，不参与宏展开；
-- 若把 RPC 端点装进**子 router** 再 `bind_router` 挂载，当前框架只执行**顶层** router
-  的 pipeline，子 router 的 pipeline / root 不会执行
-  （`mptp_serving/src/router_.rs:506-511`、`serve_handler_.rs:99`/`132`）；中间件应加在
-  顶层 router 上。这是既有语义，不是本次引入。
+#### 3.3.1 挂载点
 
-> 若未来要求「挂载点完全取代 `NAMESPACE` 参与线上路由」，需要把端点安装成**不含
-> `NAMESPACE` 的相对 pattern**，并补齐子 router 的 pipeline / root 语义；那会改变
-> `mptp_serving` 的嵌套 router 行为，建议单独立项。本文按「`NAMESPACE` 是契约 key、
-> `MOUNT` 是装配前缀」记录，避免把两者混成一个 `path`。
+- `SERVICE_PREFIX` 是契约 key，不是绝对 URL；`MOUNT` 由 router 决定；
+- 协议宏不知道最终挂载点；客户端必须使用与装配一致的 base prefix（如果有）；
+- 子 router 的 pipeline / root 当前不会执行（`mptp_serving/src/router_.rs`、
+  `serve_handler_.rs` 的既有语义），中间件应加在顶层 router；这不是本次引入。
+- 若未来要求「挂载点完全取代前缀参与线上路由」，需要把端点安装成不含前缀的相对
+  pattern，并补齐子 router 语义；建议单独立项。
 
-### 3.4 请求体：按方法参数个数选择 `()` / 单参数类型 / 多参数字段结构体
+### 3.4 请求载荷：0/1/多参 → 枚举变体
 
-旧形状的 body enum 有两个问题：方法不能独立类型校验；`impl_of` 在别的 crate 里
-无法命名 hidden 模块里的 enum（除非再引入一层 trait 隐藏方法）。denco 已经支持
-`()` 的编解码，因此新形状可以按参数个数直接选请求类型，不再为每个方法都造结构体：
+Call 的方法载荷仍按参数个数选择，但外面套一层请求枚举：
 
-| 参数个数 | 请求类型 | 说明 |
+| 参数个数 | 方法 payload | 枚举变体 |
 | --- | --- | --- |
-| 0 | `()` | 无业务参；客户端发 unit，服务端解码 unit 后调用 |
-| 1 | 该参数的 owned 类型 | `&str`→`String`、`&[u8]`→`Vec<u8>`、`&Copy`→标量、owned 业务类型原样 |
-| ≥2 | 隐藏结构体 `__Req_<operation> { f0, f1, … }` | 字段按位置命名，derive `TrEncodable`/`TrDecodable` |
+| 0 | `()` | unit 变体 `ListWorkspaces` |
+| 1 | 该参数的 owned 类型 | newtype 变体 `JoinRoom(u64)` |
+| ≥2 | `__Req_<operation> { f0, f1, … }` | newtype 变体 `CreateWorkspace(__Req_create_workspace)` |
 
 ```rust
 #[doc(hidden)]
-#[allow(non_camel_case_types)]
-pub mod __rpc_service_WorkspaceService {
-    /// 仅多参数方法需要；单参数直接用参数类型，0 参数用 `()`。
-    #[derive(TrEncodable, TrDecodable)]
-    pub struct __Req_create_session {
-        pub f0: u64,
-        pub f1: ::alloc::string::String,
-    }
-}
-
-pub trait WorkspaceService {
-    // 0 参 → ()
-    #[doc(hidden)]
-    type __Req_list_workspaces = ();
-    // 1 参 → 直接使用 owned 类型
-    #[doc(hidden)]
-    type __Req_create_workspace = ::alloc::string::String;
-    #[doc(hidden)]
-    type __Req_get_workspace = u64;
-    // ≥2 参 → hidden 结构体
-    #[doc(hidden)]
-    type __Req_create_session =
-        __rpc_service_WorkspaceService::__Req_create_session;
-    // ...
+#[derive(TrEncodable, TrDecodable)]
+pub enum WorkspaceServiceCall {
+    #[denco(rename = "list_workspaces")]
+    ListWorkspaces,
+    #[denco(rename = "create_workspace")]
+    CreateWorkspace(__Req_create_workspace),
+    #[denco(rename = "get_workspace")]
+    GetWorkspace(u64),
 }
 ```
 
 要点：
 
-- **多参数字段按位置命名 `f0`、`f1`…**，不沿用参数名。原因：`impl_of` 看到的是
-  **impl** 的方法签名，参数名允许与 trait 声明不同；按位置命名让 trait 宏与 impl 宏
-  无需共享参数名。
-- 借用参数按旧规则转 owned：`&str` → `String`、`&[u8]` / `&Vec<u8>` → `Vec<u8>`、
-  `&String` → `String`、`&Copy` 标量 → 标量；其它借用继续拒绝（旧分析器规则）。
-- `()` / 单参数类型的规则让 `AcceptType` / 类型校验中间件可以直接使用业务类型，
-  不必再为每个方法生成一个 wrapper。
-- 新增 / 重命名参数会改变该方法的 body（破坏兼容）；重命名 **Rust 参数名**不影响线上
-  字段名（多参时始终是 `f0`…），这是位置命名的额外好处。
-- **多参数字段顺序**：`f0`、`f1`… 的顺序 = trait 声明顺序。新增参数只能追加在末尾；
-  重排 / 删除属于破坏性变更，需要写进 README。
-
-**返回值 `()`（决策 7，denco 已实现）**：`RpcResult<()>` 直接走 `write_ok_async(&())`，
-客户端 `Rep = ()` 正常解码，不需要宏特例。
+- 变体线上名 = trait 方法名（`denco(rename)`）；重命名方法 = 线上破坏；
+- 多参字段按位置命名 `f0`、`f1`…；trait 宏与 impl 宏不需要共享参数名；
+- 借用参数转 owned：`&str` → `String`、`&[u8]` / `&Vec<u8>` → `Vec<u8>`、
+  `&String` → `String`、`&Copy` 标量 → 标量；其它借用拒绝；
+- `()` 的 `TrEncodable` / `TrDecodable` 已由 denco 提供（决策 7）；
+- **枚举只是分派信封**：不 derive `TrHasTypeId`，不作为 `Data_Type_Id`；每方法
+  payload 的类型才是线上类型；
+- 0 参变体没有 payload：dispatcher 读到变体名即完成；两阶段读取必须固定
+  「变体名 + payload」顺序，不能依赖完整枚举解码。
 
 ### 3.5 服务端代码生成的职责划分
 
-关键约束：**协议 crate 不应被迫依赖 `mptp_serving`**（客户端也要引用协议 crate；
-legacy 正是用 `abs_rpc_serv::service::TrRpcCallCtx` 把协议层与服务端运行时解耦）。
-因此分工如下：
+关键约束不变：**协议 crate 不应被迫依赖 `mptp_serving`**。
 
 | 展开点 | 所在 crate | 生成内容 | 依赖 |
 | --- | --- | --- | --- |
-| `#[rpc(service)]` trait | 协议 crate | `SERVICE_NAME`、每方法请求类型、关联类型桥、`impl Trait for ClientProxy` | `rpc_core_v1` |
-| `#[rpc(namespace, services)]` interface | 协议 crate | `TrRpcInterface`、`ServiceSelector` | `rpc_core_v1` |
-| `#[rpc(impl_of(I))]` impl | 服务端 crate | 每方法 `TrEndpointHandler` + `install_into` + 端点元数据 | `mptp_serving` + `rpc_core_v1` |
+| `#[rpc(service = "...", api = X)]` trait | 协议 crate | marker `X`、`TrRpcInterface::PREFIX`、`XxxServiceCall`、每方法 payload 关联类型、`impl Trait for ClientProxy` | `rpc_core_v1` |
+| `#[rpc(impl_of(X))]` impl | 服务端 crate | service dispatcher、方法表、一个 `Endpoint`、`install_into`、`RpcEndpointInfo` | `mptp_serving` + `rpc_core_v1` |
+| controller（非 Call） | 服务端 crate | 每方法 `Endpoint` + handler + `RpcDataTypeInfo` | `mptp_serving` |
 
-注意：`#[rpc(namespace = "...", services = [...])]` 里的 `services` 列表**仍然只做声明与校验**
-（与 legacy 一致），不驱动服务端注册；实际注册哪些 impl、注册到哪个 interface，由
-`#[rpc(impl_of(I))]` 的 `install_into` 决定。这样同一个 impl 可以分别挂到多个
-interface（`mptp_cs_smoke` 的 `WorkspaceServiceImpl` 同时挂 `ApiV1` / `ApiV2`）。
-
-关联类型桥（trait 宏生成，用于让 `impl_of` 在**另一个 crate** 里命名请求类型）：
+- 不再有 interface marker / `services` 列表 / `SERVICE_NAME`；`PREFIX` 就是完整前缀；
+- 请求 payload 的关联类型桥仍然需要 `associated_type_defaults`：
 
 ```rust
 pub trait WorkspaceService {
-    const SERVICE_NAME: &'static str = "workspace";
-
-    #[doc(hidden)]
-    type __Req_create_workspace = ::alloc::string::String;
     #[doc(hidden)]
     type __Req_list_workspaces = ();
     #[doc(hidden)]
-    type __Req_get_workspace = u64;
+    type __Req_create_workspace = __rpc_service_WorkspaceService::__Req_create_workspace;
     #[doc(hidden)]
-    type __Req_create_session =
-        __rpc_service_WorkspaceService::__Req_create_session;
-
+    type __Req_get_workspace = u64;
     // ... 用户方法
 }
 ```
 
-- `associated_type_defaults` 是 nightly feature；协议 crate 需要
-  `#![feature(associated_type_defaults)]`；
-- 实现者（包括 `ClientProxy` 与用户的 `WorkspaceServiceImpl`）**不需要**重复写这些
-  关联类型；默认值自动继承；
-- `impl_of` 侧写
-  `let req: <Impl as WorkspaceService>::__Req_create_workspace = ...;`，
-  跨 crate 使用已验证可编译；
-- 这些关联类型是 `#[doc(hidden)]`，并在 trait 文档中注明「不要覆盖」。
-
-> **已决策（决策 2）**：接受协议 crate 多开 `associated_type_defaults`，采用关联类型
-> 方案。原备选的 PhantomData 隐藏方法方案（每方法一个
-> `fn __rpc_req_<op>_() -> PhantomData<__Req_<op>>` + `decode_body_tagged_async`）
-> 不再采用，避免在 `rpc_core_v1` 里增加只为绕过 feature 而存在的 API。
+- `impl_of` 在另一个 crate 里用
+  `<Impl as WorkspaceService>::__Req_create_workspace` 解码；
+- 这些关联类型是 `#[doc(hidden)]`，并在 trait 文档里注明「不要覆盖」；
+- `cfg` 从 trait 方法继承到 payload / 枚举变体 / 客户端方法 / 服务端方法表项，两端
+  必须来自同一个协议 crate 的条件编译。
 
 ### 3.6 客户端代码生成
 
-trait 宏为 `ClientProxy` 生成实现（legacy 已经验证过的形状）：
+trait 宏为 `ClientProxy` 生成实现：
 
 ```rust
-impl<'__a, __C, __I> WorkspaceService
-    for ::rpc_core_v1::client::ClientProxy<'__a, __C, __I>
+impl<'__a, __C> WorkspaceService
+    for ::rpc_core_v1::client::ClientProxy<'__a, __C, WorkspaceSvc>
 where
     __C: ::rpc_core_v1::client::TrRpcClientConfig + Send + Sync + 'static,
-    __I: ::rpc_core_v1::messaging::TrRpcInterface + Send + Sync + 'static,
 {
     fn create_workspace(
         &self,
@@ -630,103 +555,88 @@ where
         '_,
         MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<Workspace>,
     > {
-        ::rpc_core_v1::client::call_unary_async::<__C, __I, _, Workspace>(
+        ::rpc_core_v1::client::call_envelope_async::<__C, WorkspaceSvc, _, Workspace>(
             self,
-            "workspace/create_workspace",
-            name,
+            "create_workspace",
+            WorkspaceServiceCall::CreateWorkspace(__Req_create_workspace { f0: name }),
         )
     }
 }
 ```
 
-- `call_unary_async` 内部用 `concat_location(I::NAMESPACE, service)` 拼出
-  `api/v1/workspace/create_workspace`（`proxy_.rs:167`；该函数名保留既有 API，
-  语义是「namespace + 相对路由键」），客户端不需要新的调用入口；
-- 相对路由键 `"workspace/create_workspace"` 由宏在展开期用两个**字面量**拼成，
-  不涉及运行期分配（除了 `call_unary_async` 原有的 `format!`）；
-- trait 若声明 `Send + Sync` supertrait，客户端 impl 需要额外的
-  `SharedConn: Sync` 约束（legacy 的 `requires_send_sync_` 逻辑），照旧保留；
-- 返回类型重写成全限定的 `TrMayCancel` / `RpcResult`，并保留用户额外 bound（legacy
-  的 `return_type_` 逻辑）；若用户写 `+ Send`，生成的 future 不满足，编译期报错，
-  README 明确不支持。
+- 路径 = `<WorkspaceSvc as TrRpcInterface>::PREFIX`（`api/v1/workspace`），不再有
+  per-method 相对路由键；
+- `call_envelope_async` 写 `Body_Type`、`Data_Type_Id = 方法 payload ID`、
+  `Accept = 方法响应 ID`，body 是枚举变体；响应按 `Rep` 解码并校验类型头；
+- 枚举变体在宏展开期构造，不涉及运行期映射表；`format!` 只用于路径拼接；
+- `Send + Sync` supertrait 的额外约束照旧保留；
+- 返回类型全限定为 `TrMayCancel` / `RpcResult`；用户额外 bound（如 `+ Send`）不满足
+  时编译期报错，README 明确不支持。
 
-### 3.7 错误与取消
+### 3.7 错误、校验与取消
 
-服务端每方法 handler 的大致形状：
+服务端 dispatcher 的流程：
 
-```rust
-let result = <Impl as Trait>::method(&*self.svc_, args...)
-    .may_cancel_with(ctx.cancel().child_token())
-    .await;
-
-match result {
-    Ok(value) => write_ok_async(ctx.session_mut(), &value).await?,
-    Err(error) => {
-        let (status, message) = error.into_reply_parts();
-        write_status_async(ctx.session_mut(), status, message).await?;
-    }
-}
+```text
+1. 读 body 第一个值：variant name
+2. match → RpcMethodInfo { operation, data: RpcDataTypeInfo }
+3. validate_request_types(CALL, headers, &method.data)
+      Body_Type / Data_Type_Id / Accept / policy
+      缺失或错误 → 400 / 406，在 payload 解码前
+4. 解码该变体的 payload（() / T / __Req_*）
+5. 调用 impl；按 method.data.response_body 写响应头
 ```
 
-- `RpcError::into_reply_parts()` 保证 `RpcError::Service { message }` 原样写出，
-  不带 `Display` 前缀（`error_.rs:130` 的既有测试覆盖）；
-- 解码失败目前走 `ServeError` → 收尾兜底 `500`；与 controller 形态现状一致。
-  后续若要细分成 `400`，在 handler 里 catch 解码错误并写
-  `Status::BadRequest` 即可，不改变宏接口；
-- 取消是协作式的：handler 只取消**方法返回的 future**；业务实现内部是否观察令牌由
-  实现决定（与旧 dispatch 语义一致，见 `rpc-svc-macro-mptp-serving-20261112-2130.md`
-  §3.5/§3.6）；
-- `decode_body_async` 当前内部用 `NonCancellableToken`
-  （`rpc_core_v1/src/serving/body_.rs:59`）；若要求「请求级取消能中断解码」，需要给
-  body helper 增加可取消变体，属后续增强，不是本次恢复的阻塞项；
-- **`RpcResult<()>`（决策 7，已落地）**：denco 已为 `()` 实现 `TrEncodable` /
-  `TrDecodable`，`write_ok_async(ctx.session_mut(), &())` 与客户端 `Rep = ()` 解码都走
-  普通路径，宏不需要为「空成功体」生成特例；`impl_of` 的测试可以直接覆盖 `RpcResult<()>`。
+- 未知变体 → 404（或团队约定状态），在 payload 解码前；连接仍可用；
+- `Data_Type_Id` 与变体不匹配 → 406；`Accept` 存在但不匹配 → 406；
+- payload 解码失败 → 400（dispatcher 里 catch，而不是落到兜底 500）；
+- 业务错误仍走 `RpcError::into_reply_parts()`；`RpcError::Service { message }` 原样
+  写出；
+- 取消是协作式的：dispatcher 只取消**方法返回的 future**；业务实现内部是否观察令牌
+  由实现决定；
+- `decode_body_async` 当前内部用 `NonCancellableToken`；若要求请求级取消中断解码，
+  需要可取消变体，属后续增强；
+- `RpcResult<()>` 走普通 `write_ok_async(&())`，不需要特例。
 
 ### 3.8 元数据、中间件与共存
 
-生成的端点用 `bind_endpoint` 挂进 router，因此：
-
-- 与 controller 生成的端点（用 `full_path_lit_` 的 `interface/method` pattern）、自由函数
-  端点、手写端点完全同构；`use_middleware` / `with_group_metadata` / `with_error_hook`
-  都照常作用；
-- **新增 `RpcEndpointInfo`（决策 4）**，放在 `rpc_core_v1::serving`（协议 crate 已经依赖
-  `rpc_core_v1`，不增加新依赖）：
+`RpcEndpointInfo` 重构为 service 级 + 方法表：
 
 ```rust
 #[derive(Clone, Copy, Debug)]
 pub struct RpcEndpointInfo {
-    /// 契约命名空间（不含 router 挂载点）。
-    pub namespace: &'static str,
-    /// service 段。
+    /// 完整服务前缀，如 `api/v1/workspace`。
     pub service: &'static str,
-    /// operation 段（trait 方法名，unraw 后）。
-    pub operation: &'static str,
-    /// 相对 router 根的 pattern（namespace/service/operation）。
+    /// 相对 router 根；Call 的 pattern 与 service 相同。
     pub pattern: &'static str,
+    /// 方法表：operation + 方法级 RpcDataTypeInfo。
+    pub methods: &'static [RpcMethodInfo],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RpcMethodInfo {
+    pub operation: &'static str,
+    pub data: RpcDataTypeInfo,
 }
 ```
 
-中间件可以：
-
-```rust
-let info = endpoint.metadata().get::<RpcEndpointInfo>();
-if info.is_some_and(|i| i.operation == "create_workspace") {
-    // 方法级策略：限流 / 审计 / 指标
-}
-```
-
-- `impl_of` 生成的端点默认挂上这个标记；用户也可以在自己的中间件里读
-  `endpoint.pattern()`，但结构化的 `RpcEndpointInfo` 更稳定（不依赖字符串解析）；
-- pattern 冲突：同一 namespace 下两个 service 的 `SERVICE_NAME` 相同且 operation 相同，会落到
-  同一 `pattern + CALL`；`bind_endpoint` 按插入顺序取第一个，不报冲突
-  （`endpoint_.rs:151-161`）。这与 controller 的既有约定一致；README 需要写明
-  「同一 namespace 下 service 名应唯一」。可选的改进是在 `install_into` 里做一次
-  运行期冲突检查，但那需要 router 暴露查询能力，本文不展开。
+- `impl_of` 生成的 Call endpoint 挂这个标记；非 Call 端点继续用 per-endpoint
+  `RpcDataTypeInfo`（或 `RpcEndpointInfo.methods` 只有一项）；
+- **service 级中间件**在 router 层，读 `RpcEndpointInfo.methods` 做整组策略；
+- **方法级中间件**在 dispatcher 读到变体名后、payload 解码前执行；框架提供
+  `RpcMethodInfo` / `DispatchContext`；这与 HTTP/JSON-RPC 的“解析 operation 后做
+  方法级策略”一致；
+- 405 / `Allow` 是 service 级 `CALL`；Call trait 只有 CALL，per-method 方法集不存在；
+  需要 VIEW/POST 的方法走 controller 的 per-method endpoint；
+- 冲突规则：同一 `pattern + MethodSet` 唯一；`CALL api/v1/workspace` 与
+  `VIEW api/v1/workspace/list` 是不同 pattern + 方法，可共存；若 controller 也绑定
+  `CALL api/v1/workspace` 才是冲突；
+- `bind_endpoint` 同 pattern 同方法仍是先到先得（G-10）；README 要求命名约定 +
+  装配期 review，不做运行期穷举。
 
 ### 3.9 装配形状
 
-**最小形状（推荐先落地）：**
+**最小形状：**
 
 ```rust
 let router = RadixRouter::<SrvCfg, ConnState, ()>::new_with_state_and_request(
@@ -734,228 +644,132 @@ let router = RadixRouter::<SrvCfg, ConnState, ()>::new_with_state_and_request(
     state,
 );
 let router = router.use_middleware(PrincipalMiddleware);
-let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(
+let router = __rpc_impl_of_WorkspaceServiceImpl_via_WorkspaceSvc::install_into(
     router,
     std::sync::Arc::new(WorkspaceServiceImpl::new_()),
 )?;
-let router = __rpc_impl_of_SessionServiceImpl_via_ApiV1::install_into(
+let router = __rpc_impl_of_SessionServiceImpl_via_SessionSvc::install_into(
     router,
     std::sync::Arc::new(SessionServiceImpl::new_()),
 )?;
 let servlet = mptp_smux::serving::MptpServlet::<SrvCfg, _>::new(router);
 ```
 
-**人体工学 API：独立的 `rpc_serv_ext` crate（决策 3）。**
-
-目标是把「按 interface 分组装配」的糖放在**独立 crate**，并且不让协议 crate / 业务
-impl crate 依赖它。采用**闭包式 builder**，不生成跨 crate 的 `TrRpcServiceOf` impl：
+每个 marker 一个 installer；一个 installer 绑定**一个** service 路径 + 方法表。
+同一 impl 挂多个前缀时，每个前缀一个 marker / installer：
 
 ```rust
-// 新 crate：rpc_serv_ext（工作名）
-// 依赖：rpc_core_v1 + mptp_serving；不依赖 rpc_svc_macro，也不依赖协议 crate。
-pub struct InterfaceBuilder<I, C, S, R> {
-    router_: RadixRouter<C, S, R>,
-    _namespace_: core::marker::PhantomData<I>,
-}
-
-pub fn interface<I, C, S, R>(
-    router: RadixRouter<C, S, R>,
-) -> InterfaceBuilder<I, C, S, R>
-where
-    I: ::rpc_core_v1::messaging::TrRpcInterface,
-{
-    InterfaceBuilder { router_: router, _namespace_: core::marker::PhantomData }
-}
-
-impl<I, C, S, R> InterfaceBuilder<I, C, S, R> {
-    pub fn service(
-        self,
-        install: impl FnOnce(
-            RadixRouter<C, S, R>,
-        ) -> Result<RadixRouter<C, S, R>, ::mptp_serving::x_deps::matchit_route::InsertError>,
-    ) -> Result<Self, ::mptp_serving::x_deps::matchit_route::InsertError>;
-    pub fn finish(self) -> RadixRouter<C, S, R>;
-}
+let router = __rpc_impl_of_DiagnosticsServiceImpl_via_DiagV1::install_into(router, diag.clone())?;
+let router = __rpc_impl_of_DiagnosticsServiceImpl_via_DiagV2::install_into(router, diag)?;
 ```
 
-使用：
+**人体工学 API：独立的 `rpc_serv_ext` crate（决策 3 不变）。**
+
+没有 namespace / interface marker 后，builder 按**前缀字符串**分组，而不是按
+interface 类型：
 
 ```rust
-let router = rpc_serv_ext::interface::<ApiV1>(router)
-    .service(|r| __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(r, ws))?
-    .service(|r| __rpc_impl_of_SessionServiceImpl_via_ApiV1::install_into(r, ss))?
+let router = rpc_serv_ext::prefix("api/v1", router)
+    .service(|r| __rpc_impl_of_WorkspaceServiceImpl_via_WorkspaceSvc::install_into(r, ws))?
+    .service(|r| __rpc_impl_of_SessionServiceImpl_via_SessionSvc::install_into(r, ss))?
     .finish();
 ```
 
-依赖矩阵（这是决策 3 的核心）：
+- builder 只做分组与 `prefix` 校验，不重写 pattern；
+- 依赖矩阵不变：协议 crate 只依赖 `rpc_core_v1`；业务 impl crate 依赖
+  `rpc_core_v1` + `mptp_serving`；`rpc_serv_ext` 只在装配 crate 按需使用；
+- `prefix("api/v1")` 不参与 service 路径拼接（service 已经是完整前缀），只用于
+  装配期分组 / 检查；如果不需要分组，直接调 `install_into` 即可。
 
-| crate | 依赖 | 说明 |
-| --- | --- | --- |
-| 协议 crate | `rpc_core_v1` | trait / interface / 请求结构体 / client impl；**不依赖** `mptp_serving`、`rpc_serv_ext` |
-| 业务 impl crate | `rpc_core_v1` + `mptp_serving` | `#[rpc(impl_of)]` 生成的 handler 需要 `mptp_serving`；**不依赖** `rpc_serv_ext` |
-| 装配 crate（composition root） | `rpc_serv_ext` | 只有这里按需使用 builder 糖 |
-| `rpc_core_v1` | 不加 `mptp_serving` | 保持现有依赖图；`RpcEndpointInfo` 仍放这里（新增类型，不新增依赖） |
+### 3.10 一个 trait 的方法如何映射到 service endpoint + 方法表
 
-小项目里「业务 impl crate」与「装配 crate」经常是同一个 crate；此时它会多一个
-`rpc_serv_ext` 依赖。这是**按需**选择（不用 builder 就不加），而不是像把 trait 放进
-`rpc_core_v1` 那样对所有协议 / 业务 crate 强制生效。
+#### 3.10.1 身份
 
-`interface::<I>()` 只做分组与 `I: TrRpcInterface` 的编译期校验，**不重写 pattern**，
-也不读取 `I::NAMESPACE` 去改写路由；真正的绑定仍由 `impl_of` 生成的
-`install_into` 完成（constcat 在具体类型上展开，不受 builder 泛型影响）。因此 builder
-是纯装配糖，去掉它不影响语义。
-
-> 备选（不采用）：在 `impl_of` 里生成 `impl TrRpcServiceOf<I> for Impl`，让 builder 支持
-> `.add_service::<Impl>(svc)`。它更好看，但会把 `rpc_serv_ext`（或至少它的 trait）变成
-> 业务 impl crate 的必选依赖，与决策 3 的「减少业务 crate 依赖」相冲突。
-
-### 3.10 一个 trait 的多个方法如何对应多个访问点
-
-这是本方案的核心关系模型：**trait 不是一条路由，而是一组访问点的契约与共同 key**。
-
-#### 3.10.1 身份三元组
-
-每个 RPC 访问点由三个键唯一确定：
+Call 的访问点由两个键确定：
 
 | 键 | 来源 | 例子 |
 | --- | --- | --- |
-| `NAMESPACE` | interface marker `namespace = "..."` | `api/v1` |
-| `SERVICE_NAME` | service trait 的 `#[rpc(service = "...")]` | `workspace` |
-| `OPERATION` | trait 方法名（`unraw` 后） | `create_workspace` |
+| `SERVICE_PREFIX` | trait 的 `service = "..."` / marker `PREFIX` | `api/v1/workspace` |
+| `OPERATION` | trait 方法名（unraw） | `create_workspace` |
 
-- `(NAMESPACE, SERVICE_NAME)` 是「这个 RPC API / service」的身份；
-- `OPERATION` 是「这个 service 的哪一个方法」的身份；
-- 访问点 `PATTERN = NAMESPACE/SERVICE_NAME/OPERATION`（相对 router 根，§3.3.1）。
+- `SERVICE_PREFIX` 是 service 的身份；`OPERATION` 是方法表项的身份；
+- wire 路由 = `CALL SERVICE_PREFIX`；operation 在请求枚举 / 方法表里，不在 path；
+- 非 Call 则是 `SERVICE_PREFIX/...` 的 per-method pattern，operation 在 path。
 
-因此 service 不是第四条路由，而是这组访问点的**公共 key**；router 仍然只看到一条条
-具体 endpoint，不需要理解 trait。
+#### 3.10.2 编译期：一次展开
 
-#### 3.10.2 编译期：一次展开、一一对应
+`#[rpc(impl_of(WorkspaceSvc))] impl WorkspaceService for WorkspaceServiceImpl`：
 
-`#[rpc(impl_of(ApiV1))] impl WorkspaceService for WorkspaceServiceImpl` 展开时：
+1. 枚举 impl 块的 `&self` 方法；
+2. 生成**一个** service handler + 一个 `Endpoint`（pattern = `SERVICE_PREFIX`）+
+   方法表；
+3. 每个方法生成一个 `RpcMethodInfo`（operation + `RpcDataTypeInfo`）；
+4. 生成一个 `match` 变体 → 调用 impl 的分派；
+5. 所有方法共享同一个 `Arc<WorkspaceServiceImpl>`；
+6. 生成一个 `install_into`。
 
-1. 枚举 impl 块中属于该 trait 的所有 `&self` 方法；
-2. 每个方法生成一个 handler + 一个 `Endpoint`（pattern 由三元组拼成）；
-3. 所有 handler 共享同一个 `Arc<WorkspaceServiceImpl>`；
-4. 所有 `Endpoint` 由同一个 `install_into` 安装；
-5. 生成代码全部在同一个 hidden 模块里（模块名含 impl 与 interface）。
+trait 宏侧同时生成 `WorkspaceServiceCall` 枚举与客户端代理，因此
+「trait 方法 ↔ 枚举变体 ↔ 方法表项 ↔ 客户端方法」是同一份宏输入的一一对应：
 
-所以「trait 方法 ↔ 访问点」的关系不是运行期查表，而是**编译期生成的一一对应**：
-
-| trait 项 | 是否访问点 | 请求类型 | operation |
+| trait 项 | 是否方法表项 | payload | 变体 |
 | --- | --- | --- | --- |
-| `&self` 方法（0 参） | 是 | `()` | 方法名 |
-| `&self` 方法（1 参） | 是 | owned 参数类型 | 方法名 |
-| `&self` 方法（≥2 参） | 是 | `__Req_<op>` 结构体 | 方法名 |
+| `&self` 方法（0 参） | 是 | `()` | unit |
+| `&self` 方法（1 参） | 是 | owned 参数类型 | newtype |
+| `&self` 方法（≥2 参） | 是 | `__Req_<op>` | newtype |
 | 关联 const / type | 否 | — | — |
-| supertrait（如 `Send + Sync`） | 否 | — | — |
-| 非 `&self` 方法 | 拒绝 | — | — |
-| 带默认实现的 trait 方法 | 拒绝（v1） | — | — |
+| 非 `&self` / 默认实现 | 拒绝 | — | — |
 
-Rust 的类型系统负责兜底：trait 增加一个方法，impl 必须实现它；宏在同一个 impl 块上
-展开，看到的方法集合就是生成的端点集合，不会出现「trait 有方法、服务端漏挂」的情况。
-客户端的 `impl Trait for ClientProxy` 由同一个 trait 宏生成，同样是「每方法一个代理
-方法」，因此两端的 operation 集合天然一致。
+默认实现必须在分析层拒绝：`impl_of` 枚举 impl 块；如果 trait 方法有默认实现且 impl
+没有重写，impl 块里不会出现该方法，方法表 / 枚举会缺项，而客户端代理仍会生成。
+helper 逻辑放固有 impl 或普通 trait。
 
-**默认实现必须在分析层拒绝**：`impl_of` 依赖 impl 块枚举方法；如果 trait 方法有默认
-实现且 impl 没有重写，impl 块里就不会出现该方法，服务端会漏挂端点，而客户端的 trait
-宏仍然会生成对应代理方法。为保持两端一致，`#[rpc(service)]` 的方法必须是纯声明
-（无 body）；helper 逻辑放在 impl 类型自己的固有 impl 或另一个普通 trait 里。
-supertrait 的方法也不属于本 service 的 operation，需要显式写进 service trait。
+`cfg` 从 trait 方法继承到 payload / 枚举变体 / 客户端方法 / 方法表项；两端必须一致。
 
-带 `#[cfg]` 的方法：分析层把方法上的 `cfg` 继承到请求类型 / 关联类型 / 客户端代理方法；
-`impl_of` 把 impl 方法上的同一组 `cfg` 继承到 handler / endpoint 绑定。两端的 cfg 必须
-一致（它们来自同一个协议 crate 的条件编译），否则会退化成「一端有、一端没有」。
-
-#### 3.10.3 运行期：service key 在元数据里，而不是在 router 里
-
-每个生成的 `Endpoint` 挂：
+#### 3.10.3 运行期：operation 在方法表 / body 里
 
 ```rust
 RpcEndpointInfo {
-    namespace: "api/v1",
-    service: "workspace",
-    operation: "create_workspace",
-    pattern: "api/v1/workspace/create_workspace",
+    service: "api/v1/workspace",
+    pattern: "api/v1/workspace",
+    methods: &[
+        RpcMethodInfo { operation: "create_workspace", data: ... },
+        RpcMethodInfo { operation: "list_workspaces", data: ... },
+    ],
 }
 ```
 
-中间件可以按三个粒度分组：
+- service 级策略：读 `RpcEndpointInfo.service` / `methods`，在 router 层执行；
+- 方法级策略：dispatcher 读到变体名后，选中 `RpcMethodInfo`，在 payload 解码前执行；
+- 405 / `Allow`：service 级 `CALL`；Call trait 的方法都是 CALL；
+- router 仍然只看到一条 Call endpoint；它不需要理解 trait，方法表由 dispatcher 持有。
 
-- `operation`：单方法策略（限流键、审计、指标）；
-- `service`：整组方法策略（例如「workspace 服务只允许某个角色」）；
-- `namespace`：版本 / 租户级策略。
+#### 3.10.4 注册单元
 
-router 本身不为 service 增加任何结构：它只按 pattern 匹配。service 的「实体」在装配期
-由 generated installer 表示，在运行期由 `(namespace, service)` 元数据表示。
+`install_into(router, Arc<Impl>)`：
 
-> 可选增强（不在本期范围）：`impl_of` 额外生成一个静态的
-> `RpcServiceDef { namespace, service, operations: &[RpcOperationDef] }`，用于内省、
-> 文档生成、测试「trait 方法数 = 端点数」。它不需要参与路由，也不改变本节的关联模型；
-> 若团队需要，再加。
-
-#### 3.10.4 注册单元：一个 installer = 一个 service 的全部访问点
-
-`install_into(router, Arc<Impl>)` 是唯一（宏生成的）服务端注册入口：
-
-- 一次绑定该 service 的全部 operation endpoint；
-- 消费式 `RadixRouter`：任一端点绑定失败（pattern 冲突 / 非法）就返回 `Err`，router 被
-  drop，**不会留下半个 service**；
-- 同一个 `Arc<Impl>` 被所有 operation handler 共享，因此 trait 方法看到的是同一份
-  业务状态（与 legacy 的 service 实例语义一致）。
-
-同一 impl + trait 注册到多个 interface 时，每个 interface 生成一个独立 installer 和
-一组 endpoint；`NAMESPACE` 不同，`(namespace, service)` 不同，互不覆盖：
-
-```rust
-let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, ws.clone())?;
-let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV2::install_into(router, ws)?;
-```
-
-同一 impl 实现多个 trait 时，每个 trait 是一个独立 service（不同的 `SERVICE_NAME`），
-各自 installer；它们可以共享同一个 `Arc<Impl>`，也可以各自构造。
+- 一次绑定一个 service endpoint（Call）或一组 per-method endpoint（非 Call）；
+- 消费式 `RadixRouter`：绑定失败返回 `Err`，不留下半个 service；
+- 同一 `Arc<Impl>` 被所有方法 / handler 共享；
+- 同一 impl + trait 挂多个前缀：每个前缀一个 marker / installer，`SERVICE_PREFIX`
+  不同，互不覆盖。
 
 #### 3.10.5 客户端：调用点与访问点同源
 
-`client.call::<ApiV1>()` 返回的 `ClientProxy` 实现该 interface 下的每个 service trait；
-每个代理方法体把 `(SERVICE_NAME, OPERATION)` 作为相对路由键交给
-`call_unary_async`，`NAMESPACE` 由 `I` 提供。因此：
-
 ```text
-WorkspaceService::create_workspace  ──►  api/v1/workspace/create_workspace
-WorkspaceService::list_workspaces   ──►  api/v1/workspace/list_workspaces
+WorkspaceService::create_workspace
+  ──►  WorkspaceServiceCall::CreateWorkspace(__Req_create_workspace)
+  ──►  CALL api/v1/workspace
+  ──►  Data_Type_Id = __Req_create_workspace, Accept = Workspace
 ```
 
-调用点是 trait 方法，访问点是 pattern；两者由同一份宏输入推导，不需要手写映射表。
-
-#### 3.10.6 为什么不是「一个 service 一条路由 + body 选方法」
-
-| 维度 | service 级单访问点 | 方法级访问点（本方案） |
-| --- | --- | --- |
-| trait ↔ 路由 | 1 : 1 | 1 : N（按 `(namespace, service)` 分组） |
-| 方法选择 | body enum 变体 | pattern 最后一段 |
-| 中间件看到的 operation | 解码 body 之后才知道 | 进入 handler 前就知道 |
-| 每方法 metadata / 405 / 类型校验 | 做不了或只能宽匹配 | 每端点独立 |
-| 路由匹配依赖 body | 是（必须先解码） | 否 |
-| 与 controller / 手写端点共存 | 需要独立分派器 | 同一 `RadixRouter` |
-
-service 级单访问点的唯一优点是「trait 与路由一一对应、关系简单」；代价是重新引入
-「路由之外的第二层分派器」，这正是重构已经删除的模型。ASP.NET Core 的 code-first 也
-是 service → 多个 method endpoint，而不是 service 一个 endpoint（§2.4）。
-
-#### 3.10.7 冲突与命名
-
-- 同一个 trait 内方法名唯一（Rust 保证），因此 operation 不会重复；
-- 两个 trait 使用相同 `SERVICE_NAME` + 相同 `NAMESPACE` 且方法同名时，pattern 会冲突；
-  当前 `RadixRouter::bind_endpoint` 不报冲突（同 pattern 同方法先到先得），需要文档约定
-  「同一 namespace 下 service 名唯一」，或在测试 / 装配层做一次 pattern 唯一性检查；
-- 同一 impl 的同一 trait 挂到不同 namespace 是合法的，不构成冲突；
-- 重命名 trait 方法 = 改 operation 段 = 改线上路由；本次不引入
-  `#[rpc(name = "...")]`，需要稳定路由时应在 trait 设计阶段固定方法名。
-
----
+调用点是 trait 方法，访问点是 service 路径 + 方法表项；两者由同一份 trait 宏输入
+推导，不需要手写映射表。
 
 ## 4. 将要实现的形状（样式代码）
+
+> **2026-11-14 注**：本章样式代码仍按 2026-11-13 的 interface marker + 每方法 Call
+> path 编写，**不是现行形状**。Call 的现行设计（service 级路径 + `XxxServiceCall`
+> 枚举 + 方法表）见 §3 与 §12；下一轮应整体替换本章示例。
 
 > 以下代码是**目标形状**，不是当前可编译代码；`...` 表示省略。
 
