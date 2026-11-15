@@ -23,8 +23,9 @@ pub use body_::{
 };
 pub use config::{DefaultServingAllocConfig, TrServingAllocConfig, TrServingConfig};
 pub use types_::{
-    AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, TrDataTypeId,
-    TypeHeaderError, TypePolicy, TypeRejection, apply_request_type_headers,
+    AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, RpcMethodInfo,
+    RpcServiceInfo, TrDataTypeId, TypeHeaderError, TypePolicy, TypeRejection,
+    apply_request_type_headers,
     apply_response_type_headers, read_accept, read_body_codec, read_data_type_id, typed_response,
     validate_request_types, validate_response_types, write_accept, write_body_codec,
     write_data_type_id,

@@ -629,6 +629,129 @@ impl RpcDataTypeInfo {
     }
 }
 
+/// 一个 service 方法在类型头协议里的元信息。
+///
+/// Call 的 service 级 endpoint 把方法放在请求枚举里；每个方法有自己的
+/// `request_body` / `response_body` / `accept` / `policy`。运行时先读变体名，选中本
+/// 结构，再调用 [`validate_request_types`]。
+///
+/// # Examples
+///
+/// ```
+/// use rpc_core_v1::stream::{
+///     BodyCodec, DataTypeId, RpcDataTypeInfo, RpcMethodInfo, TypePolicy,
+/// };
+///
+/// let data = RpcDataTypeInfo::new(BodyCodec::MsgPack)
+///     .with_request_body(DataTypeId::from_nonzero_u64(0x10))
+///     .with_response_body(DataTypeId::from_nonzero_u64(0x11))
+///     .with_policy(TypePolicy::Strict);
+/// let method = RpcMethodInfo::new("create", data);
+/// assert_eq!(method.operation(), "create");
+/// assert_eq!(method.data().body_codec(), BodyCodec::MsgPack);
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RpcMethodInfo {
+    /// 方法名（wire 上的 operation，即请求枚举变体名）。
+    operation_: &'static str,
+
+    /// 方法级类型元信息。
+    data_: RpcDataTypeInfo,
+}
+
+impl RpcMethodInfo {
+    /// 由方法名与类型元信息构造。
+    pub const fn new(operation: &'static str, data: RpcDataTypeInfo) -> Self {
+        RpcMethodInfo {
+            operation_: operation,
+            data_: data,
+        }
+    }
+
+    /// 方法名（请求枚举变体名）。
+    pub const fn operation(&self) -> &'static str {
+        self.operation_
+    }
+
+    /// 方法级类型元信息。
+    pub const fn data(&self) -> &RpcDataTypeInfo {
+        &self.data_
+    }
+}
+
+/// 一个 service 级 endpoint 的方法表。
+///
+/// 这是 Call 请求枚举模式的端点元信息：一个 `CALL /<prefix>` endpoint 对应 N 个方法；
+/// 每个方法在 [`methods`](Self::methods) 里有一项。非 Call endpoint 可以不用本类型，
+/// 继续用 [`RpcDataTypeInfo`]。
+///
+/// # Examples
+///
+/// ```
+/// use rpc_core_v1::stream::{
+///     BodyCodec, DataTypeId, RpcDataTypeInfo, RpcMethodInfo, RpcServiceInfo,
+/// };
+///
+/// const METHODS: &[RpcMethodInfo] = &[RpcMethodInfo::new(
+///     "create",
+///     RpcDataTypeInfo::new(BodyCodec::MsgPack)
+///         .with_request_body(DataTypeId::from_nonzero_u64(0x10))
+///         .with_response_body(DataTypeId::from_nonzero_u64(0x11)),
+/// )];
+///
+/// let info = RpcServiceInfo::new("im/v1/room", "im/v1/room", METHODS);
+/// assert_eq!(info.service(), "im/v1/room");
+/// assert_eq!(info.methods().len(), 1);
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RpcServiceInfo {
+    /// 完整服务前缀，如 `im/v1/room`。
+    service_: &'static str,
+
+    /// 相对 router 根的 pattern（Call service 与 `service` 相同）。
+    pattern_: &'static str,
+
+    /// 方法表。
+    methods_: &'static [RpcMethodInfo],
+}
+
+impl RpcServiceInfo {
+    /// 由 service / pattern / 方法表构造。
+    pub const fn new(
+        service: &'static str,
+        pattern: &'static str,
+        methods: &'static [RpcMethodInfo],
+    ) -> Self {
+        RpcServiceInfo {
+            service_: service,
+            pattern_: pattern,
+            methods_: methods,
+        }
+    }
+
+    /// 完整服务前缀。
+    pub const fn service(&self) -> &'static str {
+        self.service_
+    }
+
+    /// 相对 router 根的 pattern。
+    pub const fn pattern(&self) -> &'static str {
+        self.pattern_
+    }
+
+    /// 方法表。
+    pub const fn methods(&self) -> &'static [RpcMethodInfo] {
+        self.methods_
+    }
+
+    /// 按 operation 查方法。
+    pub fn method(&self, operation: &str) -> Option<&'static RpcMethodInfo> {
+        self.methods_
+            .iter()
+            .find(|method| method.operation() == operation)
+    }
+}
+
 /// 请求头与端点元信息不匹配的具体原因。
 ///
 /// [`TypeRejection::status`] 给出应当回给对端的状态码：缺失 / 畸形头是 `400`，

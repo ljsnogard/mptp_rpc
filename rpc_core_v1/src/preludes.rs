@@ -43,11 +43,12 @@ pub use crate::{
     ClientConfig, ServingConfig, TrDefaultDock, TrUserConn,
     client::{
         ClientProxy, DefaultRpcAllocConfig, ServiceSelector, TrRpcClientConfig, TrRpcClientExt,
-        call_endpoint_async, open_pull_async, open_push_async,
+        call_endpoint_async, call_endpoint_typed_async, open_pull_async, open_push_async,
     },
     messaging::{RpcError, RpcResult, TrRpcInterface},
     serving::{
-        DefaultServingAllocConfig, RpcDataTypeInfo, RpcEndpointInfo, TrReplyError,
+        DefaultServingAllocConfig, RpcDataTypeInfo, RpcEndpointInfo, RpcMethodInfo, RpcServiceInfo,
+        TrReplyError,
         TrServingAllocConfig, TrServingConfig, decode_body_async, typed_response,
         validate_request_types, write_ok_async, write_status_async, write_stream_item_async,
     },

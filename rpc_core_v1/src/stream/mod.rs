@@ -31,8 +31,9 @@ pub use error_::{StreamError, StreamFuture};
 pub use just_::{Just, JustIter, TypedJustFlux};
 pub use slot_::{Slot, SlotIter, TrSuffixFinish, TrSuffixWrite, TypedSlotFlux};
 pub use types_::{
-    AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, TrDataTypeId,
-    TypeHeaderError, TypePolicy, TypeRejection, apply_request_type_headers,
+    AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, RpcMethodInfo,
+    RpcServiceInfo, TrDataTypeId, TypeHeaderError, TypePolicy, TypeRejection,
+    apply_request_type_headers,
     apply_response_type_headers, read_accept, read_body_codec, read_data_type_id,
     validate_request_types, validate_response_types, write_accept, write_body_codec,
     write_data_type_id,
