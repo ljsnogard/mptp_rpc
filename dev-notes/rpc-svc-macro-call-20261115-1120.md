@@ -207,3 +207,24 @@ python3 ../format_use_imports.py --check ...              # 全部合规
 - 两阶段解码 + 未知变体 404 + 方法级中间件 hook；
 - `rpc_serv_ext` 的装配糖按「前缀字符串分组」重写（本期未动）；
 - View 的 bodyless/header 迁移（`im/v1/room/list` 仍是 `RoomListQuery` body）。
+
+## 9. 2026-11-15 补记：controller 的 `Drop` / `Head` 与无体回复
+
+多聊天室 IM 实施（`mptp_im_demo/dev-notes/multi-room-im-20261115-1140.md`）发现两处
+code-first 之外、但同属宏 / 客户端的能力缺口，已修补：
+
+1. **controller 的 `Drop` / `Head` 端点原来无法工作**：宏统一用 `write_ok_async` /
+   `write_status_async` 写回复，而 MPTP 规定 `Head` / `Drop` 的回复不允许带体
+   （`mptp_smux::ensure_body_allowed_`），实际表现为 500。宏现在对这两类端点只写状态
+   （`response(status).no_body_async()`），错误也不写体；`rpc_svc_macro` 的 controller
+   测试新增 `#[rpc(drop = "leave")]` 端点与代理编译检查。
+2. **`rpc_core_v1::client::call_endpoint_no_body_async`（新增公开 API）**：
+   `Drop` / `Head` 的成功回复没有 body，`call_endpoint_async` 的 `Rep` 解码会失败
+   （`()` 的 msgpack nil 字节不存在）。新入口成功只读状态、读 0 字节收尾；非成功仍读
+   错误体返回 `RpcError::Remote`。controller 宏代理对 `Drop` / `Head` 改走该入口。
+3. **方法属性转发**：trait 方法上的 `#[allow(...)]` / 文档 / `cfg` 现在也出现在生成的
+   `ClientProxy` impl 方法上（此前只带 `cfg`，`clippy::ptr_arg` 这类 lint 无法在生成端
+   豁免）。
+
+公开 API 变更：`call_endpoint_no_body_async`（新增）；controller 的 `Drop` / `Head`
+端点生成的客户端代理改用无体入口（签名不变）。
