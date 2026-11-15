@@ -767,11 +767,9 @@ WorkspaceService::create_workspace
 
 ## 4. 将要实现的形状（样式代码）
 
-> **2026-11-14 注**：本章样式代码仍按 2026-11-13 的 interface marker + 每方法 Call
-> path 编写，**不是现行形状**。Call 的现行设计（service 级路径 + `XxxServiceCall`
-> 枚举 + 方法表）见 §3 与 §12；下一轮应整体替换本章示例。
-
-> 以下代码是**目标形状**，不是当前可编译代码；`...` 表示省略。
+> 以下代码是**目标形状 / 参考形状**，不是当前可编译代码；`...` 表示省略。
+> 宏展开的精确 token 不作为契约，本章只保留理解语义所需的最小形状；完整验收见
+> §12.10。
 
 ### 4.1 协议 crate
 
@@ -794,7 +792,7 @@ pub struct Session {
     pub title: String,
 }
 
-#[rpc(service = "workspace")]
+#[rpc(service = "api/v1/workspace", api = WorkspaceSvc)]
 pub trait WorkspaceService {
     fn create_workspace(
         &self,
@@ -811,7 +809,7 @@ pub trait WorkspaceService {
     ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Option<Workspace>>>;
 }
 
-#[rpc(service = "session")]
+#[rpc(service = "api/v1/session", api = SessionSvc)]
 pub trait SessionService {
     fn create_session(
         &self,
@@ -825,12 +823,18 @@ pub trait SessionService {
     ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<Session>>>;
 }
 
-#[rpc(namespace = "api/v1", services = [WorkspaceService, SessionService])]
-pub struct ApiV1;
-
-#[rpc(namespace = "api/v2", services = [WorkspaceService])]
-pub struct ApiV2;
+// 多前缀（同一个 trait 挂 api/v1 与 api/v2）时用：
+// #[rpc(apis = [(WorkspaceV1, "api/v1/workspace"), (WorkspaceV2, "api/v2/workspace")])]
+// pub trait WorkspaceService { ... }
 ```
+
+要点：
+
+- `service` 是完整前缀；没有 `ApiV1` / namespace / interface marker；
+- `api = WorkspaceSvc` 生成 marker；`lib.rs` 需要 `pub use` 它，客户端才能
+  `client.call::<WorkspaceSvc>()`；
+- 多前缀用 `apis = [(X, "prefix"), ...]`，每个 `(marker, prefix)` 一组；
+- 协议 crate 仍只依赖 `rpc_core_v1`（+ denco / proc-macro 等必要依赖）。
 
 ### 4.2 客户端
 
@@ -838,14 +842,15 @@ pub struct ApiV2;
 use rpc_core_v1::preludes::*;
 
 async fn demo(client: &MptpClient<CliCfg>, token: impl TrCancellationToken) -> RpcResult<()> {
-    let v1 = client.call::<ApiV1>();
+    let ws = client.call::<WorkspaceSvc>();
+    let session = client.call::<SessionSvc>();
 
-    let workspace = v1
+    let workspace = ws
         .create_workspace("alpha".to_string())
         .may_cancel_with(token.child_token())
         .await?;
 
-    let sessions = v1
+    let sessions = session
         .list_sessions(workspace.id)
         .may_cancel_with(token.child_token())
         .await?;
@@ -855,11 +860,14 @@ async fn demo(client: &MptpClient<CliCfg>, token: impl TrCancellationToken) -> R
 }
 ```
 
+- 调用点没有 path、operation、枚举变体、body 编解码；
+- `WorkspaceSvc` / `SessionSvc` 是协议 crate 导出的 marker；
+- 两个 marker 各自一条 service 路径；方法在请求枚举里。
+
 ### 4.3 服务端实现与装配
 
 ```rust
-#[rpc(impl_of(ApiV1))]
-#[rpc(impl_of(ApiV2))]
+#[rpc(impl_of(WorkspaceSvc))]
 impl WorkspaceService for WorkspaceServiceImpl {
     fn create_workspace(
         &self,
@@ -882,7 +890,7 @@ impl WorkspaceService for WorkspaceServiceImpl {
     }
 }
 
-#[rpc(impl_of(ApiV1))]
+#[rpc(impl_of(SessionSvc))]
 impl SessionService for SessionServiceImpl {
     // ...
 }
@@ -898,218 +906,186 @@ pub fn build_router(
         .use_middleware(PrincipalMiddleware)
         .use_middleware(RpcAuditMiddleware);
 
-    let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(
+    let router = __rpc_impl_of_WorkspaceServiceImpl_via_WorkspaceSvc::install_into(
         router,
         std::sync::Arc::new(WorkspaceServiceImpl::new_()),
     )?;
-    let router = __rpc_impl_of_SessionServiceImpl_via_ApiV1::install_into(
+    let router = __rpc_impl_of_SessionServiceImpl_via_SessionSvc::install_into(
         router,
         std::sync::Arc::new(SessionServiceImpl::new_()),
-    )?;
-    let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV2::install_into(
-        router,
-        std::sync::Arc::new(WorkspaceServiceImpl::new_()),
     )?;
 
     Ok(router)
 }
 ```
 
-### 4.4 宏展开形状（trait / client）
+- 每个 marker 一个 installer；一个 installer 绑定 `CALL /<prefix>` + 方法表；
+- 同一 impl 挂多个前缀时，每个前缀一个 marker / installer：
 
 ```rust
-pub trait WorkspaceService {
-    const SERVICE_NAME: &'static str = "workspace";
+let router = __rpc_impl_of_WorkspaceServiceImpl_via_WorkspaceV1::install_into(router, ws.clone())?;
+let router = __rpc_impl_of_WorkspaceServiceImpl_via_WorkspaceV2::install_into(router, ws)?;
+```
 
-    // 0 参 → ()
-    #[doc(hidden)]
-    type __Req_list_workspaces = ();
-    // 1 参 → 直接使用 owned 参数类型
-    #[doc(hidden)]
-    type __Req_create_workspace = ::alloc::string::String;
-    #[doc(hidden)]
-    type __Req_get_workspace = u64;
-    // ≥2 参 → hidden 位置字段结构体
-    #[doc(hidden)]
-    type __Req_create_session =
-        __rpc_service_WorkspaceService::__Req_create_session;
+### 4.4 生成代码参考：trait / client
 
-    fn create_workspace(
-        &self,
-        name: String,
-    ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Workspace>>;
-    // ...
+精确 token 不是契约，下面是理解语义所需的最小形状：
+
+```rust
+/// 客户端挂载点。
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspaceSvc;
+
+impl ::rpc_core_v1::messaging::TrRpcInterface for WorkspaceSvc {
+    const PREFIX: &'static str = "api/v1/workspace";
 }
 
+/// 请求枚举；变体线上名 = 方法名。
 #[doc(hidden)]
-#[allow(non_camel_case_types, non_snake_case)]
-pub mod __rpc_service_WorkspaceService {
-    use super::*;
-
-    /// 只有多参数方法需要请求结构体；单参数 / 0 参数不生成。
-    #[derive(
-        ::rpc_core_v1::x_deps::denco_macro::TrEncodable,
-        ::rpc_core_v1::x_deps::denco_macro::TrDecodable,
-    )]
-    pub struct __Req_create_session {
-        pub f0: u64,
-        pub f1: ::alloc::string::String,
-    }
+#[derive(TrEncodable, TrDecodable)]
+pub enum WorkspaceServiceCall {
+    #[denco(rename = "create_workspace")]
+    CreateWorkspace(__Req_create_workspace), // 多参 → newtype 包 __Req_*
+    #[denco(rename = "list_workspaces")]
+    ListWorkspaces,                          // 0 参 → unit
+    #[denco(rename = "get_workspace")]
+    GetWorkspace(u64),                       // 1 参 → newtype
 }
 
-impl<'__a, __C, __I> WorkspaceService
-    for ::rpc_core_v1::client::ClientProxy<'__a, __C, __I>
+impl<'a, C> WorkspaceService
+    for ::rpc_core_v1::client::ClientProxy<'a, C, WorkspaceSvc>
 where
-    __C: ::rpc_core_v1::client::TrRpcClientConfig + Send + Sync + 'static,
-    __I: ::rpc_core_v1::messaging::TrRpcInterface + Send + Sync + 'static,
+    C: ::rpc_core_v1::client::TrRpcClientConfig,
 {
     fn create_workspace(
         &self,
         name: String,
-    ) -> impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
-        '_,
-        MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<Workspace>,
-    > {
-        ::rpc_core_v1::client::call_unary_async::<__C, __I, _, Workspace>(
+    ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Workspace>> {
+        ::rpc_core_v1::client::call_envelope_async(
             self,
-            "workspace/create_workspace",
-            name,
-        )
-    }
-
-    fn list_workspaces(
-        &self,
-    ) -> impl ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel<
-        '_,
-        MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<Vec<Workspace>>,
-    > {
-        ::rpc_core_v1::client::call_unary_async::<__C, __I, _, Vec<Workspace>>(
-            self,
-            "workspace/list_workspaces",
-            (),
-        )
-    }
-
-    // ...
-}
-```
-
-### 4.5 宏展开形状（impl_of 的一个方法 + 安装）
-
-```rust
-impl WorkspaceService for WorkspaceServiceImpl {
-    // 用户原来的 impl，原样保留
-}
-
-#[doc(hidden)]
-#[allow(non_camel_case_types, non_snake_case, unused_imports)]
-pub mod __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1 {
-    use super::*;
-    use ::mptp_serving::{
-        Endpoint, HandlerFuture, MethodSet, MptpContext, RadixRouter,
-        TrEndpointHandler, box_future_,
-    };
-    use ::mptp_serving::x_deps::mptp_smux::{
-        ServeError,
-        serving::config::TrConfig,
-    };
-    use ::rpc_core_v1::serving::{
-        decode_body_async, write_ok_async, write_status_async,
-    };
-    use ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel;
-
-    pub struct __CreateWorkspace {
-        pub svc_: ::alloc::sync::Arc<WorkspaceServiceImpl>,
-    }
-
-    impl<C, S, R> TrEndpointHandler<C, S, R> for __CreateWorkspace
-    where
-        C: TrConfig + 'static,
-    {
-        fn handle<'a, 'f>(
-            &'a self,
-            ctx: &'a mut MptpContext<'f, C, S, R>,
-        ) -> HandlerFuture<'a> {
-            let arena = ctx.arena();
-            box_future_(arena, async move {
-                let req: <WorkspaceServiceImpl as WorkspaceService>::__Req_create_workspace =
-                    decode_body_async(ctx.session_mut()).await?;
-
-                let result = <WorkspaceServiceImpl as WorkspaceService>::create_workspace(
-                    &*self.svc_,
-                    req,
-                )
-                .may_cancel_with(ctx.cancel().child_token())
-                .await;
-
-                match result {
-                    Ok(value) => write_ok_async(ctx.session_mut(), &value).await?,
-                    Err(error) => {
-                        let (status, message) = error.into_reply_parts();
-                        write_status_async(ctx.session_mut(), status, message).await?;
-                    }
-                }
-
-                Result::Ok(())
-            })
-        }
-    }
-
-    pub fn install_into<C, S, R>(
-        router: RadixRouter<C, S, R, ::alloc::alloc::Global>,
-        svc: ::alloc::sync::Arc<WorkspaceServiceImpl>,
-    ) -> Result<
-        RadixRouter<C, S, R, ::alloc::alloc::Global>,
-        ::mptp_serving::x_deps::matchit_route::InsertError,
-    >
-    where
-        C: TrConfig + 'static,
-        S: Send + Sync + 'static,
-        R: 'static,
-        WorkspaceServiceImpl: Send + Sync + 'static,
-    {
-        const PATTERN: &'static str = ::rpc_core_v1::x_deps::constcat::concat!(
-            <ApiV1 as ::rpc_core_v1::messaging::TrRpcInterface>::NAMESPACE,
-            "/",
-            <WorkspaceServiceImpl as WorkspaceService>::SERVICE_NAME,
-            "/",
             "create_workspace",
-        );
-
-        let endpoint = Endpoint::new(
-            PATTERN,
-            MethodSet::CALL,
-            ::alloc::sync::Arc::new(__CreateWorkspace { svc_: svc.clone() }),
+            <__Req_create_workspace as TrDataTypeId>::DATA_TYPE_ID, // 方法 payload
+            <Workspace as TrDataTypeId>::DATA_TYPE_ID,               // 方法响应
+            WorkspaceServiceCall::CreateWorkspace(__Req_create_workspace { f0: name }),
         )
-        .with_metadata(::rpc_core_v1::serving::RpcEndpointInfo {
-            namespace: <ApiV1 as ::rpc_core_v1::messaging::TrRpcInterface>::NAMESPACE,
-            service: <WorkspaceServiceImpl as WorkspaceService>::SERVICE_NAME,
-            operation: "create_workspace",
-            pattern: PATTERN,
-        });
-
-        let router = router.bind_endpoint(endpoint)?;
-        Result::Ok(router)
     }
+    // list_workspaces / get_workspace 同理
 }
 ```
 
-> 注：`__CreateWorkspace::svc_` 若被多个方法共享，可在模块里定义一次
-> `pub struct __ServiceHandle { svc_: Arc<WorkspaceServiceImpl> }` 供所有 handler 持有；
-> 上面的写法为了逐方法独立可读，重复了一个 `Arc` 字段。
+- `call_envelope_async` 是建议的 helper：路径 = `WorkspaceSvc::PREFIX`；
+  参数里的 `request_id` / `response_id` 分别写 `Data_Type_Id` / `Accept`；body = 枚举
+  变体。精确签名由实现定，语义必须保留这两个方法级 ID；
+- 枚举不 derive `TrHasTypeId`；payload 的 ID 才是线上类型；
+- `__Req_*` / 方法 payload 关联类型仍由 trait 宏生成，`impl_of` 在另一个 crate
+  通过关联类型命名它们。
 
-### 4.6 中间件（方法级策略）
+### 4.5 生成代码参考：impl_of / dispatcher
+
+下面用建议的 `RpcMethodInfo` / `RpcEndpointInfo` 形状表达；实现可以内联生成，
+不要求真的有这些命名：
 
 ```rust
-use mptp_serving::{
-    Endpoint, MiddlewareFuture, MptpContext, NextFn, TrMiddleware,
-};
+/// 方法表项。
+const METHODS: &[RpcMethodInfo] = &[
+    RpcMethodInfo {
+        operation: "create_workspace",
+        data: RpcDataTypeInfo::new(BodyCodec::MsgPack)
+            .with_request_body(<__Req_create_workspace as TrDataTypeId>::DATA_TYPE_ID)
+            .with_response_body(<Workspace as TrDataTypeId>::DATA_TYPE_ID)
+            .with_accept(AcceptType::new(
+                BodyCodec::MsgPack,
+                Option::Some(<Workspace as TrDataTypeId>::DATA_TYPE_ID),
+            ))
+            .with_policy(TypePolicy::Strict),
+    },
+    // list_workspaces / get_workspace ...
+];
+
+/// 一个 service 的 dispatcher。
+struct WorkspaceDispatch {
+    svc_: Arc<WorkspaceServiceImpl>,
+}
+
+impl<C, S, R> TrEndpointHandler<C, S, R> for WorkspaceDispatch
+where
+    C: TrConfig + 'static,
+{
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+        let arena = ctx.arena();
+        box_future_(arena, async move {
+            // 1. 读 body 第一个值：variant name
+            let operation: String = decode_envelope_operation_async(ctx.session_mut()).await?;
+
+            // 2. 选方法表项；未知 operation → 404
+            let method = METHODS.iter().find(|m| m.operation == operation)
+                .ok_or_else(|| not_found_(operation))?;
+
+            // 3. 方法级校验：在解码 payload 前
+            validate_request_types(AccessMethod::Call, ctx.request_headers(), &method.data)?;
+
+            // 4. 解码该变体的 payload；5. 调 impl + 写响应
+            match operation.as_str() {
+                "create_workspace" => {
+                    let req: __Req_create_workspace = decode_envelope_payload_async(ctx.session_mut()).await?;
+                    let result = <WorkspaceServiceImpl as WorkspaceService>::create_workspace(
+                        &*self.svc_,
+                        req.f0,
+                    ).may_cancel_with(ctx.cancel().child_token()).await;
+                    write_result_(ctx.session_mut(), method.data, result).await?;
+                }
+                "list_workspaces" => { /* payload = () */ }
+                "get_workspace" => { /* payload = u64 */ }
+                _ => unreachable!(),
+            }
+            Result::Ok(())
+        })
+    }
+}
+
+/// 安装：一个 service 路径 + 方法表。
+pub fn install_into<C, S, R>(
+    router: RadixRouter<C, S, R>,
+    svc: Arc<WorkspaceServiceImpl>,
+) -> Result<RadixRouter<C, S, R>, InsertError> {
+    const PREFIX: &'static str =
+        <WorkspaceSvc as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX;
+
+    let endpoint = Endpoint::new(
+        PREFIX,
+        MethodSet::CALL,
+        Arc::new(WorkspaceDispatch { svc_: svc }),
+    )
+    .with_metadata(RpcEndpointInfo {
+        service: PREFIX,
+        pattern: PREFIX,
+        methods: METHODS,
+    });
+
+    router.bind_endpoint(endpoint)
+}
+```
+
+参考形状的要点：
+
+- 一个 `Endpoint`（`CALL /<prefix>`）+ 一个方法表；不是每方法一个 endpoint；
+- dispatcher 先读变体名、选 `RpcMethodInfo`、跑 `validate_request_types`，再解 payload；
+- 响应按 `method.data.response_body` 写头；`write_result_` 是建议的 helper，也可以内联；
+- `RpcMethodInfo` / `RpcEndpointInfo` 是建议的公开类型；若实现时不引入
+  `RpcMethodInfo`，至少要在生成代码里保留同样的字段语义。
+
+### 4.6 中间件（service 级与方法级）
+
+**service 级**（router 层）：
+
+```rust
+use mptp_serving::{Endpoint, MiddlewareFuture, MptpContext, NextFn, TrMiddleware};
 use mptp_smux::serving::config::TrConfig;
 use rpc_core_v1::serving::RpcEndpointInfo;
 
-pub struct RpcAuditMiddleware;
+pub struct RpcServiceAudit;
 
-impl<C, S, R> TrMiddleware<C, S, R> for RpcAuditMiddleware
+impl<C, S, R> TrMiddleware<C, S, R> for RpcServiceAudit
 where
     C: TrConfig,
 {
@@ -1123,8 +1099,8 @@ where
         let arena = ctx.arena();
         mptp_serving::box_future_(arena, async move {
             if let Some(info) = info {
-                // 方法级策略：审计 / 指标 / 限流键
-                let _ = (info.namespace, info.service, info.operation, info.pattern);
+                // 整组策略：info.service / info.methods
+                let _ = (info.service, info.pattern, info.methods.len());
             }
             next(ctx).await
         })
@@ -1132,19 +1108,42 @@ where
 }
 ```
 
+**方法级**（dispatcher 内，变体名读取后、payload 解码前）：
+
+```rust
+// dispatcher 已经拿到 method: &RpcMethodInfo
+// 1. policy / 审计 / 限流键 = method.operation
+// 2. validate_request_types(CALL, headers, &method.data)
+// 3. 再解码 payload、调用 impl
+```
+
+- 方法级策略不再是 router 中间件，而是 dispatcher 的固定阶段；语义仍是“handler 前”；
+- `405 / Allow` 是 service 级 `CALL`；Call trait 的方法都是 CALL；
+- 非 Call 端点继续用 endpoint 级中间件 + per-endpoint `RpcDataTypeInfo`。
+
 ### 4.7 与 controller / 手写端点共存
 
 ```rust
 let router = router
-    .use_middleware(PrincipalMiddleware)
-    .call("scene/ping", PingHandler)?;              // 手写端点
-let router = __rpc_controller_SceneService::install_into(router, scene_svc)?; // controller
-let router = __rpc_impl_of_WorkspaceServiceImpl_via_ApiV1::install_into(router, ws)?; // trait
+    .use_middleware(PrincipalMiddleware);
+
+// Call：一个 service 一条路径
+let router = __rpc_impl_of_WorkspaceServiceImpl_via_WorkspaceSvc::install_into(router, ws)?;
+
+// 非 Call：controller 的每方法 path
+let router = __rpc_controller_SceneService::install_into(router, scene)?;
+
+// 手写端点
+let router = router.bind_endpoint(
+    Endpoint::new("api/v1/rooms/{room_id}", MethodSet::HEAD, Arc::new(RoomHead::new_(hub))),
+)?;
 ```
 
-三者都在同一张 `RadixRouter` 上，中间件、元数据、405/404 收尾完全一致。
-
----
+- `CALL api/v1/workspace` 与 `VIEW api/v1/room/list` / `PULL api/v1/room/events/{id}`
+  是不同 pattern + 方法，可以共存；
+- 只有同一 `pattern + MethodSet` 才冲突（`bind_endpoint` 仍是先到先得，G-10）；
+- 中间件、`RpcEndpointInfo`、405/404 收尾对三类端点一致；Call 的方法级校验在
+  dispatcher 内，非 Call 的在 endpoint 中间件 / handler 前。
 
 ## 5. 实施计划
 
