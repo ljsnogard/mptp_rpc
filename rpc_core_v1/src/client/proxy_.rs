@@ -6,8 +6,7 @@
 //!
 //! 一次 unary 调用由 [`call_unary_async`] 完成：拼路径 → 请求头声明分块 →
 //! 编码器与 `send_req_body_async` 通过 ring 边编码边发送 → 检查状态 → 流式解码回复。
-//! `#[rpc(service = "...")]` 宏生成的 service 方法体只是构造对应的 body enum 变体，
-//! 然后把这一步交给本模块。
+//! 调用方构造 body 后把这一步交给本模块。
 //!
 //! # `proxy_`: the minimal client proxy and unary calls
 //!
@@ -15,39 +14,36 @@
 //! runtime, while the interface is a zero-sized type parameter. [`call_unary_async`]
 //! performs one unary exchange; macro-generated methods only build the body enum variant.
 
+use alloc::{
+    format,
+    string::{String, ToString},
+};
 use core::{marker::PhantomData, mem::MaybeUninit};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use abs_mptp::{
     client::{TrMptpClient, TrMptpSession},
-    spec::{
-        Status, StdHeaderKey, StdHeaderVal,
-        access_method::AccessMethod,
-    },
+    spec::{Status, StdHeaderKey, StdHeaderVal, access_method::AccessMethod},
 };
 use gen_mcf2::gen_may_cancel_future;
-use mptp_smux::{
-    client::MptpClient,
-    messaging::{Headers, RequestPrefix},
-};
+use mptp_smux::client::MptpClient;
+use mptp_wire::{Headers, RequestPrefix};
 
 use crate::{
     client as rpc_client,
-    messaging::{RpcError, RpcResult, TrRpcInterface, concat_location},
     messaging::body_::{
-        BodyRing_, K_BODY_RING_CAP_,
-        decode_from_async_,
-        encode_into_async_,
-        read_body_async_,
+        BodyRing_, K_BODY_RING_CAP_, decode_from_async_, encode_into_async_, read_body_async_,
     },
+    messaging::{RpcError, RpcResult, TrRpcInterface, concat_location},
+    stream::{RpcDataTypeInfo, apply_request_type_headers, validate_response_types, write_accept},
     x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };
 
 /// 客户端极简代理。
 ///
 /// 运行期只有 `client_` 一个字段；`I` 是零大小的 interface marker，只用来携带
-/// [`TrRpcInterface::PATH`]。它实现协议端声明的 service trait（由 `#[rpc]` 宏生成），
+/// [`TrRpcInterface::PREFIX`]。它实现协议端声明的 service trait（由 `#[rpc]` 宏生成），
 /// 因此调用点可以写成：
 ///
 /// ```text
@@ -102,7 +98,7 @@ where
 /// struct ApiV1;
 ///
 /// impl TrRpcInterface for ApiV1 {
-///     const PATH: &'static str = "api/v1";
+///     const PREFIX: &'static str = "api/v1";
 /// }
 ///
 /// fn select<C>(client: &MptpClient<C>)
@@ -131,14 +127,17 @@ where
 
 /// interface 到客户端视图的选择器。
 ///
-/// 接口宏会为每个 `#[rpc(path = "...")]` 类型生成它的实现；`select` 的返回值就是
-/// `ClientProxy<'a, C, I>`。它让调用点不必显式写 `call::<I>()`。
+/// 使用者为每个 interface 类型实现它；`select` 的返回值就是 `ClientProxy<'a, C, I>`。
+/// 它让调用点不必显式写 `call::<I>()`。
 pub trait ServiceSelector<C>
 where
     C: rpc_client::TrRpcClientConfig,
 {
     /// 本 interface 的客户端视图。
-    type View<'a> where Self: 'a, C: 'a;
+    type View<'a>
+    where
+        Self: 'a,
+        C: 'a;
 
     /// 从底层客户端选出本 interface 的视图。
     fn select<'a>(client: &'a MptpClient<C>) -> Self::View<'a>;
@@ -146,7 +145,7 @@ where
 
 /// 一次 unary 调用的 step 函数。
 ///
-/// `interface` 由类型参数 `I::PATH` 提供，`service` 是 trait 的 `SERVICE_PATH`；
+/// `interface` 由类型参数 `I::PREFIX` 提供，`service` 是 trait 的 `SERVICE_PATH`；
 /// 两者拼成 `/{interface}/{service}`。方法名只出现在 body enum 里，不参与路由。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(UnaryCall, pub(crate), new(pub(crate)))]
@@ -165,7 +164,7 @@ where
     TyTok: TrCancellationToken,
 {
     let client = proxy.client();
-    let location = concat_location(I::PATH, service);
+    let location = concat_location(I::PREFIX, service);
 
     // 业务体不预编码：请求头只声明「分块」，编码器与 `send_req_body_async` 通过
     // 一对 SPSC ring 并发推进——编码写满时等待，发送搬走多少就再编多少。
@@ -230,10 +229,221 @@ where
     decode_from_async_::<Rep, _, _>(&mut body_read, cancel.child_token()).await
 }
 
+/// 发起一次**不带回复体**的 unary 调用（`Drop` / `Head` 语义）。
+///
+/// 与 [`call_endpoint_async`] 的区别：成功回复不读 body，只返回 `Ok(())`；非成功状态仍
+/// 读取错误体并返回 [`RpcError::Remote`]。MPTP 规定 `Head` / `Drop` 的回复不允许带体，
+/// 因此语义化端点（controller 的 DROP / HEAD）与客户端适配器走本入口。
+///
+/// # Errors
+///
+/// 传输 / 编码失败；非成功状态返回 [`RpcError::Remote`]。
+#[allow(clippy::needless_lifetimes)]
+pub fn call_endpoint_no_body_async<'f, C, Req>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    path: &'static str,
+    request: Req,
+) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+{
+    EndpointCallNoBodyAsync::new(client, method, path.to_string(), request)
+}
+
+/// [`call_endpoint_no_body_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(EndpointCallNoBody, pub(crate), new(pub(crate)))]
+async fn endpoint_call_no_body_async_<'f, C, Req, K>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    location: String,
+    request: Req,
+    cancel: K,
+) -> RpcResult<()>
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+    K: TrCancellationToken,
+{
+    let mut headers = Headers::new();
+    headers.set_num(
+        StdHeaderKey::Body_Transfer,
+        StdHeaderVal::Body_Transfer_Chunked.into_inner(),
+    );
+    headers.set_num(
+        StdHeaderKey::Body_Type,
+        StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
+    );
+    let prefix = RequestPrefix::with_headers(method, location.clone(), Option::Some(headers));
+    let mut session = client
+        .request_async(prefix)
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("发起 {location} 失败：{err}")))?;
+
+    let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
+    let (mut writer, mut reader) = BodyRing_::split(&mut ring);
+    let encode_cancel = cancel.child_token();
+    let encode_fut = async move {
+        let result = encode_into_async_(&request, &mut writer, encode_cancel).await;
+        writer.close();
+        result
+    };
+    let send_fut = session
+        .send_req_body_async(&mut reader)
+        .may_cancel_with(cancel.child_token());
+    let (encode_res, send_res) = futures::future::join(encode_fut, send_fut).await;
+    encode_res?;
+    send_res.map_err(|err| RpcError::Transport(format!("发送 {location} 请求体失败：{err}")))?;
+
+    let response = session
+        .recv_resp_prefix_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("接收 {location} 回复前缀失败：{err}")))?;
+    let mut body_read = session
+        .recv_resp_body_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("取 {location} 回复体失败：{err}")))?;
+    if response.status() != Status::Ok {
+        let size = response
+            .headers()
+            .and_then(Headers::body_size)
+            .unwrap_or(0usize);
+        let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
+        return Result::Err(RpcError::Remote {
+            status: response.status(),
+            body,
+        });
+    }
+    // 成功：`Head` / `Drop` 的回复没有体；读 0 字节让状态机收尾，不做 body 解码。
+    let _ = read_body_async_(&mut body_read, 0usize, cancel.child_token()).await?;
+    Result::Ok(())
+}
+
+/// 发起一次带方法级类型头的 unary 调用。
+///
+/// 与 [`call_endpoint_async`] 的区别：请求头由 `info` 写全
+/// （`Body_Type` / `Data_Type_Id` / `Accept`），响应头在解码前按 `info` 校验。
+/// Call 请求枚举模式的客户端代理方法体使用本入口：`path` 是
+/// `TrRpcInterface::PREFIX`（完整服务前缀），`request` 是请求枚举变体，
+/// `info` 是该方法的 `RpcDataTypeInfo`。
+///
+/// # Errors
+///
+/// 同 [`call_endpoint_async`]；另外响应类型头不匹配时返回
+/// [`RpcError::Remote`]（`status` = 406，`body` = 拒绝原因）。
+#[allow(clippy::needless_lifetimes)]
+pub fn call_endpoint_typed_async<'f, C, Req, Rep>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    path: &'static str,
+    info: &'static RpcDataTypeInfo,
+    request: Req,
+) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<Rep>> + 'f
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+    Rep: TrDecodableOwned + 'f,
+{
+    EndpointCallTypedAsync::<'f, 'f, C, Req, Rep>::new(
+        client,
+        method,
+        path.to_string(),
+        info,
+        request,
+    )
+}
+
+/// [`call_endpoint_typed_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(EndpointCallTyped, pub(crate), new(pub(crate)))]
+async fn endpoint_call_typed_async_<'f, C, Req, Rep, K>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    location: String,
+    info: &'static RpcDataTypeInfo,
+    request: Req,
+    cancel: K,
+) -> RpcResult<Rep>
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+    Rep: TrDecodableOwned + 'f,
+    K: TrCancellationToken,
+{
+    let mut headers = Headers::new();
+    headers.set_num(
+        StdHeaderKey::Body_Transfer,
+        StdHeaderVal::Body_Transfer_Chunked.into_inner(),
+    );
+    apply_request_type_headers(&mut headers, method, info);
+    if let Option::Some(accept) = info.accept() {
+        write_accept(&mut headers, accept);
+    }
+    let prefix = RequestPrefix::with_headers(method, location.clone(), Option::Some(headers));
+    let mut session = client
+        .request_async(prefix)
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("发起 {location} 失败：{err}")))?;
+
+    let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
+    let (mut writer, mut reader) = BodyRing_::split(&mut ring);
+    let encode_cancel = cancel.child_token();
+    let encode_fut = async move {
+        let result = encode_into_async_(&request, &mut writer, encode_cancel).await;
+        writer.close();
+        result
+    };
+    let send_fut = session
+        .send_req_body_async(&mut reader)
+        .may_cancel_with(cancel.child_token());
+    let (encode_res, send_res) = futures::future::join(encode_fut, send_fut).await;
+    encode_res?;
+    send_res.map_err(|err| RpcError::Transport(format!("发送 {location} 请求体失败：{err}")))?;
+
+    let response = session
+        .recv_resp_prefix_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("接收 {location} 回复前缀失败：{err}")))?;
+    let mut body_read = session
+        .recv_resp_body_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("取 {location} 回复体失败：{err}")))?;
+    if response.status() != Status::Ok {
+        let size = response
+            .headers()
+            .and_then(Headers::body_size)
+            .unwrap_or(0usize);
+        let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
+        return Result::Err(RpcError::Remote {
+            status: response.status(),
+            body,
+        });
+    }
+
+    let empty_headers = Headers::new();
+    let response_headers = response.headers().unwrap_or(&empty_headers);
+    validate_response_types(method, response_headers, info).map_err(|rejection| {
+        RpcError::Remote {
+            status: rejection.status(),
+            body: rejection.to_string().into_bytes(),
+        }
+    })?;
+
+    decode_from_async_::<Rep, _, _>(&mut body_read, cancel.child_token()).await
+}
+
 /// 发起一次 unary 调用，返回具名、可取消的 future。
 ///
-/// 这是 `#[rpc(service = "...")]` 生成的客户端方法体使用的入口；普通使用者不需要
-/// 直接调用它，直接调用 service trait 的方法即可。
+/// 这是 unary 客户端方法体使用的入口；普通使用者通常经由更高层的代理方法调用，不需要
+/// 直接调用它。
 ///
 /// # Errors
 ///
@@ -256,4 +466,100 @@ where
     Rep: TrDecodableOwned + 'f,
 {
     UnaryCallAsync::<'a, 'f, 'f, C, I, Req, Rep>::new(proxy, service, request)
+}
+
+/// 发起一次按指定访问方法 + 完整路径的 unary 调用。
+///
+/// 这是 `#[rpc(interface = "...")]` controller 形态生成的客户端代理方法体使用的入口：
+/// 与 [`call_unary_async`] 不同，这里直接给 `client` + `method` + 完整路径，不经过
+/// interface / service 拼接。
+///
+/// # Errors
+///
+/// 同 [`call_unary_async`]：传输 / 编解码 / 远端非 `200` 状态分别映射成对应的
+/// [`RpcError`]。
+#[allow(clippy::needless_lifetimes)]
+pub fn call_endpoint_async<'f, C, Req, Rep>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    path: &'static str,
+    request: Req,
+) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<Rep>> + 'f
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+    Rep: TrDecodableOwned + 'f,
+{
+    EndpointCallAsync::new(client, method, path.to_string(), request)
+}
+
+/// [`call_endpoint_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(EndpointCall, pub(crate), new(pub(crate)))]
+async fn endpoint_call_async_<'f, C, Req, Rep, K>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    location: String,
+    request: Req,
+    cancel: K,
+) -> RpcResult<Rep>
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+    Rep: TrDecodableOwned + 'f,
+    K: TrCancellationToken,
+{
+    let mut headers = Headers::new();
+    headers.set_num(
+        StdHeaderKey::Body_Transfer,
+        StdHeaderVal::Body_Transfer_Chunked.into_inner(),
+    );
+    headers.set_num(
+        StdHeaderKey::Body_Type,
+        StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
+    );
+    let prefix = RequestPrefix::with_headers(method, location.clone(), Option::Some(headers));
+    let mut session = client
+        .request_async(prefix)
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("发起 {location} 失败：{err}")))?;
+
+    let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
+    let (mut writer, mut reader) = BodyRing_::split(&mut ring);
+    let encode_cancel = cancel.child_token();
+    let encode_fut = async move {
+        let result = encode_into_async_(&request, &mut writer, encode_cancel).await;
+        writer.close();
+        result
+    };
+    let send_fut = session
+        .send_req_body_async(&mut reader)
+        .may_cancel_with(cancel.child_token());
+    let (encode_res, send_res) = futures::future::join(encode_fut, send_fut).await;
+    encode_res?;
+    send_res.map_err(|err| RpcError::Transport(format!("发送 {location} 请求体失败：{err}")))?;
+
+    let response = session
+        .recv_resp_prefix_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("接收 {location} 回复前缀失败：{err}")))?;
+    let mut body_read = session
+        .recv_resp_body_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("取 {location} 回复体失败：{err}")))?;
+    if response.status() != Status::Ok {
+        let size = response
+            .headers()
+            .and_then(Headers::body_size)
+            .unwrap_or(0usize);
+        let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
+        return Result::Err(RpcError::Remote {
+            status: response.status(),
+            body,
+        });
+    }
+    decode_from_async_::<Rep, _, _>(&mut body_read, cancel.child_token()).await
 }

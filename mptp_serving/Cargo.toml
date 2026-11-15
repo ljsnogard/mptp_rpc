@@ -1,0 +1,38 @@
+[package]
+edition = "2024"
+name = "mptp_serving"
+version = "0.1.0"
+
+description = "MPTP serving framework: endpoint, metadata, middleware and layered router."
+repository.workspace = true
+keywords = ["rpc", "router", "framework"]
+categories = ["no-std"]
+license.workspace = true
+
+[dependencies]
+# 协议形状：AccessMethod / Status。
+abs_mptp = { path = "../abs_mptp" }
+# 缓冲读契约：`req_body_async` / `req_suffix_async` 的返回类型带同样的 trait 约束。
+abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
+# 服务端会话与单一 handler 契约；本 crate 的分层 router 实现 `TrServeHandler`。
+mptp_smux = { path = "../mptp_smux" }
+# 路径树匹配：复用 matchit_route（no_std + bumpalo），不新造第二套匹配算法。
+matchit_route = { path = "../matchit_route" }
+# 请求级 arena：handler future 用它的 boxed::Box 分配（带 Drop 语义，内存随 arena 释放）。
+bumpalo = { version = "3.20.3", features = ["boxed"] }
+# 克隆 `location` 用带分配器的 String（no_std 纪律：String 一律 abs_str::String<A>）。
+abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git", default-features = false, features = [
+    "str_alloc",
+] }
+# 作为 `TrServeHandler` 时生成可取消 future。
+abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+# 具体取消源 / 令牌：`RequestCancel` 直接复用它的 `Copy` 令牌与具体取消 future。
+cantok_rs = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+
+[dev-dependencies]
+# 单元测试用 tokio 驱动会话；库本体不选运行时。
+tokio = { version = "1", features = ["macros", "rt"] }
+# 仅在测试里验证「`rpc_core_v1` 的类型元信息标记能按类型挂进 EndpointMetadata」；
+# 库本体仍然不依赖 RPC 核心，保持 serving 在 RPC 层之下。
+rpc_core_v1 = { path = "../rpc_core_v1", default-features = false }

@@ -4,7 +4,7 @@ name = "abs_mptp-tests"
 version = "0.1.0"
 publish = false
 
-description = "abs_mptp 的协议层集成测试：显式选后端，让后端选择留在测试侧"
+description = "abs_mptp / mptp_wire 的协议层集成测试：显式选后端，让后端选择留在测试侧"
 repository.workspace = true
 categories = ["no-std"]
 license.workspace = true
@@ -14,6 +14,7 @@ license.workspace = true
 [dev-dependencies]
 # 被测对象与被它透传的缓冲层。`abs_mptp` 自身不带任何 `rt-*`，后端由本仓显式选（见下）。
 abs_mptp = { path = "../abs_mptp" }
+mptp_wire = { path = "../mptp_wire" }
 abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 abs_buff_stdio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 

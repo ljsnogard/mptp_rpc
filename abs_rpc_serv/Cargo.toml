@@ -10,5 +10,8 @@ license.workspace = true
 readme = "README.md"
 
 [dependencies]
-# 契约只用到 mptp_smux 转出的协议类型（Headers / ChannelTx / Status）与取消 / 编解码抽象。
+# 契约只用到协议类型、取消 / 编解码抽象，以及 mptp_smux 的 serving 配置父 trait。
+abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+abs_mptp = { path = "../abs_mptp" }
 mptp_smux = { path = "../mptp_smux" }

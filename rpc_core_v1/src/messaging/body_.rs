@@ -13,21 +13,26 @@
 //! `send_req_body_async` drains the other half; the ring is only a bounded concurrency
 //! window, not a size limit. Decoding reads directly through a limited / chunked view.
 
+use alloc::{format, string::ToString, vec, vec::Vec};
 use core::mem::MaybeUninit;
 
+#[cfg(test)]
+use abs_buff::buffer::TrBuffSegmMut;
 use abs_buff::{
     Demand, TrBuffRead, TrBuffWrite,
-    buffer::{TrBuffSegmMut, TrBuffSegmRef, TrBuffSegmView, TrConsumerState},
+    buffer::{TrBuffSegmRef, TrBuffSegmView, TrConsumerState},
     error::{ReadErrTag, TrTaggedError},
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
-use abs_mptp::messaging::{chunked::ChunkedReader, limited::LimitedReader};
 use buffex::ring::Ring;
 use mp_denco::{MpDecoder, MpEncoder};
+#[cfg(test)]
+use mptp_wire::chunked::ChunkedReader;
+use mptp_wire::limited::LimitedReader;
 
-use crate::x_deps::{abs_buff, abs_cancel, abs_mptp};
 use super::error_::{RpcError, RpcResult};
+use crate::x_deps::{abs_buff, abs_cancel};
 
 /// 编码 / 发送之间的 ring 窗口（字节）。
 ///
@@ -77,6 +82,7 @@ where
 }
 
 /// 按请求头的体声明（定长 / 分块）直接从接收半边解码，不经过整段 `Vec`。
+#[cfg(test)]
 pub(crate) async fn decode_body_from_async_<V, R, K>(
     rx: &mut R,
     chunked: bool,
@@ -100,11 +106,8 @@ where
 /// 把一段已经在内存里的字节直接搬进发送半边。
 ///
 /// 不经过 `std::io` 适配层：借写段、把源字节搬进去、段回收时结算进度。
-pub(crate) async fn write_body_async_<T, K>(
-    tx: &mut T,
-    bytes: &[u8],
-    cancel: K,
-) -> RpcResult<usize>
+#[cfg(test)]
+pub(crate) async fn write_body_async_<T, K>(tx: &mut T, bytes: &[u8], cancel: K) -> RpcResult<usize>
 where
     T: TrBuffWrite<u8>,
     K: TrCancellationToken,
@@ -137,11 +140,7 @@ where
 /// 按 `Body_Size` 声明的长度从接收半边读出一段字节。
 ///
 /// 只用于**已知长度的错误体**；业务体走 [`decode_body_from_async_`] 的流式解码。
-pub(crate) async fn read_body_async_<R, K>(
-    rx: &mut R,
-    size: usize,
-    cancel: K,
-) -> RpcResult<Vec<u8>>
+pub(crate) async fn read_body_async_<R, K>(rx: &mut R, size: usize, cancel: K) -> RpcResult<Vec<u8>>
 where
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
@@ -186,14 +185,13 @@ where
     T: TrDecodableOwned,
 {
     let mut slice: &[u8] = bytes;
-    decode_from_async_::<T, _, _>(
-        &mut slice,
-        abs_cancel::NonCancellableToken::new(),
-    ).await
+    decode_from_async_::<T, _, _>(&mut slice, abs_cancel::NonCancellableToken::new()).await
 }
 
 #[cfg(test)]
 mod tests_ {
+    use alloc::string::String;
+
     use abs_cancel::NonCancellableToken;
     use futures::{executor::block_on, future::join};
 

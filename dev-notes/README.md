@@ -4,13 +4,85 @@
 
 - [`mptp-protocol-20261020-0200.md`](mptp-protocol-20261020-0200.md)：通信格式（前缀、头表、
   定长 / 分块体、后缀流、会话顺序）与实现模型；
-- [`rpc-framework-20261020-0332.md`](rpc-framework-20261020-0332.md)：`core_rpc_mptp_smux_v1`
-  的重构计划、Phase 0 结果与待确认问题。
 - [`rpc-preludes-20261022-2110.md`](rpc-preludes-20261022-2110.md)：`rpc_core_v1::preludes`
   的导出内容与后续文档补全清单。
+- [`router-20261106-0112.md`](router-20261106-0112.md)：分层 router 的设计提案——
+  可注入的注册契约 `TrRouter`（**添加规则只有两个入口**：绑定 handler / 绑定子 router）
+  与匹配契约 `TrRouteMatcher`；每个 router 以自己为根的局部路由表，父层不枚举子 router
+  内部规则；每个 router 自带根 handler（顶层绝对根 / 子 router 相对根，下层未命中不上抛）；
+  七种访问方法用类型化方法糖（规则由参数类型 `P::PATTERN` 提供，derive 宏编译期校验
+  `{id}` 与 handler 参数结构体字段一致）或 `MethodSet` 绑定；运行期动态增删；请求级
+  `RequestCancel`；
+  以及「资源 = handle + 绑定、不抽 `TrResource` trait」的资源模型；含 trait 设计与示例
+  用法。初稿的两层 router / 全局单表 / level+interface+scope / 静态动态双入口等方案已被
+  取代。
+- [`mptp-smux-20261110-0730.md`](mptp-smux-20261110-0730.md)：`mptp_smux` 的职责
+  边界与 README 依据：MPTP over `smux_v1` 的定位、与未来 `mptp_quic` 的共通点、
+  当前各层使用方式、越界与缺口，以及 `client` / `server` feature 的目标划分。
+- [`mptp-smux-refactor-20261111-0650.md`](mptp-smux-refactor-20261111-0650.md)：
+  `mptp_smux` 的七种 AccessMethod 标准实现、服务端单一 `TrServeHandler` / `MptpServlet`、
+  `SessionCore` 共享会话、`no_std` + `client` / `server` feature，以及 Router 迁出本 crate
+  的设计与验收清单。
+- [`mptp-smux-demo-20261111-1934.md`](mptp-smux-demo-20261111-1934.md)：
+  `mptp_smux_v1_demo` 重写为 Bevy 太阳系场景的规划与实施记录：客户端 / 服务端直接
+  MPTP，`abs_art-facade` + compio，每进程最多两个业务线程，Bevy 客户端 feature-gated，
+  `bevy_egui` 滑杆，denco 编解码，每客户端一条 MPTP 连接；订阅模型为 `View` 目录发现 +
+  每行星 `Pull` 数据流，支持选择性订阅 / 退订 / 重新订阅；后缀流按 chunk 无限写入。
+  阶段 A 的 `SuffixStream` 与 16 项无 Bevy 集成测试已实施；记录了两条 smux 行为缺口
+  （丢弃 `Response` 不可观察、对端消失时 `income_async` 不一定报错）及 demo 的业务层
+  对策。2026-11-12 追加中文字体、行星纹理、双视角相机、可调光照与 `PlanetParams`
+  广播的实施记录。
+- [`scene-param-evolution-20261112-1251.md`](scene-param-evolution-20261112-1251.md)：
+  以 demo 的需求变化为例，记录 `mptp_smux` 的传输不变量、场景业务契约的不变量，以及
+  `PlanetParams` 的可变范围、服务端清洗、开放纹理主题编号和后续需要新 API 的情形。
 - [`denco-migration-20261103-0551.md`](denco-migration-20261103-0551.md)：`mptp_smux` /
   `abs_mptp_smux` 与下游 crate 适配新版 denco（默认分支 `9550d95`）与 abs_mm
   dev/0.3.0 的改动、依赖统一与验证结果。
+- [`mptp-serving-framework-20261112-1845.md`](mptp-serving-framework-20261112-1845.md)：
+  MPTP 服务端框架设计：借鉴 ASP.NET Core 的四层关注点分离（路由只匹配、端点携带元数据、
+  中间件按元数据执行策略、处理器只关心业务），用 Salvo 式基于路由规则的路径树组织功能；
+  明确不用 Salvo 的 Depot（类型擦除状态袋）与 Tower 的 `Service`/`Layer` 类型体操。
+- [`mptp-api-plan-20261112-1850.md`](mptp-api-plan-20261112-1850.md)：
+  MPTP/SMUX API 优化计划：客户端行为收敛到「方法糖 + 类型状态 builder + 显式半关闭 /
+  取消 / 超时」，服务端升级为「端点 + 元数据 + 中间件 + 处理器」，并把 QUIC 做成
+  `abs_smux` 的第二个实现（`abs_mptp` 继续依赖 `abs_smux`，不抽 `abs_mux`）；含 P0–P4
+  分阶段与公开 API 变更清单。
+- [`integration-decisions-20261112-2045.md`](integration-decisions-20261112-2045.md)：
+  集成阶段的设计决策：取消令牌进 `MptpContext` 引入 `K: Clone` 公开约束（暂缓待确认）、
+  框架保持 `Send`-by-design（compio 需非 `Send` 变体）、`MptpConnection` 属 `mptp_smux`
+  绑定层、demo 迁移按 tokio 先行 / compio 待后。
+- [`rpc-svc-macro-mptp-serving-20261112-2130.md`](rpc-svc-macro-mptp-serving-20261112-2130.md)：
+  `rpc_svc_macro` 面向 `mptp_serving` 的改造方向（设计稿）：从「service trait + interface
+  marker + body enum 分派」改成「每个方法 = 一个 `Endpoint`」的 C# Attribute 形状（方法 +
+  路径 + 元数据 + 参数来源），宏直接落在 `RadixRouter` / `Endpoint` / `EndpointMetadata` /
+  `TrEndpointHandler` 上，退役 `RpcRouter` / `TrRpcService` / `TrRpcCallCtx`；含三个框架侧
+  前置缺口、理想语法、场景 demo 前后对照与 P0–P3 分阶段。
+- [`mptp-serving-gap-plan-20261113-0050.md`](mptp-serving-gap-plan-20261113-0050.md)：
+  `mptp_serving` 对齐框架设计稿的差距清单（G1–G7）与分阶段实施计划（Phase A–F），含
+  每阶段文件 / 步骤 / 验收门槛、风险回退，以及**开新会话接续用的提示词**；面向
+  「本会话做不完、跨会话推进」的场景。
+- [`rpc-svc-macro-handlers-20261113-0700.md`](rpc-svc-macro-handlers-20261113-0700.md)：
+  `rpc_svc_macro` 的 handler 形态扩展：尾参 `TrCancellationToken` 与自由函数 handler 的
+  落地记录，以及闭包 `FnHandler` + `bind_handler!` 的可行性结论（受 Rust 生命周期约束
+  不可行，附 spike 证据与替代方案）。
+- [`mptp-serving-implementation-20261113-0115.md`](mptp-serving-implementation-20261113-0115.md)：
+  上述差距计划的实施记录（round 27–31 / Phase A–F）：C1 泛型请求级状态 `R`、D1 `next`
+  回调洋葱的 arena 放置方案、兜底 500 与观测 hook、元数据分配器参数化与组元数据继承，
+  以及遗留缺口（宏的非 Pull 端点参数来源、跨 router 自动继承等）。
+- [`rpc-code-first-trait-20261113-1230.md`](rpc-code-first-trait-20261113-1230.md)：
+  恢复「用 trait 定义 RPC 协议」的 code-first 能力调研：先拆解 ASP.NET Core /
+  protobuf-net.Grpc 的「interface → `Method` 描述符 → per-method Endpoint → handler →
+  activator」链路，再给出 mptp_rpc 的落点——`#[rpc(service)]` / `#[rpc(namespace, services)]` /
+  `#[rpc(impl_of)]` 恢复为「trait 方法 = 一个 `Endpoint`」，用 `constcat` 编译期拼
+  `NAMESPACE/SERVICE_NAME/OPERATION`、每方法一个 owned 请求结构体、服务端 handler 由
+  `impl_of` 生成；含 2026-11-13 评审决策（不兼容旧格式、独立 `rpc_serv_ext`、
+  `RpcEndpointInfo`、去 `path` 术语、denco `()` 支持）、完整样式代码、P0–P5 计划与
+  公开 API 变更清单。
+- [`rpc-svc-macro-call-20261115-1120.md`](rpc-svc-macro-call-20261115-1120.md)：
+  code-first Call 的宏落地记录——`#[rpc(service = "...", api = X)]` trait 与
+  `#[rpc(impl_of(X))]` 的生成形状、隐藏关联类型 `__Req_*` / `__Call` 的跨 crate 命名方案、
+  `mptp_im_demo` 迁移（手写 dispatcher 删除、类型 ID golden 不变）、两处实现偏差
+  （整枚举解码后再校验、未知变体 400）与验收结果。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。
@@ -24,3 +96,18 @@
 - **模块类文档**：主题取模块名，例如 `connection-20261002-0548.md`；
 - **非模块类文档**：主题取文档自身的性质或方向，用小写英文短语，例如
   `outlook-concurrency-20261002-2322.md`。
+- [`rpc-typed-push-pull-20261114-1300.md`](rpc-typed-push-pull-20261114-1300.md)：
+  类型化 Pull / Push 与类型头协议的设计 + 实施记录：A-01 生命周期 spike（不改
+  `TrAsyncIterator` GAT，用共享守卫状态）、`Just` / `Slot` 语义、显式 64 位
+  `DataTypeId` 与版本规则、`Call` / `Post` / `Pull` / `Push` 方向表、
+  `RpcDataTypeInfo` / `RpcEndpointInfo`、有限 Push 边界、`mptp_smux` 增量
+  （`RequestSuffixStream` / `into_resp_suffix_async`）与未决风险。
+- [`type-id-denco-20261114-1945.md`](type-id-denco-20261114-1945.md)：用 denco 的结构化
+  TypeId 统一 `Data_Type_Id` 的提案 + 决策记录：`rpc_core_v1/type-id` facade 默认开、
+  `TrDataTypeId` blanket impl、`DataTypeId::from_nonzero_u64`、线上 ID 破坏的迁移、
+  golden / 冲突检测、`rpc_svc_macro` 的 opt-in 提案（未实施，A-08 仍 GAP）与其余子项目
+  的“改 / 不改”结论。
+- [`rpc-svc-macro-next-session-20261115.md`](rpc-svc-macro-next-session-20261115.md)：
+  下一会话实施 `rpc_svc_macro` Call 请求信封的交接提示词：基线、**哪些章节仍是现行
+  设计、哪些是旧形状**、宏的 trait / `impl_of` 目标输出、`CC-01..CC-20` 验收、已知坑与
+  推荐步骤；开头带有 demo 工作区未提交变更的警告。

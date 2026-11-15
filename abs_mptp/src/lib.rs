@@ -3,8 +3,8 @@
 //! 本 crate 只定义**协议层**的形状与不变量，不掺任何 RPC 业务：
 //!
 //! - [`spec`]：协议规范里的公共词汇——访问方法、状态码、标准头键值，以及头表本身；
-//! - [`messaging`]：报文前缀（`cs_`）与报文体（[`messaging::limited`] 定长、
-//!   [`messaging::chunked`] 分块）的收发机制，以及两者共用的报文 IO 地基；
+//! - [`messaging`]：报文前缀的形状（方法 / 位置 / 状态 / 头表）与体声明；
+//!   具体定长 / 分块体格式在 `mptp_wire`；
 //! - [`client`] / [`serving`]：两侧各自的配置契约与会话 / 处理者 trait。
 //!
 //! 客户端与服务端的配置**刻意不共享**：它们可能跑在两个进程里，由两份代码各自编译、
@@ -17,9 +17,9 @@
 //!
 //! - [`spec`]: the shared vocabulary — access methods, status codes, standard header
 //!   keys/values, and the header map itself;
-//! - [`messaging`]: the wire mechanics for the message prefix (`cs_`) and the body
-//!   (sized via [`messaging::limited`], chunked via [`messaging::chunked`]), plus the
-//!   message IO footing they share;
+//! - [`messaging`]: the shape of request/response prefixes (method, location, status,
+//!   headers) and body declarations; the concrete sized/chunked body formats live in
+//!   `mptp_wire`;
 //! - [`client`] / [`serving`]: each side's own configuration contract and its session
 //!   and handler traits.
 //!
@@ -28,8 +28,8 @@
 //! independently, so neither connection nor memory policy is tied together.
 
 #![feature(impl_restriction)]
-#![feature(impl_trait_in_assoc_type)]
 #![feature(unboxed_closures)]
+#![no_std]
 
 pub mod client;
 pub mod messaging;

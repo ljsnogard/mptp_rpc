@@ -34,14 +34,15 @@ buffex = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 # 但不把抽象契约定义在这里，避免宏展开与核心实现互相绑定。
 abs_rpc_serv = { path = "../abs_rpc_serv" }
 mptp_smux = { path = "../mptp_smux" }
+# 前缀线格式由 mptp_wire 拥有；RPC 层不再依赖具体传输的 messaging 别名。
+mptp_wire = { path = "../mptp_wire" }
 # abs_smux = { path = "../../../abs_smux" }
 mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2.0" }
 
 # 同一 task 内 join「编码进 ring」与「从 ring 搬运」两条分支；不替使用者选运行时。
-futures = "0.3"
-# 类型级 service 列表：`TList!` / `TCons` / `TNil`，避免手写 cons list。
-tlist = { workspace = true }
-thiserror = { version = "2.0.20" }
+# 只用到 `futures::future::join`（纯 `core` 组合子），因此关掉默认的 std / executor /
+# async-await 特性，保持 no_std。
+futures = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 # Phase 0 删除了旧的协议 / 冒烟测试；这些依赖留给 Phase 2 的真实多流集成测试。
@@ -57,6 +58,9 @@ smux_v1 = { git = "https://gitee.com/lino_snsalias/smux_v1.rs.git", default-feat
 abs_art = { git = "https://gitee.com/lino_snsalias/abs_art.git" }
 buffex_tokio_adapt = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 anyhow = "1"
+# 测试允许使用 std（含 `futures` 的 std 执行器 `block_on`）；库本体仍是 `#![no_std]`，
+# 这份 dev 依赖只在测试构建里把 `executor` / `std` 特性打开。
+futures = { version = "0.3", features = ["executor"] }
 # 集成测试自己写 step 函数时要直接用到取消令牌与生成宏；与主依赖同一个源。
 abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
@@ -66,9 +70,27 @@ gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 # 装配，而 `smux_v1` 的 socket 装配只在 tokio 下验证过。缺省若不是 tokio，workspace 全量
 # 测试就会出现分歧：本 crate 自己的 feature 以为在 compio，而门面因别的成员点亮了
 # `rt-tokio` 而选中 tokio——两边的运行时对不上。
-default = ["rt-tokio"]
+#
+# `type-id` 默认开启：`Data_Type_Id` 是线上类型头契约的一部分，denco 的结构化指纹是
+# 它唯一的单一事实来源；默认关闭会让下游退回到手写 ID（G-16 的失败模式）。它只引入
+# `const` 代码，没有运行期代价。要手写 `TrDataTypeId` 的旧路径，显式
+# `default-features = false` 即可。
+default = ["rt-tokio", "type-id"]
 # 三个后端互斥三选一：只转发**一次**给门面即可；门面的选择是全图并集，它自己取到的就是
 # 同一个 `Runtime`。
 rt-compio = ["abs_art-facade/rt-compio"]
 rt-tokio  = ["abs_art-facade/rt-tokio", "smux_v1/test-tokio-runtime"]
 rt-smol   = ["abs_art-facade/rt-smol"]
+# 用 denco 的结构化 TypeId 生成 `Data_Type_Id`。`abs_denco/type-id` 与
+# `denco_macro/type-id` 必须同时开启；只开一个时，错误分别落在「找不到 derive」与
+# 「`abs_denco::type_id` 被 cfg 掉」上（proc macro 看不到下游 feature，无法自动检测）。
+type-id = ["abs_denco/type-id", "denco_macro/type-id"]
+# 把默认的 FNV-1a 换成 Murmur3；隐含 `type-id`。同一 workspace 只能启用一种 hash，
+# 且 hash 算法是线上兼容性契约的一部分，**不要**默认打开。
+type-id-murmur3 = ["abs_denco/type-id-murmur3", "denco_macro/type-id", "type-id"]
+
+# 示例演示的是 denco 结构化 TypeId 的默认路径（DTO derive `TrHasTypeId`）。
+# 关闭 `type-id` 时示例没有手写 impl 可退回，因此显式要求该 feature。
+[[example]]
+name = "im_session"
+required-features = ["type-id"]

@@ -28,17 +28,21 @@
 //! [`MptpClient::request_to_dock_async`](super::MptpClient::request_to_dock_async)。`MptpClient`
 //! **自己不持有任何垛口**：本端每次由连接安排，远端每次由调用决定。
 
+use alloc::string::ToString;
+
 use core::{
     alloc::AllocatorClone,
     mem::MaybeUninit,
     ops::Deref,
 };
 
-use thiserror::Error;
-
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::res_man::{TrAllocBy, TrUnique};
-use abs_mptp::client::TrMptpClient;
+use abs_mptp::{
+    client::TrMptpClient,
+    spec::access_method::AccessMethod,
+};
+
 use abs_smux::{
     chan::{TrChannelHandle, TrPrepareRing},
     conn::{TrConnection, TrDockBinding},
@@ -47,46 +51,17 @@ use abs_smux::{
 use gen_mcf2::gen_may_cancel_future;
 
 use crate::{
+    error_::{ClientError, ProtocolError, TransportError},
     messaging,
     ring_prepare_::TrPrepFactory,
     x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2},
 };
 use super::{
     config::{self, ChannelHandle, Dock, ReqPrefix, TrConfig},
+    method_::RequestBuilder,
     prep_ctx_::ClientPrepCtx,
     session::MptpSession,
 };
-
-/// 客户端错误。
-#[derive(Debug, Error)]
-pub enum ClientError {
-    /// 等待期间调用方通过取消令牌发出了主动取消信号。
-    #[error("异步操作已被调用方取消")]
-    Cancelled,
-
-    /// 连接不可用（已断开，或建流失败）。
-    #[error("连接不可用：{0}")]
-    ConnectionLost(String),
-
-    /// 发送请求失败。
-    #[error("发送请求失败：{0}")]
-    ReqErr(String),
-
-    /// 接收回复失败。
-    #[error("接收回复失败：{0}")]
-    RespErr(String),
-
-    /// 准备 ring 内存失败（工厂报错）。
-    #[error("准备 ring 内存失败：{0}")]
-    RingPrepare(String),
-
-    /// 会话状态机不接受当前操作。
-    ///
-    /// 「还没收到响应前缀就去读体」属于这一条：按协议此时根本不知道体该怎么切分，任何猜出来
-    /// 的长度都会破坏这条子流上后续数据的对齐。
-    #[error("会话状态不允许该操作：{0}")]
-    State(String),
-}
 
 /// 客户端持有的连接智能指针。
 type SharedConn<C> = <C as abs_mptp::client::config::TrConfig>::SharedConn;
@@ -110,6 +85,58 @@ where
     /// 需要提前注入；目标垛口也是每次调用的实参（缺省时读配置）。
     pub const fn new(conn: SharedConn<C>) -> Self {
         MptpClient(conn)
+    }
+
+    /// 统一入口：显式方法 + 位置。
+    pub fn request(
+        &self,
+        method: AccessMethod,
+        location: impl Into<alloc::string::String>,
+    ) -> RequestBuilder<'_, C> {
+        RequestBuilder::new_(self, messaging::RequestPrefix::new(method, location))
+    }
+
+    /// `Head`：查看资源元信息；回复不应有体。
+    pub fn head(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+        self.request(AccessMethod::Head, location)
+    }
+
+    /// `View`：查看资源内容；请求通常无体，回复通常有体。
+    pub fn view(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+        self.request(AccessMethod::View, location)
+    }
+
+    /// `Post`：上传资源；请求通常有体。
+    pub fn post(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+        self.request(AccessMethod::Post, location)
+    }
+
+    /// `Drop`：删除资源；请求与回复都不应有体。
+    pub fn drop(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+        self.request(AccessMethod::Drop, location)
+    }
+
+    /// `Push`：向资源端推送流式数据；请求后缀流必需。
+    pub fn push(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+        self.request(AccessMethod::Push, location)
+    }
+
+    /// `Pull`：从资源端拉取流式数据；回复后缀流由服务端写。
+    pub fn pull(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+        self.request(AccessMethod::Pull, location)
+    }
+
+    /// `Call`：调用功能；请求 / 回复体通常都有，后缀流可选。
+    ///
+    /// 名字取 `invoke` 而不是 `call`，避免与 RPC 层 `TrRpcClientExt::call::<I>()` 的
+    /// 固有方法同名——固有方法会遮蔽扩展 trait 方法，改名是唯一不破坏后者的办法。
+    pub fn invoke(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+        self.request(AccessMethod::Call, location)
+    }
+
+    /// escape hatch：完全自定义前缀（含头、方法、位置）。
+    pub fn request_prefix(&self, prefix: messaging::RequestPrefix) -> RequestBuilder<'_, C> {
+        RequestBuilder::new_(self, prefix)
     }
 
     /// 开一条通往**指定垛口**的子流并发出一条请求——ring 内存走配置声明的默认工厂。
@@ -196,8 +223,9 @@ where
     {
         Result::Ok(binding) => binding,
         Result::Err(err) => {
-            let info = format!("在本端派生会话失败：{err}");
-            return Result::Err(ClientError::ConnectionLost(info));
+            return Result::Err(ClientError::Transport(TransportError::Bind {
+                detail: err.to_string(),
+            }));
         }
     };
     let actual_local_dock = binding.local_dock().clone();
@@ -212,8 +240,9 @@ where
     {
         Result::Ok(handle) => handle,
         Result::Err(err) => {
-            let info = format!("登记子流身份失败：{err}");
-            return Result::Err(ClientError::ConnectionLost(info));
+            return Result::Err(ClientError::Transport(TransportError::OpenChannel {
+                detail: err.to_string(),
+            }));
         }
     };
 
@@ -248,8 +277,9 @@ where
     {
         Result::Ok(halves) => halves,
         Result::Err(err) => {
-            let info = format!("最终裁决失败：{err}");
-            return Result::Err(ClientError::ConnectionLost(info));
+            return Result::Err(ClientError::Transport(TransportError::Accept {
+                detail: err.to_string(),
+            }));
         }
     };
 
@@ -258,11 +288,12 @@ where
         .may_cancel_with(cancel.child_token())
         .await
     {
-        let info = format!("写出请求前缀失败：{err}");
-        return Result::Err(ClientError::ReqErr(info));
+        return Result::Err(ClientError::Protocol(ProtocolError::RequestPrefixEncode(
+            err,
+        )));
     }
 
-    Result::Ok(MptpSession::new_(request, tx, rx))
+    MptpSession::new_(request, tx, rx)
 }
 
 /// 缺省路径的 step 函数：目标垛口取配置声明的默认服务垛口。
@@ -305,7 +336,11 @@ where
         .get_prepared_async()
         .may_cancel_with(cancel.child_token())
         .await
-        .map_err(|err| ClientError::RingPrepare(err.to_string()))?;
+        .map_err(|err| {
+            ClientError::Transport(TransportError::RingPrepare {
+                detail: err.to_string(),
+            })
+        })?;
 
     accept_send_async_(&mut handle, request, prepare, cancel.child_token()).await
 }
