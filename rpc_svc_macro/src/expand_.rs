@@ -406,6 +406,23 @@ fn handler_impl_(
         call_args.push(quote!(#arg_ident));
     }
 
+    // `Head` / `Drop` 的回复不允许带体（协议约束）。这两类端点只写状态、丢弃返回值；
+    // 错误也只写状态（错误体写不出去），这是 MPTP 的既定语义。
+    let no_body = matches!(
+        method.endpoint_.method_,
+        MethodKind_::Head | MethodKind_::Drop
+    );
+    let ok_write = if no_body {
+        quote!(ctx.session_mut().response(Status::Ok).no_body_async().await?;)
+    } else {
+        quote!(write_ok_async(ctx.session_mut(), &value).await?;)
+    };
+    let err_write = if no_body {
+        quote!(ctx.session_mut().response(status).no_body_async().await?;)
+    } else {
+        quote!(write_status_async(ctx.session_mut(), status, message).await?;)
+    };
+
     Result::Ok(quote! {
         #[doc(hidden)]
         impl<C, S, R> TrEndpointHandler<C, S, R> for #handler_ident
@@ -424,12 +441,13 @@ fn handler_impl_(
                         .await;
                     match result {
                         Ok(value) => {
-                            write_ok_async(ctx.session_mut(), &value).await?;
+                            let _ = &value;
+                            #ok_write
                         }
                         Err(error) => {
                             let status = TrReplyError::status(&error);
                             let message = TrReplyError::message(&error);
-                            write_status_async(ctx.session_mut(), status, message).await?;
+                            #err_write
                         }
                     }
                     Result::Ok(())
@@ -671,6 +689,31 @@ fn controller_client_method_(
     let path = full_path_lit_(interface, &method.endpoint_.path_);
     let access_method = access_method_expr_(method.endpoint_.method_);
 
+    // `Head` / `Drop` 的回复没有体：用 no-body 入口，否则客户端会尝试解码一个不存在的
+    // 回复体（`RpcResult<()>` 的 `()` 需要 1 个 msgpack nil 字节）。
+    let call = if matches!(
+        method.endpoint_.method_,
+        MethodKind_::Head | MethodKind_::Drop
+    ) {
+        quote! {
+            ::rpc_core_v1::client::call_endpoint_no_body_async(
+                self.client_,
+                #access_method,
+                #path,
+                #arg_ident,
+            )
+        }
+    } else {
+        quote! {
+            ::rpc_core_v1::client::call_endpoint_async(
+                self.client_,
+                #access_method,
+                #path,
+                #arg_ident,
+            )
+        }
+    };
+
     Result::Ok(quote! {
         #[doc(hidden)]
         pub fn #method_ident<'f>(&'f self, #arg_ident: #arg_ty)
@@ -679,12 +722,7 @@ fn controller_client_method_(
                 MayCancelOutput = ::rpc_core_v1::messaging::RpcResult<#output_ty>
             > + 'f
         {
-            ::rpc_core_v1::client::call_endpoint_async(
-                self.client_,
-                #access_method,
-                #path,
-                #arg_ident,
-            )
+            #call
         }
     })
 }
@@ -1044,7 +1082,9 @@ fn service_client_impl_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream
 /// 一个客户端代理方法：构造枚举变体 + 方法级类型头。
 fn service_client_method_(model: &ServiceModel_, method: &CallMethodModel_) -> ::zyn::TokenStream {
     let sig = &method.sig_;
-    let cfg = &method.cfg_attrs_;
+    // 原方法的文档 / `#[allow(...)]` / `#[cfg]` 一起带到客户端 impl 上：签名相同的 impl
+    // 方法会面对同一批 lint（例如 `clippy::ptr_arg`）。
+    let attrs = &method.attrs_;
     let enum_ident = &model.call_enum_ident_;
     let api = &model.api_;
     let variant = &method.variant_ident_;
@@ -1068,7 +1108,7 @@ fn service_client_method_(model: &ServiceModel_, method: &CallMethodModel_) -> :
         }
     };
     quote! {
-        #(#cfg)*
+        #(#attrs)*
         #sig {
             ::rpc_core_v1::client::call_endpoint_typed_async::<__rpc_c, _, #response_ty>(
                 self.client(),

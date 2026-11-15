@@ -33,8 +33,7 @@ use mptp_wire::{Headers, RequestPrefix};
 use crate::{
     client as rpc_client,
     messaging::body_::{
-        BodyRing_, K_BODY_RING_CAP_,
-        decode_from_async_, encode_into_async_, read_body_async_,
+        BodyRing_, K_BODY_RING_CAP_, decode_from_async_, encode_into_async_, read_body_async_,
     },
     messaging::{RpcError, RpcResult, TrRpcInterface, concat_location},
     stream::{RpcDataTypeInfo, apply_request_type_headers, validate_response_types, write_accept},
@@ -230,6 +229,101 @@ where
     decode_from_async_::<Rep, _, _>(&mut body_read, cancel.child_token()).await
 }
 
+/// 发起一次**不带回复体**的 unary 调用（`Drop` / `Head` 语义）。
+///
+/// 与 [`call_endpoint_async`] 的区别：成功回复不读 body，只返回 `Ok(())`；非成功状态仍
+/// 读取错误体并返回 [`RpcError::Remote`]。MPTP 规定 `Head` / `Drop` 的回复不允许带体，
+/// 因此语义化端点（controller 的 DROP / HEAD）与客户端适配器走本入口。
+///
+/// # Errors
+///
+/// 传输 / 编码失败；非成功状态返回 [`RpcError::Remote`]。
+#[allow(clippy::needless_lifetimes)]
+pub fn call_endpoint_no_body_async<'f, C, Req>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    path: &'static str,
+    request: Req,
+) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<()>> + 'f
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+{
+    EndpointCallNoBodyAsync::new(client, method, path.to_string(), request)
+}
+
+/// [`call_endpoint_no_body_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(EndpointCallNoBody, pub(crate), new(pub(crate)))]
+async fn endpoint_call_no_body_async_<'f, C, Req, K>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    location: String,
+    request: Req,
+    cancel: K,
+) -> RpcResult<()>
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+    K: TrCancellationToken,
+{
+    let mut headers = Headers::new();
+    headers.set_num(
+        StdHeaderKey::Body_Transfer,
+        StdHeaderVal::Body_Transfer_Chunked.into_inner(),
+    );
+    headers.set_num(
+        StdHeaderKey::Body_Type,
+        StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
+    );
+    let prefix = RequestPrefix::with_headers(method, location.clone(), Option::Some(headers));
+    let mut session = client
+        .request_async(prefix)
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("发起 {location} 失败：{err}")))?;
+
+    let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
+    let (mut writer, mut reader) = BodyRing_::split(&mut ring);
+    let encode_cancel = cancel.child_token();
+    let encode_fut = async move {
+        let result = encode_into_async_(&request, &mut writer, encode_cancel).await;
+        writer.close();
+        result
+    };
+    let send_fut = session
+        .send_req_body_async(&mut reader)
+        .may_cancel_with(cancel.child_token());
+    let (encode_res, send_res) = futures::future::join(encode_fut, send_fut).await;
+    encode_res?;
+    send_res.map_err(|err| RpcError::Transport(format!("发送 {location} 请求体失败：{err}")))?;
+
+    let response = session
+        .recv_resp_prefix_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("接收 {location} 回复前缀失败：{err}")))?;
+    let mut body_read = session
+        .recv_resp_body_async()
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(|err| RpcError::Transport(format!("取 {location} 回复体失败：{err}")))?;
+    if response.status() != Status::Ok {
+        let size = response
+            .headers()
+            .and_then(Headers::body_size)
+            .unwrap_or(0usize);
+        let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
+        return Result::Err(RpcError::Remote {
+            status: response.status(),
+            body,
+        });
+    }
+    // 成功：`Head` / `Drop` 的回复没有体；读 0 字节让状态机收尾，不做 body 解码。
+    let _ = read_body_async_(&mut body_read, 0usize, cancel.child_token()).await?;
+    Result::Ok(())
+}
+
 /// 发起一次带方法级类型头的 unary 调用。
 ///
 /// 与 [`call_endpoint_async`] 的区别：请求头由 `info` 写全
@@ -336,9 +430,11 @@ where
 
     let empty_headers = Headers::new();
     let response_headers = response.headers().unwrap_or(&empty_headers);
-    validate_response_types(method, response_headers, info).map_err(|rejection| RpcError::Remote {
-        status: rejection.status(),
-        body: rejection.to_string().into_bytes(),
+    validate_response_types(method, response_headers, info).map_err(|rejection| {
+        RpcError::Remote {
+            status: rejection.status(),
+            body: rejection.to_string().into_bytes(),
+        }
     })?;
 
     decode_from_async_::<Rep, _, _>(&mut body_read, cancel.child_token()).await

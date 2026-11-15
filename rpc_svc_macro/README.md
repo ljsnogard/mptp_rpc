@@ -189,7 +189,8 @@ impl。`impl_of` 生成一个 `CALL /<prefix>` endpoint、方法表与 dispatche
   - 一个 `TrEndpointHandler`（controller 持有 `Arc<Self>`，自由函数是无状态单元结构体）；
 - 每个 `Pull` 端点：一个流处理器（解码路径参数 → 调方法取迭代器 → 逐项写后缀流）；
 - `install_into`：把处理器登记进 `RadixRouter`；
-- controller 另生成客户端代理 `{Self}Rpc<'a, C>` 与构造器 `rpc(&client)`；
+- controller 另生成客户端代理 `{Self}Rpc<'a, C>` 与构造器 `rpc(&client)`；`Drop` /
+  `Head` 端点的回复无体，代理走 `call_endpoint_no_body_async`；
 - Call service trait 生成 marker / `PREFIX` / 隐藏关联类型 `__Req_*`、`__Call` / 请求枚举 /
   方法级 `RpcDataTypeInfo` / `RpcServiceInfo` / `ClientProxy` 的 trait impl；
 - `impl_of` 生成一个方法表、一个 `CALL /<prefix>` dispatcher 与 `install_into`。

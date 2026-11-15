@@ -88,6 +88,14 @@ impl SceneService {
         std::iter::once(id)
     }
 
+    /// `Drop` 端点：回复不允许带体，宏必须只写状态。
+    #[rpc(drop = "leave")]
+    #[allow(dead_code)]
+    async fn leave(&self, room_id: u64) -> Result<(), SceneError> {
+        let _ = (self.next_id, room_id);
+        Ok(())
+    }
+
     /// 显式声明尾参取消令牌的端点（`gen_mcf2` 形状）。
     #[rpc(call = "with_token")]
     #[allow(dead_code)]
@@ -149,6 +157,8 @@ where
     C: rpc_core_v1::client::TrRpcClientConfig,
 {
     let _proxy = __rpc_controller_SceneService::rpc(client);
+    // `Drop` 端点走 no-body 客户端入口；这里只做编译期形状检查。
+    let _ = _proxy.leave(1u64);
 }
 
 /// 用立即完成的执行器驱动纯内存 future。
@@ -188,6 +198,7 @@ where
     }
 
     assert_handler::<C, S, __rpc_controller_SceneService::SceneService_join>();
+    assert_handler::<C, S, __rpc_controller_SceneService::SceneService_leave>();
     assert_handler::<C, S, __rpc_controller_SceneService::SceneService_pull_planet>();
 }
 
