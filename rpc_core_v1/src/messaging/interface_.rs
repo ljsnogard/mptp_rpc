@@ -7,7 +7,7 @@
 //! /{interface}/{service}
 //! ```
 //!
-//! interface 的路径由使用者在实现 [`TrRpcInterface::PATH`] 时手写。客户端只持有一个
+//! interface 的路径由使用者在实现 [`TrRpcInterface::PREFIX`] 时手写。客户端只持有一个
 //! `MptpClient`，interface 由零大小类型参数携带。
 //!
 //! # `interface_`: interface description and path composition
@@ -23,7 +23,7 @@ use alloc::{
 
 /// 一段稳定的 RPC interface 路径前缀。
 ///
-/// `PATH` **不含**首尾 `/`；与服务路径拼接时由 [`concat_location`] 统一规范化。
+/// `PREFIX` **不含**首尾 `/`；与服务路径拼接时由 [`concat_location`] 统一规范化。
 ///
 /// # Examples
 ///
@@ -33,14 +33,14 @@ use alloc::{
 /// struct ApiV1;
 ///
 /// impl TrRpcInterface for ApiV1 {
-///     const PATH: &'static str = "api/v1";
+///     const PREFIX: &'static str = "api/v1";
 /// }
 ///
-/// assert_eq!(ApiV1::PATH, "api/v1");
+/// assert_eq!(ApiV1::PREFIX, "api/v1");
 /// ```
 pub trait TrRpcInterface {
     /// 不含首尾 `/` 的 interface 前缀。
-    const PATH: &'static str;
+    const PREFIX: &'static str;
 }
 
 /// 拼出 `/{interface}/{service}`，并消掉两端多余的首尾斜杠。

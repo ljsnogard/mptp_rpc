@@ -101,7 +101,7 @@ enum RoomEvent {
 struct ImV1;
 
 impl TrRpcInterface for ImV1 {
-    const PATH: &'static str = "im/v1";
+    const PREFIX: &'static str = "im/v1";
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----

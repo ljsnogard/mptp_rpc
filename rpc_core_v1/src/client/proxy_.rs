@@ -44,7 +44,7 @@ use crate::{
 /// 客户端极简代理。
 ///
 /// 运行期只有 `client_` 一个字段；`I` 是零大小的 interface marker，只用来携带
-/// [`TrRpcInterface::PATH`]。它实现协议端声明的 service trait（由 `#[rpc]` 宏生成），
+/// [`TrRpcInterface::PREFIX`]。它实现协议端声明的 service trait（由 `#[rpc]` 宏生成），
 /// 因此调用点可以写成：
 ///
 /// ```text
@@ -99,7 +99,7 @@ where
 /// struct ApiV1;
 ///
 /// impl TrRpcInterface for ApiV1 {
-///     const PATH: &'static str = "api/v1";
+///     const PREFIX: &'static str = "api/v1";
 /// }
 ///
 /// fn select<C>(client: &MptpClient<C>)
@@ -146,7 +146,7 @@ where
 
 /// 一次 unary 调用的 step 函数。
 ///
-/// `interface` 由类型参数 `I::PATH` 提供，`service` 是 trait 的 `SERVICE_PATH`；
+/// `interface` 由类型参数 `I::PREFIX` 提供，`service` 是 trait 的 `SERVICE_PATH`；
 /// 两者拼成 `/{interface}/{service}`。方法名只出现在 body enum 里，不参与路由。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(UnaryCall, pub(crate), new(pub(crate)))]
@@ -165,7 +165,7 @@ where
     TyTok: TrCancellationToken,
 {
     let client = proxy.client();
-    let location = concat_location(I::PATH, service);
+    let location = concat_location(I::PREFIX, service);
 
     // 业务体不预编码：请求头只声明「分块」，编码器与 `send_req_body_async` 通过
     // 一对 SPSC ring 并发推进——编码写满时等待，发送搬走多少就再编多少。
@@ -235,7 +235,7 @@ where
 /// 与 [`call_endpoint_async`] 的区别：请求头由 `info` 写全
 /// （`Body_Type` / `Data_Type_Id` / `Accept`），响应头在解码前按 `info` 校验。
 /// Call 请求枚举模式的客户端代理方法体使用本入口：`path` 是
-/// `TrRpcInterface::PATH`（完整服务前缀），`request` 是请求枚举变体，
+/// `TrRpcInterface::PREFIX`（完整服务前缀），`request` 是请求枚举变体，
 /// `info` 是该方法的 `RpcDataTypeInfo`。
 ///
 /// # Errors
