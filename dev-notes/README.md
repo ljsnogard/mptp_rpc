@@ -102,3 +102,7 @@
   `TrDataTypeId` blanket impl、`DataTypeId::from_nonzero_u64`、线上 ID 破坏的迁移、
   golden / 冲突检测、`rpc_svc_macro` 的 opt-in 提案（未实施，A-08 仍 GAP）与其余子项目
   的“改 / 不改”结论。
+- [`rpc-svc-macro-next-session-20261115.md`](rpc-svc-macro-next-session-20261115.md)：
+  下一会话实施 `rpc_svc_macro` Call 请求信封的交接提示词：基线、**哪些章节仍是现行
+  设计、哪些是旧形状**、宏的 trait / `impl_of` 目标输出、`CC-01..CC-20` 验收、已知坑与
+  推荐步骤；开头带有 demo 工作区未提交变更的警告。
