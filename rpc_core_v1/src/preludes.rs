@@ -18,7 +18,8 @@
 //! - 客户端：`MptpClient` / `ClientProxy` / `ServiceSelector` / `TrRpcClientExt` /
 //!   `call_endpoint_async`（controller 形态代理用）；
 //! - 服务端：`MptpServlet` + 新框架 body 辅助（`decode_body_async` / `write_ok_async` /
-//!   `write_status_async` / `write_stream_item_async` / `TrReplyError`）；
+//!   `write_status_async` / `write_stream_item_async` / `write_typed_value_async` /
+//!   `TrReplyError`）；
 //! - 协议与错误：`RpcError` / `RpcResult` / `TrRpcInterface` / `Status`；
 //! - 类型化流：`Just` / `Slot` / `TypedJustFlux` / `TypedSlotFlux` / `open_pull_async` /
 //!   `open_push_async`，以及类型头契约 `DataTypeId` / `TrDataTypeId` / `AcceptType` /
@@ -48,9 +49,9 @@ pub use crate::{
     messaging::{RpcError, RpcResult, TrRpcInterface},
     serving::{
         DefaultServingAllocConfig, RpcDataTypeInfo, RpcEndpointInfo, RpcMethodInfo, RpcServiceInfo,
-        TrReplyError,
-        TrServingAllocConfig, TrServingConfig, decode_body_async, typed_response,
+        TrReplyError, TrServingAllocConfig, TrServingConfig, decode_body_async, typed_response,
         validate_request_types, write_ok_async, write_status_async, write_stream_item_async,
+        write_typed_value_async,
     },
     stream::{
         AcceptType, BodyCodec, DataTypeId, Just, Slot, TrDataTypeId, TypePolicy, TypedJustFlux,

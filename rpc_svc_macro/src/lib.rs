@@ -1,19 +1,22 @@
 //! `rpc_svc_macro`：把「一段服务端业务代码」展开成 MPTP RPC 的端点处理器与客户端代理。
 //!
 //! 本 crate 只提供一个属性宏 [`rpc`]，但支持**多种组织服务端代码的写法**，开发者按「有无
-//! 状态 / 要不要客户端代理 / 是否流式 / 是否手控传输」来选择。完整取舍见下文
-//! [「组织服务端代码的方式」](#组织服务端代码的方式)与[「如何选择」](#如何选择)。
+//! 状态 / 要不要客户端代理 / 是否流式 / 是否手控传输 / 是不是 RPC 业务方法」来选择。完整
+//! 取舍见下文[「组织服务端代码的方式」](#组织服务端代码的方式)与[「如何选择」](#如何选择)。
 //!
 //! 宏据此生成：
 //!
 //! - 每个 unary 端点一个 `gen_may_cancel_future` step 函数 + 一个 `TrEndpointHandler`；
 //! - 每个 `Pull` 端点一个流处理器（解码路径参数 → 调方法取迭代器 → 逐项写后缀流）；
 //! - 一个 `install_into`，把这些处理器登记进 `mptp_serving::RadixRouter`；
-//! - controller 形态另生成一个类型化客户端代理 `{Self}Rpc`（unary 端点的方法糖）。
+//! - controller 形态另生成一个类型化客户端代理 `{Self}Rpc`（unary 端点的方法糖）；
+//! - Call service trait 形态生成 marker、请求枚举、方法级类型头、`ClientProxy` 的 trait
+//!   impl；对应的 `impl_of` 生成 `CALL /<prefix>` service dispatcher 与 installer。
 //!
 //! # 组织服务端代码的方式
 //!
-//! 下面五种方式从「最省事」到「最可控」排列。前四种由本宏生成，第五种直接手写框架 trait。
+//! 下面六种方式从「最省事」到「最可控」排列。前五种由本宏生成单个端点，第六种用 trait
+//! 定义 Call service 的业务形状。
 //!
 //! ## 1. controller：有状态、多端点、带客户端代理（最常用）
 //!
@@ -72,6 +75,60 @@
 //! 端点与手写端点可以混挂在同一个 router 上。参考 `mptp_smux_v1_demo` 的 `ScenePlanets` /
 //! `ScenePull` / `SceneRoot`。
 //!
+//! ## 6. Call service trait：code-first 定义 RPC 业务形状
+//!
+//! Call 是 RPC 语义：一个 service 只占一条 `CALL /<prefix>` 路径，方法名放在请求枚举的
+//! 变体里。协议 crate 用 trait 声明业务形状，服务端 crate 用 `impl_of` 声明实现：
+//!
+//! ```text
+//! // 协议 crate
+//! #[rpc(service = "im/v1/room", api = RoomSvc)]
+//! pub trait RoomService {
+//!     fn list_my_rooms(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<RoomSummary>>>;
+//!     fn send_message(
+//!         &self,
+//!         room_id: RoomId,
+//!         text: &str,
+//!         client_msg_id: u64,
+//!     ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Message>>;
+//! }
+//!
+//! // 服务端 crate
+//! #[rpc(impl_of(RoomSvc))]
+//! impl RoomService for RoomServiceImpl {
+//!     fn list_my_rooms(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<RoomSummary>>> { ... }
+//!     fn send_message(
+//!         &self,
+//!         room_id: RoomId,
+//!         text: &str,
+//!         client_msg_id: u64,
+//!     ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Message>> { ... }
+//! }
+//! ```
+//!
+//! trait 宏生成：
+//!
+//! - 零大小 marker（`RoomSvc`）与 `TrRpcInterface::PREFIX`；
+//! - 每方法隐藏关联类型 `__Req_<operation>`（载荷类型）与 `__Call`（请求枚举）；
+//! - 多参方法的 `__Req_*` 位置字段结构体（参数名不进线上契约）；
+//! - 请求枚举 `RoomServiceCall`：0 参 unit、1 参 newtype、≥2 参 `__Req_*` newtype；
+//! - 每方法 `RpcDataTypeInfo`、`RpcServiceInfo` 方法表；
+//! - `ClientProxy` 的 trait impl：调用点只写业务方法，不出现 path / operation / 编码。
+//!
+//! `impl_of` 宏生成一个 `CALL /<prefix>` endpoint、一个方法表与一个 dispatcher：先解请求
+//! 枚举，再按方法级 `RpcDataTypeInfo` 校验类型头，最后调业务 impl；业务 impl 原样保留。
+//! 装配点用 `__rpc_impl_of_<Impl>_via_<Marker>::install_into(router, Arc::new(impl))`。
+//!
+//! 约束：
+//!
+//! - 方法必须 `&self`、无泛型、无默认实现，返回
+//!   `impl TrMayCancel<'_, MayCancelOutput = RpcResult<T>>`；
+//! - 参数须能转成 owned 载荷：owned 类型，或白名单借用（`&str` / `&[u8]` / `&String` /
+//!   `&Vec<u8>` / `&Copy` 标量）；
+//! - 协议 crate 需要 `#![feature(associated_type_defaults)]`（隐藏关联类型带默认值），
+//!   并打开 `rpc_core_v1` 的 `type-id` feature（方法级 `Data_Type_Id` 来自 denco 指纹）；
+//! - 生成的载荷结构体 derive denco，因此调用方需要直接依赖 `abs_denco`。
+//!
 //! # 如何选择
 //!
 //! | 需求 | 选哪种 |
@@ -81,6 +138,7 @@
 //! | 需要请求级取消 | 在 1 或 2 上加尾参令牌（方式 3） |
 //! | 回复是持续流（每行星推送、订阅流） | Pull 端点（方式 4） |
 //! | 读请求后缀、手改头表、手控收尾等 | 手写 `TrEndpointHandler`（方式 5） |
+//! | RPC 业务方法（一个 service 一条路径 + 方法表） | Call service trait + `impl_of`（方式 6） |
 //!
 //! # 闭包为什么不支持
 //!
@@ -114,10 +172,16 @@ mod model_;
 
 use zyn::syn::{self, spanned::Spanned};
 
-/// 把一个 controller 固有 impl 块或一个自由 `async fn` 展开成 RPC 服务端处理器。
+/// 把一个 RPC 业务形状展开成服务端处理器与客户端代理。
 ///
-/// - `#[rpc(interface = "...")]` 用于固有 impl 块，每个端点方法用
-///   `#[rpc(方法 = "路径")]` 声明访问方法与相对路径；
+/// 支持四种输入：
+///
+/// - `#[rpc(service = "...", api = X)]` 用于 **trait**：生成 marker、`PREFIX`、请求枚举、
+///   方法级类型头与 `ClientProxy` 的 trait impl（code-first Call）；
+/// - `#[rpc(impl_of(X))]` 用于 **trait impl**：生成 service dispatcher、方法表、
+///   `CALL /<prefix>` endpoint 与 `install_into`；
+/// - `#[rpc(interface = "...")]` 用于**固有 impl 块**，每个端点方法用
+///   `#[rpc(方法 = "路径")]` 声明访问方法与相对路径（controller）；
 /// - `#[rpc(方法 = "full/path")]` 用于自由 `async fn`，路径取完整值、无客户端代理。
 ///
 /// # Examples
@@ -141,6 +205,10 @@ use zyn::syn::{self, spanned::Spanned};
 /// fn main() {}
 /// ```
 ///
+/// Call service trait / `impl_of` 的完整形状见 crate 文档的「方式 6」。它们要求协议 crate
+/// 打开 `#![feature(associated_type_defaults)]`，因此这里不放可运行示例（本 crate 的
+/// 集成测试 `tests/service_macro.rs` 覆盖该形状）。
+///
 /// # Panics
 ///
 /// 宏本身不 panic；输入不合法时通过编译器错误报出。`#[zyn(input)]` 的解析失败由 zyn
@@ -154,12 +222,34 @@ use zyn::syn::{self, spanned::Spanned};
 fn rpc(#[zyn(input)] item: syn::Item, args: zyn::Args) -> zyn::TokenStream {
     let result = (|| -> syn::Result<zyn::Output> {
         match &item {
-            syn::Item::Impl(item_impl) => {
-                let analyze_::RpcArgs_::Controller { interface } =
-                    analyze_::parse_rpc_args_(&args)?;
-                let model = analyze_::analyze_controller_(item_impl, interface)?;
-                expand_::expand_controller_(&model)
+            syn::Item::Trait(item_trait) => {
+                let analyze_::RpcArgs_::Service { prefix, api } = analyze_::parse_rpc_args_(&args)?
+                else {
+                    return Result::Err(syn::Error::new(
+                        item_trait.ident.span(),
+                        "`#[rpc(service = \"...\", api = X)]` 用于 Call service trait；\
+                         controller 用 `#[rpc(interface = \"...\")]` + 固有 impl 块",
+                    ));
+                };
+                let model = analyze_::analyze_service_(item_trait, prefix, api)?;
+                expand_::expand_service_(&model)
             }
+            syn::Item::Impl(item_impl) => match analyze_::parse_rpc_args_(&args)? {
+                analyze_::RpcArgs_::ImplOf { api } => {
+                    let model = analyze_::analyze_impl_of_(item_impl, api)?;
+                    expand_::expand_impl_of_(&model)
+                }
+                analyze_::RpcArgs_::Controller { interface } => {
+                    let model = analyze_::analyze_controller_(item_impl, interface)?;
+                    expand_::expand_controller_(&model)
+                }
+                analyze_::RpcArgs_::Service { prefix, .. } => Result::Err(syn::Error::new(
+                    item_impl.self_ty.span(),
+                    format!(
+                        "`service = \"{prefix}\"` 用于 trait 定义；trait impl 用 `#[rpc(impl_of(X))]`"
+                    ),
+                )),
+            },
             syn::Item::Fn(item_fn) => {
                 let (method, path) = analyze_::parse_free_fn_args_(&args)?;
                 let model = analyze_::analyze_free_fn_(item_fn, method, path)?;
@@ -167,7 +257,8 @@ fn rpc(#[zyn(input)] item: syn::Item, args: zyn::Args) -> zyn::TokenStream {
             }
             other => Result::Err(syn::Error::new(
                 other.span(),
-                "`#[rpc]` 只能用于固有 impl 块或自由 async 函数",
+                "`#[rpc]` 只能用于 trait（Call service）、固有 impl 块（controller）、\
+                 trait impl 块（`impl_of`）或自由 async 函数",
             )),
         }
     })();

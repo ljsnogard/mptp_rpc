@@ -16,13 +16,16 @@ use zyn::{
     format_ident,
     quote::quote,
     syn::{
-        self, FnArg, Pat, ReturnType, Type, TypeParamBound,
+        self, FnArg, LitStr, Pat, ReturnType, Type, TypeParamBound,
         spanned::Spanned,
         visit_mut::{self, VisitMut},
     },
 };
 
-use crate::model_::{ControllerModel_, EndpointMethodModel_, FreeFnModel_, MethodKind_};
+use crate::model_::{
+    BorrowMode_, CallMethodModel_, ControllerModel_, EndpointMethodModel_, FreeFnModel_,
+    ImplOfModel_, MethodKind_, PayloadShape_, ServiceModel_, raw_ident_name_, upper_snake_,
+};
 
 /// 展开一个 controller impl 块。
 ///
@@ -757,5 +760,623 @@ impl VisitMut for SelfToSvc_ {
             expr_path.path = zyn::syn::parse_quote!(svc);
         }
         visit_mut::visit_expr_path_mut(self, expr_path);
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// Call service trait：#[rpc(service = "...", api = X)]
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 展开一个 Call service trait。
+///
+/// 生成内容（都写在 trait 所在模块里）：
+///
+/// - 原 trait + 每方法 `__Req_<operation>` 关联类型 + `__Call` 关联类型；
+/// - 零大小 marker `X` 与 `TrRpcInterface::PREFIX`；
+/// - 多参方法的 `__Req_*` 位置字段结构体；
+/// - 请求枚举 `XxxServiceCall`（变体线上名 = 方法名）；
+/// - 每方法 `RpcDataTypeInfo`、方法表 `RpcServiceInfo`；
+/// - `ClientProxy` 的 trait impl（每方法构造枚举变体并调用
+///   `call_endpoint_typed_async`）。
+pub(crate) fn expand_service_(model: &ServiceModel_) -> syn::Result<zyn::Output> {
+    let trait_item = service_trait_item_(model);
+    let marker = service_marker_(model);
+    let payloads = model
+        .methods_
+        .iter()
+        .filter(|method| matches!(method.payload_, PayloadShape_::Struct))
+        .map(payload_struct_)
+        .collect::<Vec<_>>();
+    let call_enum = service_call_enum_(model);
+    let infos = model
+        .methods_
+        .iter()
+        .map(|method| service_method_info_(model, method))
+        .collect::<Vec<_>>();
+    let methods_table = service_methods_table_(model);
+    let service_info = service_info_const_(model);
+    let client = service_client_impl_(model)?;
+
+    Result::Ok(
+        quote! {
+            #trait_item
+            #marker
+            #(#payloads)*
+            #call_enum
+            #(#infos)*
+            #methods_table
+            #service_info
+            #client
+        }
+        .into(),
+    )
+}
+
+/// 原 trait + 隐藏关联类型（`__Req_*` / `__Call`）。
+fn service_trait_item_(model: &ServiceModel_) -> syn::ItemTrait {
+    let mut item = model.trait_item_.clone();
+    for method in &model.methods_ {
+        let cfg = &method.cfg_attrs_;
+        let req_ident = &method.req_assoc_ident_;
+        let default_ty = match method.payload_ {
+            PayloadShape_::Unit => quote!(()),
+            PayloadShape_::Single => {
+                let ty = &method.params_[0].owned_ty_;
+                quote!(#ty)
+            }
+            PayloadShape_::Struct => quote!(self::#req_ident),
+        };
+        let assoc: syn::TraitItem = syn::parse_quote! {
+            #(#cfg)*
+            #[doc(hidden)]
+            #[allow(non_camel_case_types)]
+            type #req_ident = #default_ty;
+        };
+        item.items.push(assoc);
+    }
+    let call_enum = &model.call_enum_ident_;
+    item.items.push(syn::parse_quote! {
+        #[doc(hidden)]
+        type __Call = self::#call_enum;
+    });
+    item
+}
+
+/// 零大小 marker + `TrRpcInterface::PREFIX`。
+fn service_marker_(model: &ServiceModel_) -> ::zyn::TokenStream {
+    let vis = &model.trait_item_.vis;
+    let api = &model.api_;
+    let prefix = LitStr::new(&model.prefix_, proc_macro2::Span::call_site());
+    quote! {
+        /// Call service 的客户端挂载点；`client.call::<Self>()` 用它选择服务前缀。
+        #[derive(Clone, Copy, Debug)]
+        #vis struct #api;
+
+        impl ::rpc_core_v1::messaging::TrRpcInterface for #api {
+            /// 完整服务前缀；Call 的 pattern 就是它。
+            const PREFIX: &'static str = #prefix;
+        }
+    }
+}
+
+/// 一个多参方法的线上请求载荷结构体（位置字段 `f0..`）。
+fn payload_struct_(method: &CallMethodModel_) -> ::zyn::TokenStream {
+    let ident = &method.req_assoc_ident_;
+    let cfg = &method.cfg_attrs_;
+    let fields = method.params_.iter().enumerate().map(|(index, param)| {
+        let field = format_ident!("f{}", index);
+        let ty = &param.owned_ty_;
+        let name = &param.ident_;
+        quote! {
+            #[doc = concat!("位置字段 `", stringify!(#field), "`，对应参数 `", stringify!(#name), "`。")]
+            pub #field: #ty,
+        }
+    });
+    quote! {
+        /// 多参方法的线上请求载荷：按位置编码的字段（参数名不进线上契约）。
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        #(#cfg)*
+        #[derive(
+            ::rpc_core_v1::x_deps::denco_macro::TrDecodable,
+            ::rpc_core_v1::x_deps::denco_macro::TrEncodable,
+            ::rpc_core_v1::x_deps::denco_macro::TrHasTypeId,
+        )]
+        pub struct #ident {
+            #(#fields)*
+        }
+    }
+}
+
+/// 请求枚举：变体线上名 = trait 方法名。
+fn service_call_enum_(model: &ServiceModel_) -> ::zyn::TokenStream {
+    let vis = &model.trait_item_.vis;
+    let enum_ident = &model.call_enum_ident_;
+    let variants = model.methods_.iter().map(|method| {
+        let cfg = &method.cfg_attrs_;
+        let variant = &method.variant_ident_;
+        let operation = LitStr::new(&raw_ident_name_(&method.ident_), method.ident_.span());
+        let payload = match method.payload_ {
+            PayloadShape_::Unit => quote!(),
+            PayloadShape_::Single => {
+                let ty = &method.params_[0].owned_ty_;
+                quote!((#ty))
+            }
+            PayloadShape_::Struct => {
+                let req = &method.req_assoc_ident_;
+                quote!((#req))
+            }
+        };
+        quote! {
+            #(#cfg)*
+            #[denco(rename = #operation)]
+            #variant #payload,
+        }
+    });
+    quote! {
+        /// Call service 的请求枚举；变体线上名 = trait 方法名。
+        #[doc(hidden)]
+        #[derive(
+            ::rpc_core_v1::x_deps::denco_macro::TrEncodable,
+            ::rpc_core_v1::x_deps::denco_macro::TrDecodable,
+        )]
+        #vis enum #enum_ident {
+            #(#variants)*
+        }
+    }
+}
+
+/// 一个方法的 `RpcDataTypeInfo` 常量。
+fn service_method_info_(model: &ServiceModel_, method: &CallMethodModel_) -> ::zyn::TokenStream {
+    let const_ident = info_const_ident_(&model.api_, method);
+    let payload_ty = service_payload_ty_(method);
+    let response_ty = &method.response_ty_;
+    let expr = data_type_info_expr_(payload_ty, response_ty);
+    let cfg = &method.cfg_attrs_;
+    let method_ident = &method.ident_;
+    quote! {
+        #[doc = concat!("`", stringify!(#method_ident), "` 的方法级类型头。")]
+        #(#cfg)*
+        pub const #const_ident: ::rpc_core_v1::stream::RpcDataTypeInfo = #expr;
+    }
+}
+
+/// trait 侧的方法载荷类型表达式。
+fn service_payload_ty_(method: &CallMethodModel_) -> ::zyn::TokenStream {
+    match method.payload_ {
+        PayloadShape_::Unit => quote!(()),
+        PayloadShape_::Single => {
+            let ty = &method.params_[0].owned_ty_;
+            quote!(#ty)
+        }
+        PayloadShape_::Struct => {
+            let req = &method.req_assoc_ident_;
+            quote!(#req)
+        }
+    }
+}
+
+/// 方法级 `RpcDataTypeInfo` 表达式。
+fn data_type_info_expr_(payload_ty: ::zyn::TokenStream, response_ty: &Type) -> ::zyn::TokenStream {
+    quote! {
+        ::rpc_core_v1::stream::RpcDataTypeInfo::new(::rpc_core_v1::stream::BodyCodec::MsgPack)
+            .with_request_body(
+                <#payload_ty as ::rpc_core_v1::stream::TrDataTypeId>::DATA_TYPE_ID,
+            )
+            .with_response_body(
+                <#response_ty as ::rpc_core_v1::stream::TrDataTypeId>::DATA_TYPE_ID,
+            )
+            .with_accept(::rpc_core_v1::stream::AcceptType::new(
+                ::rpc_core_v1::stream::BodyCodec::MsgPack,
+                ::core::option::Option::Some(
+                    <#response_ty as ::rpc_core_v1::stream::TrDataTypeId>::DATA_TYPE_ID,
+                ),
+            ))
+            .with_policy(::rpc_core_v1::stream::TypePolicy::Strict)
+    }
+}
+
+/// `{}_METHODS` 方法表常量。
+fn service_methods_table_(model: &ServiceModel_) -> ::zyn::TokenStream {
+    let const_ident = format_ident!("{}_METHODS", upper_snake_(&model.api_));
+    let entries = model.methods_.iter().map(|method| {
+        let cfg = &method.cfg_attrs_;
+        let operation = LitStr::new(&raw_ident_name_(&method.ident_), method.ident_.span());
+        let info = info_const_ident_(&model.api_, method);
+        quote! {
+            #(#cfg)*
+            ::rpc_core_v1::stream::RpcMethodInfo::new(#operation, #info),
+        }
+    });
+    quote! {
+        /// Call service 的方法表：operation + 方法级类型头。
+        pub const #const_ident: &[::rpc_core_v1::stream::RpcMethodInfo] = &[
+            #(#entries)*
+        ];
+    }
+}
+
+/// `{}_INFO` service 级元信息常量。
+fn service_info_const_(model: &ServiceModel_) -> ::zyn::TokenStream {
+    let const_ident = format_ident!("{}_INFO", upper_snake_(&model.api_));
+    let methods = format_ident!("{}_METHODS", upper_snake_(&model.api_));
+    let api = &model.api_;
+    quote! {
+        /// Call service 的 service 级元信息：前缀 + 方法表。
+        pub const #const_ident: ::rpc_core_v1::stream::RpcServiceInfo =
+            ::rpc_core_v1::stream::RpcServiceInfo::new(
+                <#api as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX,
+                <#api as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX,
+                #methods,
+            );
+    }
+}
+
+/// 方法级类型头常量名：`{MARKER}_{METHOD}_INFO`。
+fn info_const_ident_(api: &syn::Ident, method: &CallMethodModel_) -> syn::Ident {
+    format_ident!(
+        "{}_{}_INFO",
+        upper_snake_(api),
+        upper_snake_(&method.ident_)
+    )
+}
+
+/// `ClientProxy` 的 trait impl。
+fn service_client_impl_(model: &ServiceModel_) -> syn::Result<::zyn::TokenStream> {
+    let trait_ident = &model.trait_ident_;
+    let api = &model.api_;
+    let methods = model
+        .methods_
+        .iter()
+        .map(|method| service_client_method_(model, method))
+        .collect::<Vec<_>>();
+    Result::Ok(quote! {
+        impl<'__rpc_a, __rpc_c> #trait_ident
+            for ::rpc_core_v1::client::ClientProxy<'__rpc_a, __rpc_c, #api>
+        where
+            __rpc_c: ::rpc_core_v1::client::TrRpcClientConfig,
+        {
+            #(#methods)*
+        }
+    })
+}
+
+/// 一个客户端代理方法：构造枚举变体 + 方法级类型头。
+fn service_client_method_(model: &ServiceModel_, method: &CallMethodModel_) -> ::zyn::TokenStream {
+    let sig = &method.sig_;
+    let cfg = &method.cfg_attrs_;
+    let enum_ident = &model.call_enum_ident_;
+    let api = &model.api_;
+    let variant = &method.variant_ident_;
+    let response_ty = &method.response_ty_;
+    let info = info_const_ident_(&model.api_, method);
+    let body = match method.payload_ {
+        PayloadShape_::Unit => quote!(#enum_ident::#variant),
+        PayloadShape_::Single => {
+            let param = &method.params_[0];
+            let value = owned_expr_(param);
+            quote!(#enum_ident::#variant(#value))
+        }
+        PayloadShape_::Struct => {
+            let req = &method.req_assoc_ident_;
+            let fields = method.params_.iter().enumerate().map(|(index, param)| {
+                let field = format_ident!("f{}", index);
+                let value = owned_expr_(param);
+                quote!(#field: #value)
+            });
+            quote!(#enum_ident::#variant(#req { #(#fields),* }))
+        }
+    };
+    quote! {
+        #(#cfg)*
+        #sig {
+            ::rpc_core_v1::client::call_endpoint_typed_async::<__rpc_c, _, #response_ty>(
+                self.client(),
+                ::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Call,
+                <#api as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX,
+                &#info,
+                #body,
+            )
+        }
+    }
+}
+
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+// Call service impl：#[rpc(impl_of(X))]
+//-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
+
+/// 展开一个 Call service 的 trait impl：保留业务 impl，生成 service dispatcher、
+/// 方法表、一个 `CALL /<prefix>` endpoint 与 `install_into`。
+pub(crate) fn expand_impl_of_(model: &ImplOfModel_) -> syn::Result<zyn::Output> {
+    let impl_item = &model.impl_item_;
+    let module = impl_of_module_(model);
+    Result::Ok(
+        quote! {
+            #impl_item
+            #module
+        }
+        .into(),
+    )
+}
+
+/// 生成 impl_of 的隐藏模块：方法表 + dispatcher + `install_into`。
+fn impl_of_module_(model: &ImplOfModel_) -> ::zyn::TokenStream {
+    let module_ident = format_ident!(
+        "__rpc_impl_of_{}_via_{}",
+        raw_ident_name_(&model.self_ident_),
+        raw_ident_name_(&model.api_ident_)
+    );
+    let self_ty = &model.self_ty_;
+    let trait_path = &model.trait_path_;
+    let api = &model.api_path_;
+    let call_ty = quote!(<#self_ty as #trait_path>::__Call);
+    let infos = model
+        .methods_
+        .iter()
+        .map(|method| impl_of_method_info_(model, method))
+        .collect::<Vec<_>>();
+    let methods_table = impl_of_methods_table_(model);
+    let service_info = impl_of_service_info_(model);
+    let info_arms = model.methods_.iter().map(|method| {
+        let cfg = &method.cfg_attrs_;
+        let variant = &method.variant_ident_;
+        let info = impl_of_info_ident_(method);
+        let pattern = match method.payload_ {
+            PayloadShape_::Unit => quote!(CallTy_::#variant),
+            _ => quote!(CallTy_::#variant(_)),
+        };
+        quote! {
+            #(#cfg)*
+            #pattern => &#info,
+        }
+    });
+    let dispatch_arms = model.methods_.iter().map(impl_of_dispatch_arm_);
+    quote! {
+        #[doc(hidden)]
+        #[allow(non_snake_case, non_camel_case_types, unused_imports)]
+        pub mod #module_ident {
+            use super::*;
+            use ::mptp_serving::{
+                Endpoint, HandlerFuture, MethodSet, MptpContext, RadixRouter, TrEndpointHandler,
+                box_future_,
+            };
+            use ::mptp_serving::x_deps::mptp_smux::{
+                ServeError,
+                serving::{ServingSession, config::TrConfig},
+            };
+            use ::rpc_core_v1::messaging::{RpcError, RpcResult};
+            use ::rpc_core_v1::serving::{
+                decode_body_async, validate_request_types, write_status_async,
+                write_typed_value_async,
+            };
+            use ::rpc_core_v1::stream::RpcDataTypeInfo;
+            use ::rpc_core_v1::x_deps::abs_cancel::TrMayCancel;
+            use ::rpc_core_v1::x_deps::abs_denco::ser::TrEncodable;
+            use ::rpc_core_v1::x_deps::abs_mptp::spec::{Status, access_method::AccessMethod};
+
+            /// 请求枚举的本地别名：模式里不能用限定路径，别名让 `XxxCall::Variant` 可用。
+            type CallTy_ = #call_ty;
+
+            /// 一个业务结果写成 typed 200 或错误状态。
+            async fn write_result_<C, T>(
+                session: &mut ServingSession<C>,
+                info: &RpcDataTypeInfo,
+                result: RpcResult<T>,
+            ) -> Result<(), ServeError>
+            where
+                C: TrConfig,
+                T: TrEncodable,
+            {
+                match result {
+                    Result::Ok(value) => {
+                        write_typed_value_async(
+                            session,
+                            Status::Ok,
+                            AccessMethod::Call,
+                            info,
+                            &value,
+                        )
+                        .await
+                    }
+                    Result::Err(error) => {
+                        let (status, message) = error.into_reply_parts();
+                        write_status_async(session, status, message).await
+                    }
+                }
+            }
+
+            #(#infos)*
+            #methods_table
+            #service_info
+
+            /// 一个 Call service 的 dispatcher：解请求枚举 → 方法级校验 → 调 impl。
+            pub struct ServiceDispatcher {
+                /// 业务实现；所有方法共享同一个 `Arc`。
+                svc_: ::std::sync::Arc<#self_ty>,
+            }
+
+            impl<C, S, R> TrEndpointHandler<C, S, R> for ServiceDispatcher
+            where
+                C: TrConfig + 'static,
+            {
+                fn handle<'a, 'f>(
+                    &'a self,
+                    ctx: &'a mut MptpContext<'f, C, S, R>,
+                ) -> HandlerFuture<'a> {
+                    let arena = ctx.arena();
+                    box_future_(arena, async move {
+                        let call: CallTy_ = match decode_body_async(ctx.session_mut()).await {
+                            Result::Ok(call) => call,
+                            Result::Err(err) => {
+                                write_status_async(
+                                    ctx.session_mut(),
+                                    Status::BadRequest,
+                                    err.to_string(),
+                                )
+                                .await?;
+                                return Result::Ok(());
+                            }
+                        };
+                        let info: &'static RpcDataTypeInfo = match &call {
+                            #(#info_arms)*
+                        };
+                        if let Result::Err(rejection) =
+                            validate_request_types(AccessMethod::Call, ctx.headers(), info)
+                        {
+                            write_status_async(
+                                ctx.session_mut(),
+                                rejection.status(),
+                                rejection.to_string(),
+                            )
+                            .await?;
+                            return Result::Ok(());
+                        }
+
+                        match call {
+                            #(#dispatch_arms)*
+                        }
+                        Result::Ok(())
+                    })
+                }
+            }
+
+            /// 安装这个 service：`CALL /<prefix>` + 方法表。
+            #[doc(hidden)]
+            pub fn install_into<C, S, R>(
+                router: RadixRouter<C, S, R, ::std::alloc::Global>,
+                svc: ::std::sync::Arc<#self_ty>,
+            ) -> Result<
+                RadixRouter<C, S, R, ::std::alloc::Global>,
+                ::mptp_serving::x_deps::matchit_route::InsertError,
+            >
+            where
+                C: TrConfig + 'static,
+                S: Send + Sync + 'static,
+                R: 'static,
+            {
+                let endpoint = Endpoint::new(
+                    <#api as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX,
+                    MethodSet::CALL,
+                    ::std::sync::Arc::new(ServiceDispatcher { svc_: svc }),
+                )
+                .with_metadata(SERVICE_INFO_);
+                router.bind_endpoint(endpoint)
+            }
+        }
+    }
+}
+
+/// impl_of 侧的方法级类型头常量名：`METHOD_{METHOD}_INFO_`。
+fn impl_of_info_ident_(method: &CallMethodModel_) -> syn::Ident {
+    format_ident!("METHOD_{}_INFO_", upper_snake_(&method.ident_))
+}
+
+/// impl_of 侧的方法载荷类型：跨 crate 通过隐藏关联类型命名。
+fn impl_of_payload_ty_(model: &ImplOfModel_, method: &CallMethodModel_) -> ::zyn::TokenStream {
+    let self_ty = &model.self_ty_;
+    let trait_path = &model.trait_path_;
+    let req = &method.req_assoc_ident_;
+    quote!(<#self_ty as #trait_path>::#req)
+}
+
+/// impl_of 侧一个方法的 `RpcDataTypeInfo` 常量。
+fn impl_of_method_info_(model: &ImplOfModel_, method: &CallMethodModel_) -> ::zyn::TokenStream {
+    let const_ident = impl_of_info_ident_(method);
+    let payload_ty = impl_of_payload_ty_(model, method);
+    let response_ty = &method.response_ty_;
+    let expr = data_type_info_expr_(payload_ty, response_ty);
+    let cfg = &method.cfg_attrs_;
+    quote! {
+        #(#cfg)*
+        const #const_ident: ::rpc_core_v1::stream::RpcDataTypeInfo = #expr;
+    }
+}
+
+/// impl_of 侧的方法表常量。
+fn impl_of_methods_table_(model: &ImplOfModel_) -> ::zyn::TokenStream {
+    let entries = model.methods_.iter().map(|method| {
+        let cfg = &method.cfg_attrs_;
+        let operation = LitStr::new(&raw_ident_name_(&method.ident_), method.ident_.span());
+        let info = impl_of_info_ident_(method);
+        quote! {
+            #(#cfg)*
+            ::rpc_core_v1::stream::RpcMethodInfo::new(#operation, #info),
+        }
+    });
+    quote! {
+        const METHODS_: &[::rpc_core_v1::stream::RpcMethodInfo] = &[
+            #(#entries)*
+        ];
+    }
+}
+
+/// impl_of 侧的 service 级元信息常量。
+fn impl_of_service_info_(model: &ImplOfModel_) -> ::zyn::TokenStream {
+    let api = &model.api_path_;
+    quote! {
+        const SERVICE_INFO_: ::rpc_core_v1::stream::RpcServiceInfo =
+            ::rpc_core_v1::stream::RpcServiceInfo::new(
+                <#api as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX,
+                <#api as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX,
+                METHODS_,
+            );
+    }
+}
+
+/// impl_of 侧一个变体的分派分支。
+fn impl_of_dispatch_arm_(method: &CallMethodModel_) -> ::zyn::TokenStream {
+    let cfg = &method.cfg_attrs_;
+    let variant = &method.variant_ident_;
+    let method_ident = &method.ident_;
+    let info = impl_of_info_ident_(method);
+    let (pattern, args) = match method.payload_ {
+        PayloadShape_::Unit => (quote!(CallTy_::#variant), quote!()),
+        PayloadShape_::Single => {
+            let param = &method.params_[0];
+            let arg = dispatch_arg_(param, quote!(payload));
+            (quote!(CallTy_::#variant(payload)), quote!(#arg))
+        }
+        PayloadShape_::Struct => {
+            let args = method.params_.iter().enumerate().map(|(index, param)| {
+                let field = format_ident!("f{}", index);
+                dispatch_arg_(param, quote!(req.#field))
+            });
+            (quote!(CallTy_::#variant(req)), quote!(#(#args),*))
+        }
+    };
+    quote! {
+        #(#cfg)*
+        #pattern => {
+            let result = self
+                .svc_
+                .#method_ident(#args)
+                .may_cancel_with(ctx.cancel().child_token())
+                .await;
+            write_result_(ctx.session_mut(), &#info, result).await?;
+        }
+    }
+}
+
+/// 客户端侧：owned 参数原样放进载荷，借用参数按白名单转换成 owned。
+fn owned_expr_(param: &crate::model_::CallParam_) -> ::zyn::TokenStream {
+    let ident = &param.ident_;
+    match param.borrow_ {
+        BorrowMode_::Owned => quote!(#ident),
+        BorrowMode_::Str => quote!(::std::string::ToString::to_string(#ident)),
+        BorrowMode_::Bytes => quote!(::std::vec::Vec::from(#ident)),
+        BorrowMode_::Clone => quote!(::core::clone::Clone::clone(#ident)),
+        BorrowMode_::Copy => quote!(*#ident),
+    }
+}
+
+/// 服务端侧：借用参数把 owned 载荷借回去，owned 参数按值传。
+fn dispatch_arg_(
+    param: &crate::model_::CallParam_,
+    owned: ::zyn::TokenStream,
+) -> ::zyn::TokenStream {
+    if param.borrow_.is_borrowed() {
+        quote!(&#owned)
+    } else {
+        owned
     }
 }

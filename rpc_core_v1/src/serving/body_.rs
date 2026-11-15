@@ -24,7 +24,7 @@ use core::mem::MaybeUninit;
 
 use abs_cancel::{NonCancellableToken, TrMayCancel};
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
-use abs_mptp::spec::Status;
+use abs_mptp::spec::{Status, access_method::AccessMethod};
 use futures::future::join;
 use mp_denco::MpDecoder;
 use mptp_smux::{
@@ -34,6 +34,7 @@ use mptp_smux::{
 
 use crate::{
     messaging::body_::{BodyRing_, K_BODY_RING_CAP_, encode_into_async_},
+    serving::types_::{RpcDataTypeInfo, typed_response},
     x_deps::{abs_cancel, abs_mptp},
 };
 
@@ -94,6 +95,63 @@ where
     let send = async {
         session
             .response(Status::Ok)
+            .chunked_async(&mut reader)
+            .await
+    };
+    let (encoded, sent) = join(encode, send).await;
+    encoded.map_err(|err| ServeError::Target {
+        detail: err.to_string(),
+    })?;
+    sent?;
+    Result::Ok(())
+}
+
+/// 按端点元信息写一个带类型头的回复体，任意长度。
+///
+/// 与 [`write_ok_async`] 的区别：回复前缀由 [`typed_response`] 写全
+/// （`Body_Type` / `Data_Type_Id`，以及该项所表达方向的其它头），供 `impl_of` 生成的
+/// Call service dispatcher 使用——它必须按**方法级** [`RpcDataTypeInfo`] 写响应头。
+///
+/// # Examples
+///
+/// ```ignore
+/// use rpc_core_v1::serving::write_typed_value_async;
+/// use rpc_core_v1::x_deps::abs_mptp::spec::{Status, access_method::AccessMethod};
+///
+/// # async fn demo<C>(
+/// #     session: &mut mptp_smux::serving::ServingSession<C>,
+/// #     info: &rpc_core_v1::stream::RpcDataTypeInfo,
+/// # ) -> Result<(), mptp_smux::ServeError>
+/// # where C: mptp_smux::serving::config::TrConfig,
+/// # {
+/// write_typed_value_async(session, Status::Ok, AccessMethod::Call, info, &42u64).await
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// 编码失败返回 [`ServeError::Target`]；写回复前缀 / 体失败返回底层错误。
+pub async fn write_typed_value_async<C, T>(
+    session: &mut ServingSession<C>,
+    status: Status,
+    method: AccessMethod,
+    info: &RpcDataTypeInfo,
+    value: &T,
+) -> Result<(), ServeError>
+where
+    C: TrConfig,
+    T: ?Sized + TrEncodable,
+{
+    let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
+    let (mut writer, mut reader) = BodyRing_::split(&mut ring);
+    let encode = async {
+        let result = encode_into_async_(value, &mut writer, NonCancellableToken::new()).await;
+        // 无论成功失败都关闭写端：读端据此看到 EOF，不会永久等待。
+        writer.close();
+        result
+    };
+    let send = async {
+        typed_response(session, status, method, info)
             .chunked_async(&mut reader)
             .await
     };

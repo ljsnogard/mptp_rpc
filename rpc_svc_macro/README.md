@@ -40,7 +40,7 @@ let servlet = mptp_smux::serving::MptpServlet::<ServingCfg, _>::new(router);
 `HelloReply` 需要 denco 的 `TrEncodable` / `TrDecodable`，`GreetError` 需要实现
 `rpc_core_v1::serving::TrReplyError`。
 
-## 组织服务端代码的五种方式
+## 组织服务端代码的六种方式
 
 ### 1. controller：有状态、多端点、带客户端代理
 
@@ -110,6 +110,60 @@ impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for Raw {
 }
 ```
 
+### 6. Call service trait：code-first 定义 RPC 业务形状
+
+Call 是 RPC 语义：一个 service 只占一条 `CALL /<prefix>` 路径，方法名放在请求枚举的
+变体里。协议 crate 用 trait 声明业务形状，服务端 crate 用 `impl_of` 声明实现：
+
+```rust
+// 协议 crate：Cargo.toml 打开 rpc_core_v1 的 `type-id` feature，
+// lib.rs 打开 `#![feature(associated_type_defaults)]`。
+use abs_cancel::TrMayCancel;
+use rpc_core_v1::messaging::RpcResult;
+use rpc_svc_macro::rpc;
+
+#[rpc(service = "im/v1/room", api = RoomSvc)]
+pub trait RoomService {
+    fn list_my_rooms(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<RoomSummary>>>;
+
+    fn send_message(
+        &self,
+        room_id: u64,
+        text: &str,
+        client_msg_id: u64,
+    ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Message>>;
+}
+
+// 服务端 crate：业务 impl 原样保留。
+#[rpc(impl_of(RoomSvc))]
+impl RoomService for RoomServiceImpl {
+    fn list_my_rooms(&self) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Vec<RoomSummary>>> { ... }
+
+    fn send_message(
+        &self,
+        room_id: u64,
+        text: &str,
+        client_msg_id: u64,
+    ) -> impl TrMayCancel<'_, MayCancelOutput = RpcResult<Message>> { ... }
+}
+
+// 装配：impl_of 生成 `__rpc_impl_of_<Impl>_via_<Marker>::install_into`。
+let router = __rpc_impl_of_RoomServiceImpl_via_RoomSvc::install_into(router, room)?;
+
+// 客户端：调用点不出现 path / operation / 变体 / 编码。
+let room = client.call::<RoomSvc>();
+let message = room.send_message(42, "hi", 1).may_cancel_with(token).await?;
+```
+
+trait 宏生成 marker、请求枚举（0 参 unit / 1 参 newtype / ≥2 参 `__Req_*` 位置字段
+结构体）、每方法 `RpcDataTypeInfo` 与 `RpcServiceInfo` 方法表、`ClientProxy` 的 trait
+impl。`impl_of` 生成一个 `CALL /<prefix>` endpoint、方法表与 dispatcher（解请求枚举 →
+方法级类型头校验 → 调业务 impl）。
+
+约束：方法是 `&self`、无泛型、无默认实现；参数须能转成 owned 载荷（owned 类型，或
+`&str` / `&[u8]` / `&String` / `&Vec<u8>` / `&Copy` 标量）；`impl_of(...)` 只接受已在
+作用域内的简单 marker 标识符。
+
 ## 如何选择
 
 | 需求 | 选哪种 |
@@ -119,6 +173,7 @@ impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for Raw {
 | 需要请求级取消 | 在方式 1 / 2 上加尾参令牌（方式 3） |
 | 回复是持续流（订阅、推送） | Pull 端点（方式 4） |
 | 读请求后缀、手改头表、手控收尾 | 手写 `TrEndpointHandler`（方式 5） |
+| RPC 业务方法（一个 service 一条路径 + 方法表） | Call service trait + `impl_of`（方式 6） |
 
 **闭包不做**：`MptpContext` 是借用的，而 handler future 会借用它；`TrEndpointHandler` 的
 `handle<'a, 'f>` 又要求两个独立生命周期，`Fn` 闭包无法表达「返回借用参数的 future」
@@ -134,7 +189,10 @@ impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for Raw {
   - 一个 `TrEndpointHandler`（controller 持有 `Arc<Self>`，自由函数是无状态单元结构体）；
 - 每个 `Pull` 端点：一个流处理器（解码路径参数 → 调方法取迭代器 → 逐项写后缀流）；
 - `install_into`：把处理器登记进 `RadixRouter`；
-- controller 另生成客户端代理 `{Self}Rpc<'a, C>` 与构造器 `rpc(&client)`。
+- controller 另生成客户端代理 `{Self}Rpc<'a, C>` 与构造器 `rpc(&client)`；
+- Call service trait 生成 marker / `PREFIX` / 隐藏关联类型 `__Req_*`、`__Call` / 请求枚举 /
+  方法级 `RpcDataTypeInfo` / `RpcServiceInfo` / `ClientProxy` 的 trait impl；
+- `impl_of` 生成一个方法表、一个 `CALL /<prefix>` dispatcher 与 `install_into`。
 
 客户端代理只覆盖 **1 个 body 参数的 unary 端点**：
 
@@ -156,11 +214,16 @@ let reply: HelloReply = proxy.hello(req).may_cancel_with(token).await?;
 - 自由函数：路径取完整值（无 `interface` 前缀）、不生成客户端代理、端点声明写在
   `#[rpc(方法 = "完整路径")]` 上；
 - 业务类型需要 denco 的 `TrEncodable` / `TrDecodable`；
-- 生成代码会调用 `gen_mcf2`，协议 crate 需要
-  `#![feature(impl_trait_in_assoc_type)]`。
+- 生成代码会调用 `gen_mcf2`，controller / Pull 形态的协议 crate 需要
+  `#![feature(impl_trait_in_assoc_type)]`；
+- Call service trait 形态另需 `#![feature(associated_type_defaults)]`（隐藏关联类型带
+  默认值）与 `rpc_core_v1` 的 `type-id` feature（方法级 `Data_Type_Id` 来自 denco 指纹）。
 
 ## 依赖
 
 生成的隐藏模块会引用 `mptp_serving`、`rpc_core_v1`（含 `x_deps`）、`gen_mcf2` 与
 `abs_cancel`；业务类型的 denco 派生还需要 `abs_denco`。协议 crate 的 `Cargo.toml` 里
 把这些依赖列全即可（`rpc_core_v1::x_deps` 也转出了其中大部分）。
+
+Call service 形态的生成代码还引用 `::rpc_core_v1::x_deps::denco_macro` 的派生宏，
+因此协议 crate 需要直接依赖 `abs_denco`（派生展开会硬编码 `abs_denco::...`）。
