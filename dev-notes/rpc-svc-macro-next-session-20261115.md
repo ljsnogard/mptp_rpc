@@ -2,7 +2,9 @@
 
 - 日期：2026-11-15
 - 目标仓库：`mptp_rpc`（主）、`mptp_im_demo`（验收）
-- 状态：**提示词 / 交接文档**；本会话只生成它，不实施宏
+- 状态：**已完成**（2026-11-15 实施；记录见
+  [`rpc-svc-macro-call-20261115-1120.md`](rpc-svc-macro-call-20261115-1120.md)）。
+  本文件保留为当轮的验收口径与工作拆分；§2 的文档地图仍适用。
 - 基线：
   - `mptp_rpc` `9014bb1`（`TrRpcInterface::PREFIX`、`RpcMethodInfo` /
     `RpcServiceInfo`、`call_endpoint_typed_async`）

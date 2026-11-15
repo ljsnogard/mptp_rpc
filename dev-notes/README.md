@@ -78,6 +78,11 @@
   `impl_of` 生成；含 2026-11-13 评审决策（不兼容旧格式、独立 `rpc_serv_ext`、
   `RpcEndpointInfo`、去 `path` 术语、denco `()` 支持）、完整样式代码、P0–P5 计划与
   公开 API 变更清单。
+- [`rpc-svc-macro-call-20261115-1120.md`](rpc-svc-macro-call-20261115-1120.md)：
+  code-first Call 的宏落地记录——`#[rpc(service = "...", api = X)]` trait 与
+  `#[rpc(impl_of(X))]` 的生成形状、隐藏关联类型 `__Req_*` / `__Call` 的跨 crate 命名方案、
+  `mptp_im_demo` 迁移（手写 dispatcher 删除、类型 ID golden 不变）、两处实现偏差
+  （整枚举解码后再校验、未知变体 400）与验收结果。
 
 历史设计笔记已移除；协议细节以这份综述为准。后续若需要新增调研或决策记录，仍按下面的命名
 规范存放，但不应把综述中的规范内容拆散回多篇笔记。

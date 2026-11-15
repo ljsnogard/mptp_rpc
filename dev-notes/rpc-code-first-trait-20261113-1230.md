@@ -1733,6 +1733,12 @@ View / Pull / Push / Drop 保持 §11 + endpoint-design 的每方法 path 与
 | CC-19 | 取消：每个方法可 `.may_cancel_with(token)` | 编译 + 取消用例 |
 | CC-20 | 多前缀：`DiagV1` / `DiagV2` 两个 marker，各自 `CALL /im/v1/diag` / `CALL /im/v2/diag` | 路由 + 客户端挂载 |
 
+**实施状态（2026-11-15）**：`CC-01..CC-19` 已由 `rpc_svc_macro` 的 trait / `impl_of`
+落地（`mptp_im_demo` 14 场景全绿），逐条证据与两处实现偏差（整枚举解码后再校验、
+未知变体回 400）见
+[`rpc-svc-macro-call-20261115-1120.md`](rpc-svc-macro-call-20261115-1120.md) §5；
+`CC-20` 多前缀仍后置。
+
 ### 12.11 风险
 
 - **枚举 schema 变化**：新增变体对旧客户端是兼容的（旧客户端不发送新变体）；删除/
