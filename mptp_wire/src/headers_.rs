@@ -388,7 +388,8 @@ impl<A: Allocator> TrNumOrObj for HeaderVal<A> {
 struct BinRef<'b>(&'b [u8]);
 
 impl<'b> TrEncodable for BinRef<'b> {
-    type EncodeAsync<'a, E> = E::EncodeBytesAsync<'a, 'b>
+    type EncodeAsync<'a, E>
+        = E::EncodeBytesAsync<'a, 'b>
     where
         Self: 'a,
         E: TrEncoder + 'a,
@@ -1004,10 +1005,12 @@ impl<A: AllocatorClone> Headers<A> {
     /// );
     /// ```
     pub fn try_get_str(&self, name: &str) -> Option<&HeaderVal<A>> {
-        self.map_.iter().find_map(|(key, val)| match key.as_u16_or_str() {
-            U16OrStr::Str(text) if **text == *name => Option::Some(val),
-            _ => Option::None,
-        })
+        self.map_
+            .iter()
+            .find_map(|(key, val)| match key.as_u16_or_str() {
+                U16OrStr::Str(text) if **text == *name => Option::Some(val),
+                _ => Option::None,
+            })
     }
 
     /// 遍历全部条目。

@@ -34,6 +34,8 @@
 //! typed Pull/Push fluxes, type headers, finite Push and cancellation; a real transport
 //! only swaps the in-memory reader/writer for `mptp_smux` handles.
 
+use std::alloc::Global;
+
 use abs_async_iter::{TrAsyncIterator, TrFlux};
 use abs_buff::{
     Demand, TrBuffFlush, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite, x_deps::anylr::SomeOf,
@@ -42,15 +44,14 @@ use abs_cancel::{CancelledToken, TrMayCancel};
 use abs_mptp::spec::access_method::AccessMethod;
 use denco_macro::{TrDecodable, TrEncodable, TrHasTypeId};
 use futures::executor::block_on;
-use std::alloc::Global;
 use mptp_smux::Headers;
 use rpc_core_v1::{
     client::{ClientProxy, TrRpcClientConfig, call_unary_async},
     messaging::{RpcResult, TrRpcInterface},
     stream::{
-        AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, StreamError, StreamFuture, TrDataTypeId,
-        TrSuffixFinish, TrSuffixWrite, TypedJustFlux, TypedSlotFlux, apply_request_type_headers,
-        validate_request_types, write_accept,
+        AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, StreamError, StreamFuture,
+        TrDataTypeId, TrSuffixFinish, TrSuffixWrite, TypedJustFlux, TypedSlotFlux,
+        apply_request_type_headers, validate_request_types, write_accept,
     },
     x_deps::{abs_async_iter, abs_buff, abs_cancel, abs_mptp, mptp_smux},
 };

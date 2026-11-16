@@ -24,10 +24,9 @@ use mptp_wire::{Headers, ResponsePrefix};
 pub use crate::stream::{
     AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, RpcMethodInfo,
     RpcServiceInfo, TrDataTypeId, TypeHeaderError, TypePolicy, TypeRejection,
-    apply_request_type_headers,
-    apply_response_type_headers, read_accept, read_body_codec, read_data_type_id,
-    validate_request_types, validate_response_types, write_accept, write_body_codec,
-    write_data_type_id,
+    apply_request_type_headers, apply_response_type_headers, read_accept, read_body_codec,
+    read_data_type_id, validate_request_types, validate_response_types, write_accept,
+    write_body_codec, write_data_type_id,
 };
 use crate::x_deps::{abs_mptp, mptp_smux, mptp_wire};
 

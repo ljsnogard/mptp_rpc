@@ -13,7 +13,6 @@ use alloc::boxed::Box;
 use core::alloc::Allocator;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-
 use abs_mptp::spec::{Status, access_method::AccessMethod};
 use abs_str::str_alloc::String as AbsString;
 use gen_mcf2::gen_may_cancel_future;
@@ -78,8 +77,7 @@ where
     //
     // 页大小比会话 arena 大一档：handler / 中间件 future 是编译器生成的 async 块，
     // 常见多 KB；放不下的单块会由 `arena_future_` 回退到 `Global`，不会 abort。
-    let arena = SessionAlloc::new(K_CONTEXT_PAGE_SIZE)
-        .expect("K_CONTEXT_PAGE_SIZE 应当受支持");
+    let arena = SessionAlloc::new(K_CONTEXT_PAGE_SIZE).expect("K_CONTEXT_PAGE_SIZE 应当受支持");
     // 克隆 location：匹配结果的 params 借用 location，而调用 handler 需要 `&mut session`；
     // 两者不能同时借 session，因此把 location 放到独立的堆上（带分配器的 String）。
     let location = AbsString::from_str_in(session.location(), arena.clone());

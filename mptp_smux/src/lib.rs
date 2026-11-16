@@ -45,7 +45,10 @@
 
 #![no_std]
 #![feature(allocator_ext)]
-#![cfg_attr(any(feature = "client", feature = "server"), feature(impl_trait_in_assoc_type))]
+#![cfg_attr(
+    any(feature = "client", feature = "server"),
+    feature(impl_trait_in_assoc_type)
+)]
 #![feature(unboxed_closures)]
 
 extern crate alloc;
@@ -70,12 +73,12 @@ mod session_state_;
 // 兼容旧路径：`mptp_smux::messaging::*` 仍然可用，但类型由 `mptp_wire` 拥有。
 pub use alloc_::SessionAlloc;
 pub use bumplist_alloc::PageSize;
+pub use error_::{ClientError, ProtocolError, ServeError, StateError, TransportError};
+pub use method_set_::MethodSet;
 pub use mptp_wire as messaging;
 pub use mptp_wire::{
     HeaderEntry, HeaderKey, HeaderVal, Headers, RequestPrefix, ResponsePrefix, U16OrStr,
 };
-pub use error_::{ClientError, ProtocolError, ServeError, StateError, TransportError};
-pub use method_set_::MethodSet;
 pub use ring_prepare_::{PeerRole, RingBuffs, TrPrepFactory, TrPrepareCtx};
 pub use session_state_::ServingState;
 
@@ -97,7 +100,7 @@ pub mod x_deps {
     pub use abs_mptp::x_deps::abs_smux;
     pub use abs_smux::x_deps::abs_mm;
     pub use bumplist_alloc;
-pub use mm_ptr;
+    pub use mm_ptr;
     pub use mptp_wire;
     // 兼容旧的 `mptp_smux::x_deps::{abs_denco, denco_macro, mp_denco}` 路径；
     // 实际依赖由 `mptp_wire` 持有，本 crate 不直接依赖 denco。

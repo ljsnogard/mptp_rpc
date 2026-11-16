@@ -29,11 +29,7 @@
 //! **自己不持有任何垛口**：本端每次由连接安排，远端每次由调用决定。
 
 use alloc::string::ToString;
-use core::{
-    alloc::AllocatorClone,
-    mem::MaybeUninit,
-    ops::Deref,
-};
+use core::{alloc::AllocatorClone, mem::MaybeUninit, ops::Deref};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::res_man::{TrAllocBy, TrUnique};
@@ -46,18 +42,18 @@ use abs_smux::{
 use bumplist_alloc::{BumpListAllocError, PageSize};
 use gen_mcf2::gen_may_cancel_future;
 
+use super::{
+    config::{self, ChannelHandle, Dock, ReqPrefix, TrConfig},
+    method_::RequestBuilder,
+    prep_ctx_::ClientPrepCtx,
+    session::MptpSession,
+};
 use crate::{
     SessionAlloc,
     error_::{ClientError, ProtocolError, TransportError},
     messaging,
     ring_prepare_::TrPrepFactory,
     x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2},
-};
-use super::{
-    config::{self, ChannelHandle, Dock, ReqPrefix, TrConfig},
-    method_::RequestBuilder,
-    prep_ctx_::ClientPrepCtx,
-    session::MptpSession,
 };
 
 /// 客户端持有的连接智能指针。
@@ -104,8 +100,7 @@ where
     /// 构造客户端 arena 时 panic。需要显式处理时用
     /// [`MptpClient::new_with_page_size`]。
     pub fn new(conn: SharedConn<C>) -> Self {
-        Self::new_with_page_size(conn, PageSize::P2K)
-            .expect("PageSize::P2K 应当在当前平台受支持")
+        Self::new_with_page_size(conn, PageSize::P2K).expect("PageSize::P2K 应当在当前平台受支持")
     }
 
     /// 由共享连接与页大小构造客户端。
@@ -144,8 +139,7 @@ where
     ///
     /// 只会在构造客户端时已经验证过的页大小上失败，因此正常路径不会 panic。
     pub fn new_session_alloc(&self) -> SessionAlloc {
-        SessionAlloc::new(self.page_size_)
-            .expect("客户端构造时已经验证过该页大小受支持")
+        SessionAlloc::new(self.page_size_).expect("客户端构造时已经验证过该页大小受支持")
     }
 
     /// 统一入口：显式方法 + 位置。

@@ -14,14 +14,13 @@
 //! Only the business contract lives here: URIs, header keys, denco types and codecs.
 //! The suffix stream is raw bytes; every event is one self-describing denco value.
 
+use core::alloc::AllocatorClone;
 use std::sync::Arc;
 
 use abs_buff::TrBuffRead;
 use abs_cancel::NonCancellableToken;
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use mp_denco::{MpDecoder, MpEncoder};
-use core::alloc::AllocatorClone;
-
 use mptp_wire::{HeaderKey, Headers};
 
 /// 一颗行星的稳定标识。

@@ -46,10 +46,7 @@ where
     ///
     /// `'a` 是本次借用的生命周期，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，
     /// 这样调用方可以在一次 `.await` 之后重新借用 `ctx`（中间件链的关键）。
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S, R>,
-    ) -> HandlerFuture<'a>;
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a>;
 }
 
 /// 把 future 分配进请求级 arena，返回类型擦除的 arena box。

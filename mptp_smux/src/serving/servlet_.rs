@@ -99,10 +99,7 @@ where
     /// # Errors
     ///
     /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
-    pub fn new_with_page_size(
-        handler: H,
-        page_size: PageSize,
-    ) -> Result<Self, BumpListAllocError> {
+    pub fn new_with_page_size(handler: H, page_size: PageSize) -> Result<Self, BumpListAllocError> {
         let alloc_ = SessionAlloc::new(page_size)?;
         Result::Ok(MptpServlet {
             handler_: handler,
@@ -128,8 +125,7 @@ where
     ///
     /// 只会在构造 servlet 时已经验证过的页大小上失败，因此正常路径不会 panic。
     pub fn new_session_alloc(&self) -> SessionAlloc {
-        SessionAlloc::new(self.page_size_)
-            .expect("servlet 构造时已经验证过该页大小受支持")
+        SessionAlloc::new(self.page_size_).expect("servlet 构造时已经验证过该页大小受支持")
     }
 
     /// 在 binding 上进入监听。

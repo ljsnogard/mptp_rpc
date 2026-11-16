@@ -960,7 +960,10 @@ pub fn validate_response_types<A: AllocatorClone>(
             let expected = info
                 .response_suffix()
                 .or_else(|| info.accept().and_then(|accept| accept.type_id()));
-            match (read_data_type_id(headers).map_err(malformed_data_type_id_)?, expected) {
+            match (
+                read_data_type_id(headers).map_err(malformed_data_type_id_)?,
+                expected,
+            ) {
                 (Option::Some(actual), Option::Some(expected)) if actual != expected => {
                     Result::Err(TypeRejection::DataTypeMismatch { expected, actual })
                 }
@@ -969,25 +972,22 @@ pub fn validate_response_types<A: AllocatorClone>(
                         header: "Data_Type_Id",
                     })
                 }
-                (Option::Some(_), Option::None) => Result::Err(
-                    TypeRejection::UnexpectedDataHeader { header: "Data_Type_Id" },
-                ),
+                (Option::Some(_), Option::None) => {
+                    Result::Err(TypeRejection::UnexpectedDataHeader {
+                        header: "Data_Type_Id",
+                    })
+                }
                 _ => Result::Ok(()),
             }
         }
-        AccessMethod::Call
-        | AccessMethod::Post
-        | AccessMethod::View
-        | AccessMethod::Push => validate_body_direction_(
-            headers,
-            info,
-            strict,
-            info.response_body(),
-            "响应 body",
-        ),
+        AccessMethod::Call | AccessMethod::Post | AccessMethod::View | AccessMethod::Push => {
+            validate_body_direction_(headers, info, strict, info.response_body(), "响应 body")
+        }
         AccessMethod::Head | AccessMethod::Drop => {
             if strict
-                && (read_body_codec(headers).map_err(malformed_codec_)?.is_some()
+                && (read_body_codec(headers)
+                    .map_err(malformed_codec_)?
+                    .is_some()
                     || read_data_type_id(headers)
                         .map_err(malformed_data_type_id_)?
                         .is_some())
@@ -1442,8 +1442,7 @@ mod tests_ {
 
         let mut missing = Headers::new_in(Global);
         write_body_codec(&mut missing, BodyCodec::MsgPack);
-        let rejection =
-            validate_response_types(AccessMethod::Pull, &missing, &info).unwrap_err();
+        let rejection = validate_response_types(AccessMethod::Pull, &missing, &info).unwrap_err();
         assert!(matches!(rejection, TypeRejection::MissingHeader { .. }));
         assert_eq!(rejection.status(), Status::BadRequest);
 

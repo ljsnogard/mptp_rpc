@@ -445,8 +445,7 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
         let arena = ctx.arena();
         box_future_(arena, async move {
             let before = ctx.reply_written();
-            ctx.headers_mut()
-                .set_text_named("X-Ctx-Probe", "mutated");
+            ctx.headers_mut().set_text_named("X-Ctx-Probe", "mutated");
             let mutated = ctx
                 .headers()
                 .try_get_str("X-Ctx-Probe")
@@ -608,10 +607,7 @@ where
     ) -> MiddlewareFuture<'a> {
         let arena = ctx.arena();
         box_future_(arena, async move {
-            let denied = ctx
-                .headers()
-                .try_get_str("X-Scene-Deny")
-                .is_some();
+            let denied = ctx.headers().try_get_str("X-Scene-Deny").is_some();
             if denied {
                 // 由管线统一写 403 无体回复。
                 return Ok(Some(Status::Forbidden));

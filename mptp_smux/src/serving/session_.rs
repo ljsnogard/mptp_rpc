@@ -172,7 +172,10 @@ where
     }
 
     /// 用给定的回复前缀构造 helper。
-    pub fn response_prefix(&mut self, prefix: ResponsePrefix<SessionAlloc>) -> ResponseBuilder<'_, C> {
+    pub fn response_prefix(
+        &mut self,
+        prefix: ResponsePrefix<SessionAlloc>,
+    ) -> ResponseBuilder<'_, C> {
         ResponseBuilder {
             session_: self,
             prefix_: prefix,

@@ -14,9 +14,7 @@ use std::collections::BTreeMap;
 
 use abs_mptp::{
     messaging::{BodySize, TrMsgPrefix},
-    spec::{
-        NumOrObj, NumOrStr, ObjEnvelope, StdHeaderKey, StdHeaderVal, TrHeaders,
-    },
+    spec::{NumOrObj, NumOrStr, ObjEnvelope, StdHeaderKey, StdHeaderVal, TrHeaders},
 };
 
 /// 测试用的头值：新的「数字或对象」形态。
@@ -134,10 +132,7 @@ fn prefix_(entries: impl IntoIterator<Item = (StdHeaderKey, MockVal)>) -> MockPr
 #[test]
 fn body_info_reads_numeric_size_() {
     let sized = prefix_([(StdHeaderKey::Body_Size, num_(12))]);
-    assert_eq!(
-        sized.body_info(),
-        BodySize::FixedLength(NumOrStr::Num(12))
-    );
+    assert_eq!(sized.body_info(), BodySize::FixedLength(NumOrStr::Num(12)));
 
     let zero = prefix_([(StdHeaderKey::Body_Size, num_(0))]);
     assert_eq!(zero.body_info(), BodySize::NilBody);
