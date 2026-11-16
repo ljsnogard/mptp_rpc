@@ -16,6 +16,6 @@ pub mod access_method;
 
 pub use status_::Status;
 pub use std_header_::{
-    NumOrStr, NumOrObj, StdHeaderKey, StdHeaderVal,
-    TrHeaders, TrHeadersMut, TrNumOrObj, TrNumOrStr,
+    NumOrObj, NumOrStr, ObjEnvelope, StdHeaderKey, StdHeaderVal, TrHeaders, TrHeadersMut,
+    TrNumOrObj, TrNumOrStr, TrTypedEnvelope,
 };

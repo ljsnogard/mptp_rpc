@@ -38,7 +38,12 @@ pub trait TrHeaders {
     type Key: TrNumOrStr<NumType: Into<StdHeaderKey>>;
 
     /// 头的值类型。
-    type Val: TrNumOrObj<NumType: Into<StdHeaderKey>>;
+    ///
+    /// 简单标准头的值是数字；复杂值用 [`TrTypedEnvelope`] 承载 MessagePack 编码的字节流。
+    ///
+    /// The header value type. Simple standard-header values are numbers; complex values
+    /// travel as a MessagePack-encoded byte stream inside a [`TrTypedEnvelope`].
+    type Val: TrNumOrObj<NumType: Into<StdHeaderVal>>;
 
     /// 一次查询 / 遍历交出的条目类型：它同时能借出键与值。
     ///
@@ -83,7 +88,7 @@ pub trait TrHeaders {
 /// A mutable MPTP header map: [`TrHeaders`] plus insert / replace / remove.
 pub trait TrHeadersMut
 where
-    Self: TrHeaders
+    Self: TrHeaders,
 {
     /// 如果没有键冲突，返回 Ok 以及成功添加的值，否则返回 Err 和冲突键对应的值
     ///
@@ -100,11 +105,7 @@ where
     /// 添加或者替换键值对，返回被替代的 Key 和 val （如果存在）
     ///
     /// Insert or replace, returning the replaced key/value pair when there was one.
-    fn add_or_set_header<K, V>(
-        self,
-        key: K,
-        val: V,
-    ) -> Option<(Self::Key, Self::Val)>
+    fn add_or_set_header<K, V>(self, key: K, val: V) -> Option<(Self::Key, Self::Val)>
     where
         K: Into<Self::Key>,
         V: Into<Self::Val>;
@@ -112,10 +113,7 @@ where
     /// 删除一个键，返回被删掉的键值对（如果存在）。
     ///
     /// Remove a key, returning the removed pair when there was one.
-    fn remove_header(
-        self,
-        key: impl Borrow<Self::Key>,
-    ) -> Option<(Self::Key, Self::Val)>;
+    fn remove_header(self, key: impl Borrow<Self::Key>) -> Option<(Self::Key, Self::Val)>;
 }
 
 /// 两端都必须认识的标准头键。
@@ -291,38 +289,103 @@ impl From<u16> for StdHeaderVal {
     }
 }
 
-/// 通常用于 Header Key。
+/// 头键的「数字或字符串」表示。
+///
+/// 键保留字符串形态：用户自定义的键仍然可以写成文本；值则改用 [`TrNumOrObj`]。
+///
+/// # Examples
+///
+/// ```
+/// use core::borrow::Borrow;
+///
+/// use abs_mptp::spec::{NumOrStr, StdHeaderKey, TrNumOrStr};
+///
+/// let key = StdHeaderKey::Body_Size;
+/// assert!(matches!(key.try_match_num(), Ok(code) if code == 0xA1));
+/// assert!(key.try_match_str().is_err());
+/// ```
+///
+/// The numeric-or-string representation of a header key. Keys may still be textual;
+/// values use [`TrNumOrObj`] instead.
 pub trait TrNumOrStr {
+    /// 数字形态的标量类型。
     type NumType: funty::Unsigned;
+
+    /// 字符串形态的类型。
     type StrType: Borrow<str>;
 
+    /// 转成两种形态的枚举。
     fn into(self) -> NumOrStr<Self::NumType, Self::StrType>;
 
+    /// 按数字取用；字符串形态原样返回。
     fn try_match_num(self) -> Result<Self::NumType, Self::StrType>;
 
+    /// 按字符串取用；数字形态原样返回。
     fn try_match_str(self) -> Result<Self::StrType, Self::NumType>;
 }
 
-/// 通常用于支持 Cookie, MPTP 不鼓励把 Cookie 写成原始的 string 而是按照 Messagepack 格式
-/// 编码成定长的字节流。
+/// 头值的「数字或对象」表示。
+///
+/// 简单的标准头取值（`Body_Size`、`Body_Transfer`……）用数字；复杂取值（例如 Cookie）
+/// 不再写成文本，而是按 MessagePack 编码成字节流，并随字节流携带逻辑类型的 `type_id`。
+/// 后者由 [`TrTypedEnvelope`] 描述，`type_id` 取 `abs_denco` 的 `TrHasTypeId` 生成值。
+///
+/// # Examples
+///
+/// ```
+/// use abs_mptp::spec::{NumOrObj, ObjEnvelope, TrNumOrObj, TrTypedEnvelope};
+///
+/// let num: NumOrObj<u16, &[u8]> = NumOrObj::Num(7);
+/// assert_eq!(num.as_num_or_obj().try_match_num().ok(), Some(7u16));
+///
+/// let obj: NumOrObj<u16, &[u8]> = NumOrObj::Obj(ObjEnvelope::new(0x1234, &[0xC0]));
+/// assert_eq!(obj.as_num_or_obj().try_match_obj().ok().map(|e| e.type_id()), Some(0x1234));
+/// ```
+///
+/// The numeric-or-object representation of a header value. Simple standard-header values
+/// are numbers; complex values are MessagePack byte streams tagged with a logical
+/// `type_id`.
 pub trait TrNumOrObj {
+    /// 数字形态的标量类型。
     type NumType: funty::Unsigned;
+
+    /// 对象形态的封装类型。
     type ObjType: TrTypedEnvelope;
 
-    fn as_num_or_obj<'f>(&'f self) -> NumOrObj<Self::NumType, &'f [u8]>;
+    /// 借成 `NumOrObj`；对象形态只借出其字节流，不复制存储。
+    fn as_num_or_obj(&self) -> NumOrObj<Self::NumType, &[u8]>;
 
+    /// 按数字取用；对象形态原样返回。
     fn try_match_num(self) -> Result<Self::NumType, Self::ObjType>;
 
+    /// 按对象取用；数字形态原样返回。
     fn try_match_obj(self) -> Result<Self::ObjType, Self::NumType>;
 }
 
-/// 将数据结构打包成定长的 Messagepack 字节流，并将类型信息以 type_id 的形式预告。
+/// 一段带逻辑类型标识的 MessagePack 字节流。
+///
+/// `type_id` 是 `abs_denco` 的 `TrHasTypeId` 生成的 `u32` 指纹，`data` 是该类型的
+/// MessagePack 编码结果。头表把它们写成一个两元素数组 `[type_id, bin]`；本 trait 只描述
+/// 解出来的逻辑形状，不解析 MessagePack 本身。
+///
+/// # Examples
+///
+/// ```
+/// use abs_mptp::spec::{ObjEnvelope, TrTypedEnvelope};
+///
+/// let envelope = ObjEnvelope::new(42, &[0x81, 0xA1, 0x78, 0x01][..]);
+/// assert_eq!(envelope.type_id(), 42);
+/// assert_eq!(envelope.data(), &[0x81, 0xA1, 0x78, 0x01][..]);
+/// ```
+///
+/// A MessagePack byte stream tagged with a logical type identifier.
 pub trait TrTypedEnvelope {
+    /// 逻辑类型的 `u32` 指纹。
     fn type_id(&self) -> u32;
 
+    /// MessagePack 编码后的字节流。
     fn data(&self) -> &[u8];
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum NumOrStr<N, S>
@@ -395,13 +458,35 @@ where
     }
 }
 
+/// 头值的两种形态：数字，或带类型标识的 MessagePack 字节流。
+///
+/// `B` 是字节流的存储形态（`&[u8]` / `Vec<u8>` / 带分配器的容器均可），因此同一枚举既
+/// 能表示借用的解码结果，也能表示拥有的构造结果。
+///
+/// # Examples
+///
+/// ```
+/// use abs_mptp::spec::{NumOrObj, ObjEnvelope};
+///
+/// let numeric: NumOrObj<u16, &[u8]> = NumOrObj::Num(0x20);
+/// let object: NumOrObj<u16, &[u8]> =
+///     NumOrObj::Obj(ObjEnvelope::new(7, &[0xC0][..]));
+///
+/// assert!(matches!(numeric, NumOrObj::Num(0x20)));
+/// assert!(matches!(object, NumOrObj::Obj(_)));
+/// ```
+///
+/// The two header-value forms: a number, or a type-tagged MessagePack byte stream.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum NumOrObj<N, B>
 where
     N: funty::Unsigned,
     B: Borrow<[u8]>,
 {
+    /// 数字形态。
     Num(N),
+
+    /// 对象形态。
     Obj(ObjEnvelope<B>),
 }
 
@@ -413,10 +498,10 @@ where
     type NumType = N;
     type ObjType = ObjEnvelope<B>;
 
-    fn as_num_or_obj<'f>(&'f self) -> NumOrObj<Self::NumType, &'f [u8]> {
+    fn as_num_or_obj(&self) -> NumOrObj<Self::NumType, &[u8]> {
         match self {
             NumOrObj::Num(n) => NumOrObj::Num(*n),
-            NumOrObj::Obj(o) => NumOrObj::Obj(o.as_ref())
+            NumOrObj::Obj(o) => NumOrObj::Obj(o.as_ref()),
         }
     }
 
@@ -435,12 +520,32 @@ where
     }
 }
 
+/// 一个带逻辑类型标识的 MessagePack 字节流。
+///
+/// 它是 [`NumOrObj::Obj`] 的载荷，只保存 `type_id` 与原始字节；MessagePack 的解释由拿到
+/// 它的上层（知道 `type_id` 对应哪个 Rust 类型的一方）完成。
+///
+/// # Examples
+///
+/// ```
+/// use abs_mptp::spec::{ObjEnvelope, TrTypedEnvelope};
+///
+/// let envelope = ObjEnvelope::new(9, &[0x01][..]);
+/// let borrowed: ObjEnvelope<&[u8]> = envelope.as_ref();
+/// assert_eq!(borrowed.type_id(), 9);
+/// assert_eq!(borrowed.data(), &[0x01][..]);
+/// ```
+///
+/// A MessagePack byte stream tagged with a logical type identifier.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ObjEnvelope<B>
 where
     B: Borrow<[u8]>,
 {
+    /// 逻辑类型的 `u32` 指纹（`abs_denco` 的 `TrHasTypeId` 生成）。
     type_: u32,
+
+    /// MessagePack 编码后的字节流。
     data_: B,
 }
 
@@ -448,11 +553,45 @@ impl<B> ObjEnvelope<B>
 where
     B: Borrow<[u8]>,
 {
-    fn as_ref(&self) -> ObjEnvelope<&[u8]> {
+    /// 由 `type_id` 与 MessagePack 字节流构造。
+    ///
+    /// Build an envelope from a logical `type_id` and a MessagePack byte stream.
+    pub const fn new(type_id: u32, data: B) -> Self {
+        ObjEnvelope {
+            type_: type_id,
+            data_: data,
+        }
+    }
+
+    /// 借用同一段字节流，产生 [`ObjEnvelope<&[u8]>`]。
+    ///
+    /// Borrow the same byte stream as an [`ObjEnvelope<&[u8]>`].
+    pub fn as_ref(&self) -> ObjEnvelope<&[u8]> {
         ObjEnvelope {
             type_: self.type_,
             data_: self.data_.borrow(),
         }
+    }
+
+    /// 拆出 `type_id` 与字节流存储。
+    ///
+    /// Split the envelope into its logical `type_id` and byte-stream storage.
+    pub fn into_parts(self) -> (u32, B) {
+        (self.type_, self.data_)
+    }
+
+    /// 逻辑类型的 `u32` 指纹。
+    ///
+    /// The logical `u32` type fingerprint.
+    pub const fn type_id(&self) -> u32 {
+        self.type_
+    }
+
+    /// MessagePack 编码后的字节流。
+    ///
+    /// The MessagePack-encoded byte stream.
+    pub fn data(&self) -> &[u8] {
+        self.data_.borrow()
     }
 }
 
@@ -466,5 +605,87 @@ where
 
     fn data(&self) -> &[u8] {
         self.data_.borrow()
+    }
+}
+
+#[cfg(test)]
+mod tests_ {
+    //! 头值「数字或对象」表示的本地单元测试。
+    //!
+    //! Local unit tests for the numeric-or-object header-value representation.
+
+    use super::*;
+
+    /// 测试 `NumOrObj` 的两种形态分别匹配。
+    /// Test that `NumOrObj` matches each of its two forms on its own.
+    ///
+    /// - 手段：分别构造数字形态与对象形态，调用 `try_match_num` / `try_match_obj`。
+    /// - 判断：数字形态的 `try_match_num` 返回 `Ok(0x20)` 且 `try_match_obj` 返回 `Err`；
+    ///   对象形态相反，并保留 `type_id` 与字节流。
+    ///
+    /// - Means: build one numeric and one object value, then call `try_match_num` /
+    ///   `try_match_obj`.
+    /// - Verdict: the numeric form yields `Ok(0x20)` from `try_match_num` and `Err` from
+    ///   `try_match_obj`; the object form does the opposite and keeps its `type_id` and
+    ///   bytes.
+    #[test]
+    fn num_or_obj_matches_each_form_() {
+        let num: NumOrObj<u16, &[u8]> = NumOrObj::Num(0x20);
+        assert_eq!(num.try_match_num().ok(), Option::Some(0x20));
+        assert!(num.try_match_obj().is_err());
+
+        let obj: NumOrObj<u16, &[u8]> = NumOrObj::Obj(ObjEnvelope::new(7, &[0xC0]));
+        let envelope = obj
+            .try_match_obj()
+            .expect("对象形态应当匹配到 ObjEnvelope");
+        assert_eq!(envelope.type_id(), 7);
+        assert_eq!(envelope.data(), &[0xC0]);
+        assert!(obj.try_match_num().is_err());
+    }
+
+    /// 测试 `as_num_or_obj` 借出对象字节流而不是复制。
+    /// Test that `as_num_or_obj` lends the object bytes instead of copying them.
+    ///
+    /// - 手段：用栈上数组构造对象形态，调用 `as_num_or_obj` 并解构。
+    /// - 判断：借出的 `type_id` 与 `data` 与构造时一致，`data` 指向同一段字节。
+    ///
+    /// - Means: build the object form from a stack array and destructure the result of
+    ///   `as_num_or_obj`.
+    /// - Verdict: the borrowed `type_id` and `data` match the constructor inputs, and `data`
+    ///   points at the same byte sequence.
+    #[test]
+    fn as_num_or_obj_borrows_obj_data_() {
+        let bytes = [0x81, 0xA1, 0x78, 0x01];
+        let obj: NumOrObj<u16, &[u8]> = NumOrObj::Obj(ObjEnvelope::new(42, &bytes[..]));
+        match obj.as_num_or_obj() {
+            NumOrObj::Obj(envelope) => {
+                assert_eq!(envelope.type_id(), 42);
+                assert_eq!(envelope.data(), &bytes[..]);
+            }
+            NumOrObj::Num(_) => panic!("对象形态不应借成数字"),
+        }
+    }
+
+    /// 测试 `ObjEnvelope` 的构造、借用视图与拆分。
+    /// Test `ObjEnvelope` construction, borrowed view and splitting.
+    ///
+    /// - 手段：构造后先取 `as_ref`，再把原值 `into_parts`。
+    /// - 判断：借用视图与原值的 `type_id` / `data` 一致；拆分得到同一个 `type_id` 与
+    ///   字节流。
+    ///
+    /// - Means: construct an envelope, take `as_ref`, then consume the original with
+    ///   `into_parts`.
+    /// - Verdict: the borrowed view reports the same `type_id` / `data`; splitting yields
+    ///   the same `type_id` and byte stream.
+    #[test]
+    fn obj_envelope_borrows_and_splits_() {
+        let envelope = ObjEnvelope::new(5, &[1, 2][..]);
+        let borrowed = envelope.as_ref();
+        assert_eq!(borrowed.type_id(), 5);
+        assert_eq!(borrowed.data(), &[1, 2][..]);
+
+        let (type_id, data) = envelope.into_parts();
+        assert_eq!(type_id, 5);
+        assert_eq!(data, &[1, 2][..]);
     }
 }
