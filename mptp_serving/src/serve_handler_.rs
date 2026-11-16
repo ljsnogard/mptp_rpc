@@ -9,27 +9,20 @@
 //! This makes [`RadixRouter`] a [`TrServeHandler`] so it can be handed to `MptpServlet`.
 //! Matching, `405` and the root fallback are handled here; teardown stays with the servlet.
 
-use alloc::alloc::Global;
+use alloc::boxed::Box;
 use core::alloc::Allocator;
-
-use bumpalo::Bump;
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
 use abs_str::str_alloc::String as AbsString;
-
 use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::{
-    HeaderVal, ResponsePrefix, ServeError,
-    serving::{
-        config::TrConfig,
-        K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler,
-    },
+    HeaderKey, HeaderVal, ResponsePrefix, ServeError,
+    serving::{K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler, config::TrConfig},
 };
 
 use super::{
-    router_::ErrorHook,
-    MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher,
+    MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher, router_::ErrorHook,
 };
 
 impl<C, S, R, A> TrServeHandler<C> for RadixRouter<C, S, R, A>
@@ -41,7 +34,8 @@ where
 {
     type Err = ServeError;
 
-    type HandleAsync<'f> = RouterHandleAsync<'f, 'f, C, S, R, A>
+    type HandleAsync<'f>
+        = RouterHandleAsync<'f, 'f, C, S, R, A>
     where
         Self: 'f,
         C: 'f,
@@ -74,11 +68,10 @@ where
 {
     // 克隆 location：匹配结果的 params 借用 location，而调用 handler 需要 `&mut session`；
     // 两者不能同时借 session，因此把 location 放到独立的堆上（带分配器的 String）。
-    let location = AbsString::from_str_in(session.location(), Global);
-    // 请求级 arena：handler future 从它分配，随本次请求结束整体释放。
-    let bump = Bump::new();
+    let alloc = session.allocator().clone();
+    let location = AbsString::from_str_in(session.location(), alloc.clone());
     // 请求级运行期状态：中间件 stash、处理器读；随本次请求结束整体释放。
-    let request_state = bump.alloc(R::default());
+    let mut request_state = Box::new_in(R::default(), &alloc);
 
     match router.match_route(method, &location) {
         MatchOutcome::Found {
@@ -87,23 +80,24 @@ where
         } => {
             let cancel = router.cancel_token();
             let mut ctx = MptpContext::new_(
-                &bump,
+                &alloc,
                 method,
                 &location,
                 params,
                 session,
                 router.state(),
-                request_state,
+                &mut *request_state,
                 cancel,
             );
             let result = router.pipeline().run(endpoint, &mut ctx).await;
             settle_reply_(&mut ctx, result, router.error_hook_()).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
-            let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
+            let mut prefix =
+                ResponsePrefix::new(Status::MethodNotAllowed, session.allocator().clone());
             prefix.headers_mut().set(
-                K_TMP_ALLOW_HEADER_KEY,
-                HeaderVal::from_text(allowed.to_allow_value()),
+                HeaderKey::from_num(K_TMP_ALLOW_HEADER_KEY),
+                HeaderVal::from_text(allowed.to_allow_value(), session.allocator().clone()),
             );
             session
                 .response_prefix(prefix)
@@ -120,13 +114,13 @@ where
             let params = RouteParams::empty();
             let cancel = router.cancel_token();
             let mut ctx = MptpContext::new_(
-                &bump,
+                &alloc,
                 method,
                 &location,
                 params,
                 session,
                 router.state(),
-                request_state,
+                &mut *request_state,
                 cancel,
             );
             let result = router.root().handle(&mut ctx).await;

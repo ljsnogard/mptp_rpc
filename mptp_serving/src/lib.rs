@@ -49,6 +49,7 @@
 
 extern crate alloc;
 
+mod arena_;
 mod context_;
 mod endpoint_;
 mod handler_;
@@ -66,6 +67,7 @@ pub use cantok_rs::CancellationToken as RequestCancel;
 pub use cantok_rs::{CancellationFuture, CancellationSource};
 pub use context_::MptpContext;
 pub use endpoint_::Endpoint;
+pub use arena_::{ArenaFuture, arena_future_};
 pub use handler_::{HandlerFuture, TrEndpointHandler, box_future_};
 pub use metadata_::EndpointMetadata;
 pub use middleware_::{MiddlewareFuture, NextFn, Pipeline, TrMiddleware};

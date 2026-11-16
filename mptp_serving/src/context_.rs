@@ -16,8 +16,6 @@
 //! there is no self-reference. `S` is per-connection state owned by the connection object,
 //! handed to handlers/middleware as a shared `&S`.
 
-use bumpalo::Bump;
-
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
 use mptp_smux::serving::{
@@ -43,7 +41,7 @@ where
     method_: AccessMethod,
 
     /// 请求级 arena（借用自请求作用域）：handler future 从它分配。
-    arena_: &'f Bump,
+    arena_: &'f C::Alloc,
 
     /// 本次请求的位置（借用调用方的克隆）。
     location_: &'f str,
@@ -74,7 +72,7 @@ where
     // 借用再包一层，因此显式允许超参数。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_(
-        arena: &'f Bump,
+        arena: &'f C::Alloc,
         method: AccessMethod,
         location: &'f str,
         route: RouteParams<'f>,
@@ -100,12 +98,12 @@ where
         self.method_
     }
 
-    /// 请求级 arena 句柄（`&'f Bump`，`Copy`）。
+    /// 请求级 arena 句柄（`&'f C::Alloc`）。
     ///
     /// 终端处理器用它把 future 分配进 arena：先取出句柄、再构造 future、最后经
     /// [`crate::handler_::box_future_`] 装箱。
     #[doc(hidden)]
-    pub fn arena(&self) -> &'f Bump {
+    pub fn arena(&self) -> &'f C::Alloc {
         self.arena_
     }
 
@@ -123,7 +121,7 @@ where
     ///
     /// 处理器 / 中间件经它读取请求头（例如 `#[from_header]` 参数来源）；需要改写头表时用
     /// [`headers_mut`](Self::headers_mut)。
-    pub fn headers(&self) -> &mptp_smux::Headers {
+    pub fn headers(&self) -> &mptp_smux::Headers<C::Alloc> {
         self.session_.headers()
     }
 
@@ -131,7 +129,7 @@ where
     ///
     /// 改写的是会话持有的请求头副本，**不**写回已经解码好的请求前缀；因此可以用它做
     /// 「中间件把规范化后的头交给后续处理器」这类请求内改写。
-    pub fn headers_mut(&mut self) -> &mut mptp_smux::Headers {
+    pub fn headers_mut(&mut self) -> &mut mptp_smux::Headers<C::Alloc> {
         self.session_.headers_mut()
     }
 
