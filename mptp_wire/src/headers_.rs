@@ -365,8 +365,7 @@ impl<A: Allocator> TrNumOrObj for HeaderVal<A> {
 struct BinRef<'b>(&'b [u8]);
 
 impl<'b> TrEncodable for BinRef<'b> {
-    type EncodeAsync<'a, E>
-        = E::EncodeBytesAsync<'a, 'b>
+    type EncodeAsync<'a, E> = E::EncodeBytesAsync<'a, 'b>
     where
         Self: 'a,
         E: TrEncoder + 'a,
@@ -828,7 +827,7 @@ impl<A: AllocatorClone> Headers<A> {
     /// 造一张空头表；map 与 `Arc` 都由 `alloc` 分配。
     ///
     /// Build an empty header map; both the map and the `Arc` are allocated by `alloc`.
-    pub fn new(alloc: A) -> Self {
+    pub fn new_in(alloc: A) -> Self {
         let map = BTreeMap::new_in(alloc.clone());
         Headers {
             map_: Arc::new_in(map, alloc),
@@ -839,7 +838,7 @@ impl<A: AllocatorClone> Headers<A> {
     ///
     /// An alias of [`Headers::new`], kept for the old name.
     pub fn empty(alloc: A) -> Self {
-        Self::new(alloc)
+        Self::new_in(alloc)
     }
 }
 
@@ -1194,7 +1193,7 @@ mod tests_ {
     ///   declaration.
     #[test]
     fn header_accessors_map_values_() {
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set_num(StdHeaderKey::Body_Type, 1u16);
 
@@ -1218,7 +1217,7 @@ mod tests_ {
     ///   declarations readable.
     #[test]
     fn chunked_and_sized_are_independent_() {
-        let mut chunked = Headers::new(Global);
+        let mut chunked = Headers::new_in(Global);
         chunked.set_num(
             StdHeaderKey::Body_Transfer,
             StdHeaderVal::Body_Transfer_Chunked.into_inner(),
@@ -1245,7 +1244,7 @@ mod tests_ {
     #[test]
     fn custom_numeric_key_roundtrips_() {
         let key = StdHeaderKey::new(0x01);
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set_num(key, 0x1234u16);
 
         assert_eq!(
@@ -1273,7 +1272,7 @@ mod tests_ {
     #[test]
     fn string_key_roundtrips_() {
         let key = HeaderKey::from_text("x-custom", Global);
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set(key.clone(), HeaderVal::from_num(7u16));
 
         assert_eq!(
@@ -1301,7 +1300,7 @@ mod tests_ {
     /// - Verdict: `as_num` is `None`, while `type_id` and `data` match the inputs.
     #[test]
     fn obj_value_roundtrips_() {
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set(
             HeaderKey::from(StdHeaderKey::Cookie),
             HeaderVal::from_bytes(0x1234, b"msgpack", Global),
@@ -1327,7 +1326,7 @@ mod tests_ {
     ///   both key and value.
     #[test]
     fn tr_headers_answers_lookups_and_entries_() {
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set_num(StdHeaderKey::Body_Type, 1u16);
         headers.set(
             HeaderKey::from(StdHeaderKey::Cookie),
@@ -1367,7 +1366,7 @@ mod tests_ {
     #[test]
     fn tr_headers_mut_reports_contract_() {
         let accept = std_key_(StdHeaderKey::Accept);
-        let headers = Headers::new(Global);
+        let headers = Headers::new_in(Global);
 
         let added = headers
             .clone()
@@ -1381,7 +1380,7 @@ mod tests_ {
             Option::None
         );
 
-        let mut non_empty = Headers::new(Global);
+        let mut non_empty = Headers::new_in(Global);
         non_empty.set_num(StdHeaderKey::Accept, 1);
         let duplicate = non_empty
             .clone()

@@ -28,8 +28,15 @@
 //! [`MptpClient::request_to_dock_async`](super::MptpClient::request_to_dock_async)。`MptpClient`
 //! **自己不持有任何垛口**：本端每次由连接安排，远端每次由调用决定。
 
-use alloc::string::ToString;
-use core::{alloc::AllocatorClone, mem::MaybeUninit, ops::Deref};
+use alloc::{
+    alloc::Global,
+    string::ToString,
+};
+use core::{
+    alloc::{Allocator, AllocatorClone},
+    mem::MaybeUninit,
+    ops::Deref,
+};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::res_man::{TrAllocBy, TrUnique};
@@ -39,19 +46,20 @@ use abs_smux::{
     conn::{TrConnection, TrDockBinding},
     dock::TrDock,
 };
+use bumplist_alloc::{BumpListAlloc, PageSize};
 use gen_mcf2::gen_may_cancel_future;
 
-use super::{
-    config::{self, ChannelHandle, Dock, ReqPrefix, TrConfig},
-    method_::RequestBuilder,
-    prep_ctx_::ClientPrepCtx,
-    session::MptpSession,
-};
 use crate::{
     error_::{ClientError, ProtocolError, TransportError},
     messaging,
     ring_prepare_::TrPrepFactory,
     x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2},
+};
+use super::{
+    config::{self, ChannelHandle, Dock, ReqPrefix, TrConfig},
+    method_::RequestBuilder,
+    prep_ctx_::ClientPrepCtx,
+    session::MptpSession,
 };
 
 /// 客户端持有的连接智能指针。
@@ -61,36 +69,38 @@ type SharedConn<C> = <C as abs_mptp::client::config::TrConfig>::SharedConn;
 ///
 /// 它只持有连接：**没有**本端垛口（每次由连接安排），**也没有**远端垛口（每次调用的实参
 /// 或配置声明的缺省值）。于是同一个 `Client` 可以向任意垛口发起请求。
-pub struct MptpClient<C>
+pub struct MptpClient<C, A = Global>
 where
     C: TrConfig,
+    A: Allocator,
 {
     /// 共享连接。
     conn_: SharedConn<C>,
 
     /// 客户端持有的分配器句柄；每个 session 克隆一份。
-    alloc_: C::Alloc,
+    bump_: BumpListAlloc<A>,
 }
 
-impl<C> MptpClient<C>
+impl<C, A> MptpClient<C, A>
 where
     C: TrConfig,
+    A: Allocator,
 {
     /// 由共享连接构造客户端。
     ///
     /// 没有策略参数：默认的 ring 准备工厂是一个**类型**
     /// （[`TrConfig::DefaultPrepFactory`]），由本 crate 在每次裁决前用环境现场构造，没有实例
     /// 需要提前注入；目标垛口也是每次调用的实参（缺省时读配置）。
-    pub const fn new(conn: SharedConn<C>, alloc: C::Alloc) -> Self {
+    pub fn new_in(conn: SharedConn<C>, alloc: A) -> Self {
         MptpClient {
             conn_: conn,
-            alloc_: alloc,
+            bump_: BumpListAlloc::new_in(alloc, PageSize::P2K).expect("PageSize::P2K should succeed"),
         }
     }
 
     /// 本客户端持有的分配器句柄。
-    pub const fn allocator(&self) -> &C::Alloc {
-        &self.alloc_
+    pub const fn allocator(&self) -> &BumpListAlloc<A> {
+        &self.bump_
     }
 
     /// 统一入口：显式方法 + 位置。
@@ -102,7 +112,7 @@ where
         let location = location.into();
         RequestBuilder::new_(
             self,
-            messaging::RequestPrefix::new(method, &location, self.alloc_.clone()),
+            messaging::RequestPrefix::new(method, &location, &self.bump_),
         )
     }
 

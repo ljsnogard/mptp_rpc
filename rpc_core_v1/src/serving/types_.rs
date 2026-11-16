@@ -57,7 +57,7 @@ pub fn typed_response<'a, C>(
 where
     C: TrConfig + 'a,
 {
-    let mut headers = Headers::new();
+    let mut headers = Headers::new_in();
     apply_response_type_headers(&mut headers, method, info);
     let mut builder = session.response(status);
     for (key, val) in headers.iter() {

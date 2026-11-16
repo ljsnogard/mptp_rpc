@@ -1229,7 +1229,7 @@ mod tests_ {
     /// - Verdict: every read matches; absent headers read as `None`.
     #[test]
     fn headers_roundtrip_() {
-        let mut headers = Headers::new();
+        let mut headers = Headers::new_in();
         assert_eq!(read_body_codec(&headers), Result::Ok(Option::None));
         assert_eq!(read_data_type_id(&headers), Result::Ok(Option::None));
         assert_eq!(read_accept(&headers), Result::Ok(Option::None));
@@ -1274,7 +1274,7 @@ mod tests_ {
             .with_response_suffix(id)
             .with_accept(AcceptType::new(BodyCodec::MsgPack, Option::Some(id)));
 
-        let mut ok = Headers::new();
+        let mut ok = Headers::new_in();
         write_body_codec(&mut ok, BodyCodec::MsgPack);
         write_accept(
             &mut ok,
@@ -1285,7 +1285,7 @@ mod tests_ {
             Result::Ok(())
         );
 
-        let mut missing = Headers::new();
+        let mut missing = Headers::new_in();
         write_body_codec(&mut missing, BodyCodec::MsgPack);
         assert_eq!(
             validate_request_types(AccessMethod::Pull, &missing, &info),
@@ -1298,7 +1298,7 @@ mod tests_ {
             Status::BadRequest
         );
 
-        let mut wrong = Headers::new();
+        let mut wrong = Headers::new_in();
         write_body_codec(&mut wrong, BodyCodec::MsgPack);
         write_accept(
             &mut wrong,
@@ -1335,7 +1335,7 @@ mod tests_ {
         let id = DataTypeId::new(0x21u64).unwrap();
         let strict = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_request_suffix(id);
 
-        let mut ok = Headers::new();
+        let mut ok = Headers::new_in();
         write_body_codec(&mut ok, BodyCodec::MsgPack);
         write_data_type_id(&mut ok, id);
         assert_eq!(
@@ -1343,7 +1343,7 @@ mod tests_ {
             Result::Ok(())
         );
 
-        let mut missing = Headers::new();
+        let mut missing = Headers::new_in();
         write_body_codec(&mut missing, BodyCodec::MsgPack);
         assert_eq!(
             validate_request_types(AccessMethod::Push, &missing, &strict),
@@ -1352,7 +1352,7 @@ mod tests_ {
             })
         );
 
-        let mut wrong = Headers::new();
+        let mut wrong = Headers::new_in();
         write_body_codec(&mut wrong, BodyCodec::MsgPack);
         write_data_type_id(&mut wrong, DataTypeId::new(0x22u64).unwrap());
         assert!(matches!(
@@ -1387,7 +1387,7 @@ mod tests_ {
     fn validate_call_direction_() {
         let id = DataTypeId::new(0x31u64).unwrap();
         let info = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_request_body(id);
-        let mut headers = Headers::new();
+        let mut headers = Headers::new_in();
         write_body_codec(&mut headers, BodyCodec::Json);
         write_data_type_id(&mut headers, id);
         let rejection = validate_request_types(AccessMethod::Call, &headers, &info).unwrap_err();
@@ -1395,7 +1395,7 @@ mod tests_ {
         assert_eq!(rejection.status(), Status::NotAcceptable);
 
         let bodyless = RpcDataTypeInfo::new(BodyCodec::MsgPack);
-        let mut headers = Headers::new();
+        let mut headers = Headers::new_in();
         write_data_type_id(&mut headers, id);
         let rejection =
             validate_request_types(AccessMethod::Call, &headers, &bodyless).unwrap_err();
@@ -1422,7 +1422,7 @@ mod tests_ {
         let id = DataTypeId::new(0x41u64).unwrap();
         let info = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_response_suffix(id);
 
-        let mut ok = Headers::new();
+        let mut ok = Headers::new_in();
         write_body_codec(&mut ok, BodyCodec::MsgPack);
         write_data_type_id(&mut ok, id);
         assert_eq!(
@@ -1430,14 +1430,14 @@ mod tests_ {
             Result::Ok(())
         );
 
-        let mut missing = Headers::new();
+        let mut missing = Headers::new_in();
         write_body_codec(&mut missing, BodyCodec::MsgPack);
         let rejection =
             validate_response_types(AccessMethod::Pull, &missing, &info).unwrap_err();
         assert!(matches!(rejection, TypeRejection::MissingHeader { .. }));
         assert_eq!(rejection.status(), Status::BadRequest);
 
-        let mut wrong = Headers::new();
+        let mut wrong = Headers::new_in();
         write_body_codec(&mut wrong, BodyCodec::MsgPack);
         write_data_type_id(&mut wrong, DataTypeId::new(0x42u64).unwrap());
         let rejection = validate_response_types(AccessMethod::Pull, &wrong, &info).unwrap_err();

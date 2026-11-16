@@ -11,7 +11,9 @@
 //! still follows the `Body_Size` / `Body_Transfer` headers. `request_prefix` and the
 //! original `request_async` remain the escape hatches.
 
+use alloc::alloc::Global;
 use core::{
+    alloc::Allocator,
     future::{Future, Ready, ready},
     pin::Pin,
     task::{Context, Poll},
@@ -23,6 +25,7 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     spec::StdHeaderKey,
 };
+use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix, limited::LimitedReader};
 
@@ -241,15 +244,16 @@ where
 }
 
 /// 客户端请求 builder。
-pub struct RequestBuilder<'a, C, B = NilBody, S = NoSuffix>
+pub struct RequestBuilder<'a, C, B = NilBody, S = NoSuffix, A = Global>
 where
     C: TrConfig,
+    A: Allocator,
 {
     /// 发起请求的客户端。
-    client_: &'a MptpClient<C>,
+    client_: &'a MptpClient<C, A>,
 
     /// 请求前缀。
-    prefix_: RequestPrefix<C::Alloc>,
+    prefix_: RequestPrefix<&'a BumpListAlloc<A>>,
 
     /// 目标垛口；缺省取配置。
     dock_: Option<Dock<C>>,

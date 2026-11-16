@@ -99,7 +99,7 @@ where
         let headers_ = prefix
             .headers()
             .cloned()
-            .unwrap_or_else(|| Headers::new(alloc.clone()));
+            .unwrap_or_else(|| Headers::new_in(alloc.clone()));
         Result::Ok(ServingSession {
             core_: SessionCore::new_(prefix, plan, tx, rx),
             method_,
@@ -188,7 +188,7 @@ where
     /// 拿走两个半边与头表，自己驱动；之后框架不再兜底收尾。
     pub fn take_parts(&mut self) -> Option<ServingParts<C>> {
         let (tx, rx) = self.core_.take_channel_()?;
-        let headers = core::mem::replace(&mut self.headers_, Headers::new(self.alloc_.clone()));
+        let headers = core::mem::replace(&mut self.headers_, Headers::new_in(self.alloc_.clone()));
         let location = core::mem::replace(
             &mut self.location_,
             String::from_str_in("", self.alloc_.clone()),

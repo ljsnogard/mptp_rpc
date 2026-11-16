@@ -32,7 +32,8 @@
 //! write half is closed. The response body view is a single type over the two upstream
 //! readers; `TrMptpBuffRead` extracts the one the prefix already decided.
 
-use alloc::string::ToString;
+use alloc::{alloc::Global, string::ToString};
+use core::alloc::Allocator;
 
 use abs_buff::{
     Demand, TrBuffFlush, TrBuffRead, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite,
@@ -43,6 +44,7 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     messaging::TrMsgPrefix,
 };
+use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{RequestPrefix, chunked::ChunkedEncode, read_response_prefix_with_async};
 
@@ -70,18 +72,18 @@ pub type RespBodyError<TyErr> = BodyError<TyErr>;
 /// 一次请求 / 回复过程的会话。
 ///
 /// 字段不对外公开：调用者只能通过 [`TrMptpSession`] 的契约驱动它。
-pub struct MptpSession<C>
+pub struct MptpSession<C, A = Global>
 where
     C: TrConfig,
+    A: Allocator,
 {
     /// 共享的会话核心：两个半边、请求前缀、体边界与体进度。
     core_: SessionCore<ChannelTx<C>, ChannelRx<C>, C::Alloc>,
 
-    /// 本会话从客户端克隆来的分配器句柄。
-    alloc_: C::Alloc,
-
     /// 客户端侧的状态机。
     state_: SessionState,
+
+    bump_: BumpListAlloc<A>,
 }
 
 impl<C> MptpSession<C>

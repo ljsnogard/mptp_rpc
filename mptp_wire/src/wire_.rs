@@ -547,7 +547,7 @@ mod tests_ {
     ///   allocator is `&TestArena`, proving the heap memory came from that arena.
     #[test]
     fn request_prefix_decodes_into_supplied_arena_() {
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set(
             HeaderKey::from(StdHeaderKey::Cookie),
@@ -656,7 +656,7 @@ mod tests_ {
         let prefix = RequestPrefix::with_headers(
             AccessMethod::Call,
             "/rpc/echo",
-            Option::Some(Headers::new(Global)),
+            Option::Some(Headers::new_in(Global)),
             Global,
         );
         let mut storage = [0u8; 128usize];
@@ -696,7 +696,7 @@ mod tests_ {
     ///   integers and objects are two-element arrays.
     #[test]
     fn response_prefix_obj_value_wire_form_() {
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set_num(
             StdHeaderKey::Body_Type,
@@ -772,7 +772,7 @@ mod tests_ {
     /// - Verdict: status, the whole map and the custom key all compare equal.
     #[test]
     fn response_prefix_headers_roundtrip_() {
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set_num(
             StdHeaderKey::Body_Type,
@@ -824,7 +824,7 @@ mod tests_ {
     #[test]
     fn string_header_key_roundtrips_() {
         let key = HeaderKey::from_text("x-custom", Global);
-        let mut headers = Headers::new(Global);
+        let mut headers = Headers::new_in(Global);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set(key.clone(), HeaderVal::from_bytes(0x1234, b"v", Global));
 
@@ -944,7 +944,7 @@ mod tests_ {
         let empty = RequestPrefix::with_headers(
             AccessMethod::Head,
             "/x",
-            Option::Some(Headers::new(Global)),
+            Option::Some(Headers::new_in(Global)),
             Global,
         );
 

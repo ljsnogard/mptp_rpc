@@ -77,7 +77,7 @@ where
     let accept = info
         .accept()
         .unwrap_or_else(|| AcceptType::new(info.body_codec(), info.response_suffix()));
-    let mut headers = Headers::new();
+    let mut headers = Headers::new_in();
     apply_request_type_headers(&mut headers, AccessMethod::Pull, &info);
     write_accept(&mut headers, accept);
     let mut builder = client.request(AccessMethod::Pull, path);
@@ -161,7 +161,7 @@ where
             "Push {path} 的端点元信息没有声明 request_suffix 类型 ID"
         )));
     };
-    let mut headers = Headers::new();
+    let mut headers = Headers::new_in();
     apply_request_type_headers(&mut headers, AccessMethod::Push, &info);
     let prefix =
         RequestPrefix::with_headers(AccessMethod::Push, path.to_string(), Option::Some(headers));

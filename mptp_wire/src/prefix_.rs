@@ -116,7 +116,11 @@ impl<A: AllocatorClone> RequestPrefix<A> {
     /// 由「方法 + 位置 + allocator」构造一条**没有头**的请求前缀。
     ///
     /// Build a header-less request prefix; the location is allocated by `alloc`.
-    pub fn new(method: AccessMethod, location: &str, alloc: A) -> Self {
+    pub fn new(
+        method: AccessMethod,
+        location: &str,
+        alloc: A,
+    ) -> Self {
         let location_ = String::from_str_in(location, alloc.clone());
         RequestPrefix {
             method_: method,
@@ -149,7 +153,7 @@ impl<A: AllocatorClone> RequestPrefix<A> {
     /// Borrow the header map mutably, creating an empty one when absent.
     pub fn headers_mut(&mut self) -> &mut Headers<A> {
         let alloc = self.alloc_.clone();
-        self.headers_.get_or_insert_with(|| Headers::new(alloc))
+        self.headers_.get_or_insert_with(|| Headers::new_in(alloc))
     }
 
     /// 替换资源位置；新文本由本前缀的 allocator 分配。
@@ -311,7 +315,7 @@ impl<A: AllocatorClone> ResponsePrefix<A> {
     /// Borrow the header map mutably, creating an empty one when absent.
     pub fn headers_mut(&mut self) -> &mut Headers<A> {
         let alloc = self.alloc_.clone();
-        self.headers_.get_or_insert_with(|| Headers::new(alloc))
+        self.headers_.get_or_insert_with(|| Headers::new_in(alloc))
     }
 }
 

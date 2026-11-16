@@ -45,7 +45,12 @@ pub(crate) struct SessionCore<Tx, Rx, A: AllocatorClone> {
 
 impl<Tx, Rx, A: AllocatorClone> SessionCore<Tx, Rx, A> {
     /// 由「请求前缀 + 体边界 + 两个半边」构造。
-    pub(crate) fn new_(request: RequestPrefix<A>, body_plan: BodyPlan, tx: Tx, rx: Rx) -> Self {
+    pub(crate) fn new_(
+        request: RequestPrefix<A>,
+        body_plan: BodyPlan,
+        tx: Tx,
+        rx: Rx,
+    ) -> Self {
         SessionCore {
             request_: Option::Some(request),
             body_plan_: Option::Some(body_plan),
