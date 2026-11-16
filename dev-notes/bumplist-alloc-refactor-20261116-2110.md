@@ -48,3 +48,48 @@
   - `Body_Transfer` 只认数字 `0x20`（`Body_Transfer_Chunked`），`Obj` 不算分块。
 - 文本长度 / 文本 `"chunked"` 的兼容路径被移除；这属于值形态变更的直接结果。
 - `TrHeaders::Val` 不再要求 `Clone`：`body_info` 只借 `as_num_or_obj()`，不复制值。
+
+## 3. 第 2 步：`mptp_wire` 的 allocator 泛型
+
+### 3.1 类型形状
+
+- `Headers<A: Allocator>`、`RequestPrefix<A>`、`ResponsePrefix<A>`、`HeaderVal<A>` 都显式
+  带 `A`，没有 `Global` 默认值；`HeaderKey<A>` 是 `U16OrStr<A>` 的别名。
+- `location` 用 `abs_str::String<A>`；头键文本用 `abs_str::String<A>`；对象载荷用
+  `Vec<u8, A>`。类型定义只要求 `A: Allocator`；构造 / 克隆 / 解码按需追加
+  `A: Clone`、`A: AllocatorClone` 或 `A: TrAllocSource`。
+- 头表内部不用 `BTreeMap`：nightly 的 `BTreeMap<K, V, A>` 方法要求 `A: AllocatorClone`
+  （一个必须显式实现的 marker trait，`A: Allocator + Clone` 不会自动满足它）。改用
+  「按 `HeaderKey` 排序的 `Vec<(K, V), A>` + 二分查找」；头数量很小，线性搬移可接受，
+  这样读路径只要求 `A: Allocator`。
+- 为了保留 `TrHeadersMut` 的共享语义，头表仍是 `Arc<HeaderMap<A>, A>`；`Arc` 的
+  `clone` / `make_mut` 要求 `A: AllocatorClone`，因此 `Headers::set` / `remove` 与
+  `TrHeadersMut` 的实现带这个约束。目标 allocator `&'a BumpListAlloc` 由 core 的
+  `impl<A: Allocator + ?Sized> AllocatorClone for &A` 满足。
+
+### 3.2 解码入口
+
+- `read_request_prefix_async` / `read_response_prefix_async`：用 `NoArena` 解码，返回
+  allocator 为 `Global` 的前缀；行为与旧入口一致（除头值形态外）。
+- `read_request_prefix_in_async` / `read_response_prefix_in_async`：接收 `&'alloc Alloc`，
+  用 `MpDecoder::new_in` 解码，返回 allocator 为 `&'alloc Alloc` 的前缀；要求
+  `Alloc: TrArena<'alloc> + Allocator`。`mptp_smux` 的会话在后续步骤使用这一族。
+- 返回前缀的生命周期收窄到 `rx` 的借用 `'f`（生成 future 的 outlives 约束需要），调用方
+  只需保证 arena 活过这次读取即可。
+
+### 3.3 头值线格式与语义
+
+- 数字值：MessagePack 整数（`u16`）。
+- 对象值：两元素数组 `[type_id(u32), bin]`；`bin` 是 MessagePack binary，类型为
+  `abs_mptp::spec::ObjEnvelope<Vec<u8, A>>`。
+- 文本值不再作为头值形态：`HeaderVal::from_text` / `as_text` / `as_u64` /
+  `Headers::set_text` / `data_type_id` 被移除。`Body_Size` / `Body_Transfer` 等标准头
+  一律写数字；`Data_Type_Id`、`Accept` 这类复杂值改由上层用 `ObjEnvelope` 承载。
+  这属于 `TrNumOrObj` 协议变更的直接结果，不是 allocator 重构的附带选择。
+
+### 3.4 验证
+
+- `cargo test -p mptp_wire`：24 个单元测试 + 11 个文档测试通过。
+- 新增 `request_prefix_decodes_into_supplied_arena_`：用测试 arena 走 `_in_` 解码，
+  断言返回前缀的 allocator 是 `&TestArena`，字符串 / 头表都来自该 arena。
+- `cargo clippy -p mptp_wire --all-targets` 无警告。
