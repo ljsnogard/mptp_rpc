@@ -10,24 +10,25 @@
 //! methods live here: read the request body / suffix, build the response, then finish.
 //! Many sessions can be held concurrently on one connection.
 
-use alloc::string::{String, ToString};
+use alloc::string::{String as StdString, ToString};
 
 use abs_buff::{
     Demand, TrBuffFlush, TrBuffRead, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite,
-    buffer::TrConsumerState,
-    x_deps::anylr::SomeOf,
+    buffer::TrConsumerState, x_deps::anylr::SomeOf,
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
     messaging::{BodySize, TrMsgPrefix},
     spec::{Status, StdHeaderKey, StdHeaderVal, access_method::AccessMethod},
 };
+use abs_str::str_alloc::String;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{
-    HeaderKey, HeaderVal, Headers, RequestPrefix, ResponsePrefix,
-    chunked::ChunkedEncode, write_response_prefix_async,
+    HeaderKey, HeaderVal, Headers, RequestPrefix, ResponsePrefix, chunked::ChunkedEncode,
+    write_response_prefix_async,
 };
 
+use super::config::{ChannelRx, ChannelTx, TrConfig};
 use crate::{
     body_::{BodyPlan, BodyRead, BodyState, SuffixRead},
     copy_::{CopyError, copy_all_async_, copy_sized_async_, drain_to_eof_async_},
@@ -36,7 +37,6 @@ use crate::{
     session_state_::ServingState,
     x_deps::{abs_buff, abs_cancel, gen_mcf2},
 };
-use super::config::{ChannelRx, ChannelTx, TrConfig};
 
 /// 服务端请求体的读视图。
 pub type RequestBodyRead<'f, C> = BodyRead<'f, ChannelRx<C>>;
@@ -44,31 +44,42 @@ pub type RequestBodyRead<'f, C> = BodyRead<'f, ChannelRx<C>>;
 /// 服务端请求后缀流的读视图。
 pub type RequestSuffixRead<'f, C> = SuffixRead<'f, ChannelRx<C>>;
 
+/// [`ServingSession::take_parts`] 交出的四件套。
+pub type ServingParts<C> = (
+    ChannelTx<C>,
+    ChannelRx<C>,
+    Headers<<C as TrConfig>::Alloc>,
+    String<<C as TrConfig>::Alloc>,
+);
+
 /// 一条入向子流上的服务端会话。
 pub struct ServingSession<C>
 where
     C: TrConfig,
 {
     /// 共享核心：两个半边、请求前缀、体边界与体进度。
-    core_: SessionCore<ChannelTx<C>, ChannelRx<C>>,
+    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, C::Alloc>,
 
     /// 本次请求的方法。
     method_: AccessMethod,
 
     /// 本次请求的位置。
-    location_: String,
+    location_: String<C::Alloc>,
 
     /// 请求头表的可变副本；handler 的修改不写回前缀。
-    headers_: Headers,
+    headers_: Headers<C::Alloc>,
 
     /// 已经写出的回复前缀。
-    resp_prefix_: Option<ResponsePrefix>,
+    resp_prefix_: Option<ResponsePrefix<C::Alloc>>,
 
     /// 服务端状态机。
     state_: ServingState,
 
     /// 是否已经写过回复前缀。
     responded_: bool,
+
+    /// 会话从 servlet 克隆来的分配器句柄。
+    alloc_: C::Alloc,
 }
 
 impl<C> ServingSession<C>
@@ -77,14 +88,18 @@ where
 {
     /// 由「已解码的请求前缀 + 两个半边」构造。
     pub(crate) fn new_(
-        prefix: RequestPrefix,
+        prefix: RequestPrefix<C::Alloc>,
         tx: ChannelTx<C>,
         rx: ChannelRx<C>,
+        alloc: C::Alloc,
     ) -> Result<Self, ServeError> {
         let plan = BodyPlan::from_info_(prefix.body_info()).map_err(ServeError::Protocol)?;
         let method_ = prefix.method();
-        let location_ = String::from(prefix.location());
-        let headers_ = prefix.headers().cloned().unwrap_or_default();
+        let location_ = String::from_str_in(prefix.location(), alloc.clone());
+        let headers_ = prefix
+            .headers()
+            .cloned()
+            .unwrap_or_else(|| Headers::new(alloc.clone()));
         Result::Ok(ServingSession {
             core_: SessionCore::new_(prefix, plan, tx, rx),
             method_,
@@ -93,6 +108,7 @@ where
             resp_prefix_: Option::None,
             state_: ServingState::ReqPrefixReady,
             responded_: false,
+            alloc_: alloc,
         })
     }
 
@@ -106,18 +122,23 @@ where
         &self.location_
     }
 
+    /// 本会话持有的分配器句柄。
+    pub fn allocator(&self) -> &C::Alloc {
+        &self.alloc_
+    }
+
     /// 请求头表的可变副本。
-    pub fn headers(&self) -> &Headers {
+    pub fn headers(&self) -> &Headers<C::Alloc> {
         &self.headers_
     }
 
     /// 可变请求头表。
-    pub fn headers_mut(&mut self) -> &mut Headers {
+    pub fn headers_mut(&mut self) -> &mut Headers<C::Alloc> {
         &mut self.headers_
     }
 
     /// 已经写出的回复前缀。
-    pub fn sent_response_prefix(&self) -> Option<&ResponsePrefix> {
+    pub fn sent_response_prefix(&self) -> Option<&ResponsePrefix<C::Alloc>> {
         self.resp_prefix_.as_ref()
     }
 
@@ -146,11 +167,11 @@ where
 
     /// 构造回复 helper；终结时才写前缀。
     pub fn response(&mut self, status: Status) -> ResponseBuilder<'_, C> {
-        self.response_prefix(ResponsePrefix::new(status))
+        self.response_prefix(ResponsePrefix::new(status, self.alloc_.clone()))
     }
 
     /// 用给定的回复前缀构造 helper。
-    pub fn response_prefix(&mut self, prefix: ResponsePrefix) -> ResponseBuilder<'_, C> {
+    pub fn response_prefix(&mut self, prefix: ResponsePrefix<C::Alloc>) -> ResponseBuilder<'_, C> {
         ResponseBuilder {
             session_: self,
             prefix_: prefix,
@@ -165,10 +186,13 @@ where
     }
 
     /// 拿走两个半边与头表，自己驱动；之后框架不再兜底收尾。
-    pub fn take_parts(&mut self) -> Option<(ChannelTx<C>, ChannelRx<C>, Headers, String)> {
+    pub fn take_parts(&mut self) -> Option<ServingParts<C>> {
         let (tx, rx) = self.core_.take_channel_()?;
-        let headers = core::mem::take(&mut self.headers_);
-        let location = core::mem::take(&mut self.location_);
+        let headers = core::mem::replace(&mut self.headers_, Headers::new(self.alloc_.clone()));
+        let location = core::mem::replace(
+            &mut self.location_,
+            String::from_str_in("", self.alloc_.clone()),
+        );
         Option::Some((tx, rx, headers, location))
     }
 
@@ -181,7 +205,6 @@ where
     pub(crate) fn responded_(&self) -> bool {
         self.responded_
     }
-
 }
 
 /// 把回复体 / 后缀的搬运错误映射成服务端错误。
@@ -198,7 +221,7 @@ fn resp_copy_error_(err: CopyError) -> ServeError {
             ServeError::Protocol(ProtocolError::ResponseBodyWrite { detail })
         }
         CopyError::EmptySegment => ServeError::Protocol(ProtocolError::ResponseBodyRead {
-            detail: String::from("源或目标让出的段是空的，无法推进"),
+            detail: StdString::from("源或目标让出的段是空的，无法推进"),
         }),
     }
 }
@@ -298,14 +321,10 @@ where
     let mut dropped = 0usize;
     {
         let (rx, body_state) = session.core_.rx_and_body_mut_()?;
-        dropped += crate::session_core_::drain_body_async_(
-            plan,
-            body_state,
-            rx,
-            cancel.child_token(),
-        )
-        .await
-        .map_err(ServeError::Protocol)?;
+        dropped +=
+            crate::session_core_::drain_body_async_(plan, body_state, rx, cancel.child_token())
+                .await
+                .map_err(ServeError::Protocol)?;
     }
 
     // 先半关闭写端，再读尽对端；顺序不能反。
@@ -331,7 +350,7 @@ where
     session_: &'a mut ServingSession<C>,
 
     /// 待写出的回复前缀。
-    prefix_: ResponsePrefix,
+    prefix_: ResponsePrefix<C::Alloc>,
 }
 
 impl<'a, C> ResponseBuilder<'a, C>
@@ -339,7 +358,11 @@ where
     C: TrConfig,
 {
     /// 追加 / 覆盖一个回复头。
-    pub fn header(&mut self, key: impl Into<HeaderKey>, val: HeaderVal) -> &mut Self {
+    pub fn header(
+        &mut self,
+        key: impl Into<HeaderKey<C::Alloc>>,
+        val: HeaderVal<C::Alloc>,
+    ) -> &mut Self {
         self.prefix_.headers_mut().set(key, val);
         self
     }
@@ -464,7 +487,10 @@ fn ensure_body_allowed_(method: AccessMethod) -> Result<(), ProtocolError> {
 }
 
 /// `no_body` 要求前缀本身没有声明任何体。
-fn ensure_no_body_(prefix: &ResponsePrefix) -> Result<(), ProtocolError> {
+fn ensure_no_body_<A>(prefix: &ResponsePrefix<A>) -> Result<(), ProtocolError>
+where
+    A: core::alloc::Allocator + Clone,
+{
     if !matches!(prefix.body_info(), BodySize::NilBody) {
         return Result::Err(ProtocolError::BodyDeclaredButNotWritten);
     }
@@ -474,7 +500,7 @@ fn ensure_no_body_(prefix: &ResponsePrefix) -> Result<(), ProtocolError> {
 /// 写回复前缀，并标记为已回复。
 async fn write_response_prefix_inner_<C, K>(
     session: &mut ServingSession<C>,
-    prefix: ResponsePrefix,
+    prefix: ResponsePrefix<C::Alloc>,
     cancel: K,
 ) -> Result<(), ServeError>
 where
@@ -505,10 +531,7 @@ where
     C: TrConfig + 'f,
     K: TrCancellationToken,
 {
-    let ResponseBuilder {
-        session_,
-        prefix_,
-    } = builder;
+    let ResponseBuilder { session_, prefix_ } = builder;
 
     // `no_body` 对 `Head` / `Drop` 也是合法的：这两个方法本来就不写回复体。
     // 只有前缀已经声明了体时才拒绝。
@@ -539,9 +562,10 @@ where
 
     ensure_body_allowed_(session_.method_)?;
 
-    prefix_
-        .headers_mut()
-        .set_text(StdHeaderKey::Body_Size, size.to_string());
+    prefix_.headers_mut().set_num(
+        StdHeaderKey::Body_Size,
+        u16::try_from(size).unwrap_or(u16::MAX),
+    );
     prefix_.headers_mut().remove(StdHeaderKey::Body_Transfer);
 
     write_response_prefix_inner_(session_, prefix_, cancel.child_token()).await?;
@@ -612,10 +636,7 @@ where
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
-    let ResponseBuilder {
-        session_,
-        prefix_,
-    } = builder;
+    let ResponseBuilder { session_, prefix_ } = builder;
 
     ensure_body_allowed_(session_.method_)?;
     ensure_no_body_(&prefix_)?;
@@ -843,7 +864,7 @@ fn suffix_copy_error_(err: CopyError) -> ServeError {
         CopyError::Read { detail } => ServeError::Protocol(ProtocolError::SuffixRead { detail }),
         CopyError::Write { detail } => ServeError::Protocol(ProtocolError::SuffixWrite { detail }),
         CopyError::EmptySegment => ServeError::Protocol(ProtocolError::SuffixWrite {
-            detail: String::from("源或目标让出的段是空的，无法推进"),
+            detail: StdString::from("源或目标让出的段是空的，无法推进"),
         }),
     }
 }
@@ -859,10 +880,7 @@ where
     C: TrConfig + 'f,
     K: TrCancellationToken,
 {
-    let ResponseBuilder {
-        session_,
-        prefix_,
-    } = builder;
+    let ResponseBuilder { session_, prefix_ } = builder;
 
     ensure_body_allowed_(session_.method_)?;
     ensure_no_body_(&prefix_)?;
@@ -945,6 +963,8 @@ where
 
 #[cfg(test)]
 mod tests_ {
+    use alloc::alloc::Global;
+
     use super::*;
 
     /// 测试 `Head` 与 `Drop` 的回复体在 helper 层被拒绝。
@@ -1000,10 +1020,8 @@ mod tests_ {
     /// - Verdict: it returns `BodyDeclaredButNotWritten`.
     #[test]
     fn no_body_rejects_declared_body_() {
-        let mut prefix = ResponsePrefix::new(Status::Ok);
-        prefix
-            .headers_mut()
-            .set_text(StdHeaderKey::Body_Size, 8usize.to_string());
+        let mut prefix = ResponsePrefix::new(Status::Ok, Global);
+        prefix.headers_mut().set_num(StdHeaderKey::Body_Size, 8u16);
         let res = ensure_no_body_(&prefix);
         assert!(matches!(
             res,
@@ -1021,7 +1039,7 @@ mod tests_ {
     /// - Verdict: `ensure_no_body_` returns `Ok`.
     #[test]
     fn no_body_accepts_plain_prefix_() {
-        let prefix = ResponsePrefix::new(Status::Ok);
+        let prefix = ResponsePrefix::new(Status::Ok, Global);
         assert!(ensure_no_body_(&prefix).is_ok());
     }
 
@@ -1069,7 +1087,7 @@ mod tests_ {
     fn suffix_errors_are_classified_as_suffix_() {
         for err in [
             CopyError::Write {
-                detail: String::from("x"),
+                detail: StdString::from("x"),
             },
             CopyError::EmptySegment,
         ] {

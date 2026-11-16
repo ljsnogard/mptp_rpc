@@ -29,20 +29,11 @@
 //! **自己不持有任何垛口**：本端每次由连接安排，远端每次由调用决定。
 
 use alloc::string::ToString;
-
-use core::{
-    alloc::AllocatorClone,
-    mem::MaybeUninit,
-    ops::Deref,
-};
+use core::{alloc::AllocatorClone, mem::MaybeUninit, ops::Deref};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::res_man::{TrAllocBy, TrUnique};
-use abs_mptp::{
-    client::TrMptpClient,
-    spec::access_method::AccessMethod,
-};
-
+use abs_mptp::{client::TrMptpClient, spec::access_method::AccessMethod};
 use abs_smux::{
     chan::{TrChannelHandle, TrPrepareRing},
     conn::{TrConnection, TrDockBinding},
@@ -50,17 +41,17 @@ use abs_smux::{
 };
 use gen_mcf2::gen_may_cancel_future;
 
-use crate::{
-    error_::{ClientError, ProtocolError, TransportError},
-    messaging,
-    ring_prepare_::TrPrepFactory,
-    x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2},
-};
 use super::{
     config::{self, ChannelHandle, Dock, ReqPrefix, TrConfig},
     method_::RequestBuilder,
     prep_ctx_::ClientPrepCtx,
     session::MptpSession,
+};
+use crate::{
+    error_::{ClientError, ProtocolError, TransportError},
+    messaging,
+    ring_prepare_::TrPrepFactory,
+    x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2},
 };
 
 /// 客户端持有的连接智能指针。
@@ -70,9 +61,16 @@ type SharedConn<C> = <C as abs_mptp::client::config::TrConfig>::SharedConn;
 ///
 /// 它只持有连接：**没有**本端垛口（每次由连接安排），**也没有**远端垛口（每次调用的实参
 /// 或配置声明的缺省值）。于是同一个 `Client` 可以向任意垛口发起请求。
-pub struct MptpClient<C>(SharedConn<C>)
+pub struct MptpClient<C>
 where
-    C: TrConfig;
+    C: TrConfig,
+{
+    /// 共享连接。
+    conn_: SharedConn<C>,
+
+    /// 客户端持有的分配器句柄；每个 session 克隆一份。
+    alloc_: C::Alloc,
+}
 
 impl<C> MptpClient<C>
 where
@@ -83,8 +81,16 @@ where
     /// 没有策略参数：默认的 ring 准备工厂是一个**类型**
     /// （[`TrConfig::DefaultPrepFactory`]），由本 crate 在每次裁决前用环境现场构造，没有实例
     /// 需要提前注入；目标垛口也是每次调用的实参（缺省时读配置）。
-    pub const fn new(conn: SharedConn<C>) -> Self {
-        MptpClient(conn)
+    pub const fn new(conn: SharedConn<C>, alloc: C::Alloc) -> Self {
+        MptpClient {
+            conn_: conn,
+            alloc_: alloc,
+        }
+    }
+
+    /// 本客户端持有的分配器句柄。
+    pub const fn allocator(&self) -> &C::Alloc {
+        &self.alloc_
     }
 
     /// 统一入口：显式方法 + 位置。
@@ -93,7 +99,11 @@ where
         method: AccessMethod,
         location: impl Into<alloc::string::String>,
     ) -> RequestBuilder<'_, C> {
-        RequestBuilder::new_(self, messaging::RequestPrefix::new(method, location))
+        let location = location.into();
+        RequestBuilder::new_(
+            self,
+            messaging::RequestPrefix::new(method, &location, self.alloc_.clone()),
+        )
     }
 
     /// `Head`：查看资源元信息；回复不应有体。
@@ -135,7 +145,10 @@ where
     }
 
     /// escape hatch：完全自定义前缀（含头、方法、位置）。
-    pub fn request_prefix(&self, prefix: messaging::RequestPrefix) -> RequestBuilder<'_, C> {
+    pub fn request_prefix(
+        &self,
+        prefix: messaging::RequestPrefix<C::Alloc>,
+    ) -> RequestBuilder<'_, C> {
         RequestBuilder::new_(self, prefix)
     }
 
@@ -184,13 +197,13 @@ where
     type Config = C;
     type Session = MptpSession<C>;
     type ReqErr = ClientError;
-    type RequestAsync<'f> = SendClientRequestAsync<'f, 'f, C> where Self: 'f;
+    type RequestAsync<'f>
+        = SendClientRequestAsync<'f, 'f, C>
+    where
+        Self: 'f;
 
     /// 开一条通往**配置声明的缺省垛口**的子流并发出一条请求。
-    fn request_async<'f>(
-        &'f self,
-        request: ReqPrefix<C>,
-    ) -> Self::RequestAsync<'f> {
+    fn request_async<'f>(&'f self, request: ReqPrefix<C>) -> Self::RequestAsync<'f> {
         SendClientRequestAsync::new(self, request)
     }
 }
@@ -212,7 +225,7 @@ where
     C: TrConfig,
     TyTok: TrCancellationToken,
 {
-    let conn = client.0.deref();
+    let conn = client.conn_.deref();
 
     // 1. 由连接自行安排一个空闲的本端 dock（`Client` 不持有本端垛口）。
     let unspecified = <Dock<C> as TrDock>::unspecified();
@@ -261,10 +274,10 @@ async fn accept_send_async_<'f, C, B, P, K>(
 where
     C: 'f + TrConfig,
     B: 'static
-            + Send
-            + Sync
-            + TrUnique<Item = [MaybeUninit<u8>]>
-            + TrAllocBy<Alloc: AllocatorClone>,
+        + Send
+        + Sync
+        + TrUnique<Item = [MaybeUninit<u8>]>
+        + TrAllocBy<Alloc: AllocatorClone>,
     P: 'static + TrPrepareRing<B, u8>,
     K: TrCancellationToken,
 {
@@ -283,6 +296,7 @@ where
         }
     };
 
+    let alloc = request.allocator().clone();
     // 前缀必须**一次写完**：顺序由 `messaging` 负责，调用者不背顺序。
     if let Result::Err(err) = messaging::write_request_prefix_async(&request, &mut tx)
         .may_cancel_with(cancel.child_token())
@@ -293,7 +307,7 @@ where
         )));
     }
 
-    MptpSession::new_(request, tx, rx)
+    MptpSession::new_(request, tx, rx, alloc)
 }
 
 /// 缺省路径的 step 函数：目标垛口取配置声明的默认服务垛口。
@@ -358,10 +372,10 @@ async fn client_request_to_dock_with_prep_async_<'f, C, B, P, K>(
 where
     C: TrConfig,
     B: 'static
-            + Send
-            + Sync
-            + TrUnique<Item = [MaybeUninit<u8>]>
-            + TrAllocBy<Alloc: AllocatorClone>,
+        + Send
+        + Sync
+        + TrUnique<Item = [MaybeUninit<u8>]>
+        + TrAllocBy<Alloc: AllocatorClone>,
     P: 'static + TrPrepareRing<B, u8>,
     K: TrCancellationToken,
 {

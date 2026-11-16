@@ -93,3 +93,59 @@
 - 新增 `request_prefix_decodes_into_supplied_arena_`：用测试 arena 走 `_in_` 解码，
   断言返回前缀的 allocator 是 `&TestArena`，字符串 / 头表都来自该 arena。
 - `cargo clippy -p mptp_wire --all-targets` 无警告。
+
+## 4. 第 3 步：`mptp_smux` 的会话分配器
+
+### 4.1 为什么是 `C::Alloc` 关联类型
+
+`abs_mptp::client::TrMptpClient::Session` 是一个**不带生命周期**的关联类型，因此 session
+不能借用 client 的 `&'a BumpListAlloc`——否则必须把该 trait 改成 GAT。为了不改协议层 trait，
+客户端 / 服务端配置各增加一个关联类型：
+
+```rust
+type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSource<'a, Self::Alloc>;
+```
+
+`MptpClient<C>` / `MptpServlet<C, H>` 持有一份 `C::Alloc`，每个 `MptpSession<C>` /
+`ServingSession<C>` 克隆一份。会话类型因此仍然只有 `C` 一个参数，没有生命周期、没有
+自引用。前缀 / 头表 / location 的 allocator 类型就是 `C::Alloc`。
+
+### 4.2 `SessionAlloc`
+
+本 crate 提供 `SessionAlloc`：`Arc<BumpListAlloc>` 的 clonable 句柄，实现
+`Allocator`、`AllocatorClone`、`TrArena`、`TrArenaBytes` 与
+`TrAllocSource<'a, SessionAlloc>`。所有克隆共享同一个 arena；`Arc` 保证分配块被释放前
+底层分配器仍然存活。它替代了 `MptpSession` 里原先未使用的 `bumpalo::Bump`。
+
+`bumplist_alloc` 以 `denco_arena` 特性引入；开发期间 workspace 根的 `[patch]` 指向本地
+`../bumplist-alloc`，推送 gitee 后删除该 patch 即可。
+
+### 4.3 `mptp_wire` 的两处配套
+
+- `read_request_prefix_with_async` / `read_response_prefix_with_async`：解码时用
+  `arena: &A`，返回**拥有** `A` 克隆的 `RequestPrefix<A>` / `ResponsePrefix<A>`。会话
+  因此不需要把 arena 的借用带进类型。
+- 文本头恢复为 `Obj`：载荷是 MessagePack string，`type_id` 取
+  `abs_denco::type_id::TrHasTypeId for str` 的 `TYPE_ID_32`。
+  `HeaderVal::from_text` / `as_text` / `as_u64` 与 `Headers::set_text` / `data_type_id`
+  因此仍然可用；`Allow`、`Accept` 这类文本头不需要另造协议。
+- `RequestPrefix` / `ResponsePrefix` 增加 `allocator()` 访问器；`Body_Size` 超过
+  `u16::MAX` 的定长体自动改成分块声明。
+
+### 4.4 公开 API 变更
+
+- `client::config::TrConfig` / `serving::config::TrConfig` 新增 `type Alloc`。
+- `MptpClient::new(conn, alloc)`；`MptpServlet::new(handler, alloc)`；
+  `MptpConnection::new(binding, handler, state, alloc)`。
+- `ServingSession::allocator()`；`take_parts` 返回 `ServingParts<C>`。
+- `K_TMP_ALLOW_HEADER_KEY` 改为 `u16`（键本身与 allocator 无关，避免常量被钉死到某个
+  allocator 类型）。
+- `MptpSession` / `ServingSession` 的类型参数没有变化；下游只需为配置补 `type Alloc`。
+
+### 4.5 验证
+
+- `cargo test -p mptp_smux`：29 个单元测试 + 2 个文档测试 / 集成测试通过。
+- `cargo check -p mptp_smux --no-default-features --features client` 与
+  `--features server` 均通过（顺带修正 `take_rx_` 的 `server` cfg：客户端
+  `into_resp_suffix_async` 也需要它）。
+- `cargo clippy -p mptp_smux --all-targets` 无警告。

@@ -10,16 +10,11 @@
 //! progress. Directional state lives in `MptpSession` / `ServingSession`; the boundary,
 //! views and teardown primitives are implemented once.
 
-use abs_buff::{
-    TrBuffRead,
-    buffer::TrConsumerState,
-};
+use core::alloc::Allocator;
+
+use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_cancel::TrCancellationToken;
-use mptp_wire::{
-    RequestPrefix,
-    chunked::ChunkedReader,
-    limited::LimitedReader,
-};
+use mptp_wire::{RequestPrefix, chunked::ChunkedReader, limited::LimitedReader};
 
 use crate::{
     body_::{BodyPlan, BodyState},
@@ -29,11 +24,11 @@ use crate::{
 };
 
 /// 一次会话的共享核心。
-pub(crate) struct SessionCore<Tx, Rx> {
+pub(crate) struct SessionCore<Tx, Rx, A: Allocator> {
     /// 本次请求的前缀。服务端只用体边界，不读前缀，因此允许在 `server`-only 构建里
     /// 保留这个字段。
     #[allow(dead_code)]
-    request_: Option<RequestPrefix>,
+    request_: Option<RequestPrefix<A>>,
 
     /// 请求体的边界；服务端在构造时定下，客户端在发出前缀后定下。
     body_plan_: Option<BodyPlan>,
@@ -48,14 +43,9 @@ pub(crate) struct SessionCore<Tx, Rx> {
     body_: BodyState,
 }
 
-impl<Tx, Rx> SessionCore<Tx, Rx> {
+impl<Tx, Rx, A: Allocator> SessionCore<Tx, Rx, A> {
     /// 由「请求前缀 + 体边界 + 两个半边」构造。
-    pub(crate) fn new_(
-        request: RequestPrefix,
-        body_plan: BodyPlan,
-        tx: Tx,
-        rx: Rx,
-    ) -> Self {
+    pub(crate) fn new_(request: RequestPrefix<A>, body_plan: BodyPlan, tx: Tx, rx: Rx) -> Self {
         SessionCore {
             request_: Option::Some(request),
             body_plan_: Option::Some(body_plan),
@@ -67,7 +57,7 @@ impl<Tx, Rx> SessionCore<Tx, Rx> {
 
     /// 请求前缀。
     #[cfg(feature = "client")]
-    pub(crate) fn request_(&self) -> Option<&RequestPrefix> {
+    pub(crate) fn request_(&self) -> Option<&RequestPrefix<A>> {
         self.request_.as_ref()
     }
 
@@ -122,7 +112,6 @@ impl<Tx, Rx> SessionCore<Tx, Rx> {
     }
 
     /// 取走接收半边；之后 `has_rx_` 为 `false`。
-    #[cfg(feature = "server")]
     pub(crate) fn take_rx_(&mut self) -> Option<Rx> {
         self.rx_.take()
     }

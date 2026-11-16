@@ -34,12 +34,9 @@
 
 use alloc::string::ToString;
 
-use bumpalo::Bump;
-
 use abs_buff::{
     Demand, TrBuffFlush, TrBuffRead, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite,
-    buffer::TrConsumerState,
-    x_deps::anylr::SomeOf,
+    buffer::TrConsumerState, x_deps::anylr::SomeOf,
 };
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
@@ -47,19 +44,18 @@ use abs_mptp::{
     messaging::TrMsgPrefix,
 };
 use gen_mcf2::gen_may_cancel_future;
-use mptp_wire::{RequestPrefix, chunked::ChunkedEncode};
+use mptp_wire::{RequestPrefix, chunked::ChunkedEncode, read_response_prefix_with_async};
 
+use super::{
+    config::{ChannelRx, ChannelTx, RespPrefix, TrConfig},
+    method_::Response,
+};
 use crate::{
     body_::{BodyError, BodyPlan, BodyRead, BodyState, SuffixRead},
     copy_::{CopyError, copy_all_async_, copy_sized_async_},
     error_::{ClientError, ProtocolError, StateError},
-    messaging,
     session_core_::SessionCore,
     x_deps::{abs_buff, abs_cancel, gen_mcf2},
-};
-use super::{
-    config::{ChannelRx, ChannelTx, RespPrefix, TrConfig},
-    method_::Response,
 };
 
 /// 回复体的读视图。
@@ -79,9 +75,10 @@ where
     C: TrConfig,
 {
     /// 共享的会话核心：两个半边、请求前缀、体边界与体进度。
-    core_: SessionCore<ChannelTx<C>, ChannelRx<C>>,
+    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, C::Alloc>,
 
-    bump_: Bump,
+    /// 本会话从客户端克隆来的分配器句柄。
+    alloc_: C::Alloc,
 
     /// 客户端侧的状态机。
     state_: SessionState,
@@ -98,9 +95,10 @@ where
     /// 初始状态由**前缀里的体声明**决定：带体请求处于 `SendingBody`（体还没发，不能直接读
     /// 响应前缀），没有体的请求处于 `WaitingResp`（请求已经整体发出）。
     pub(crate) fn new_(
-        request: RequestPrefix,
+        request: RequestPrefix<C::Alloc>,
         tx: ChannelTx<C>,
         rx: ChannelRx<C>,
+        alloc: C::Alloc,
     ) -> Result<Self, ClientError> {
         let plan = BodyPlan::from_info_(request.body_info())?;
         let state_ = if matches!(plan, BodyPlan::Absent) {
@@ -110,7 +108,7 @@ where
         };
         Result::Ok(MptpSession {
             core_: SessionCore::new_(request, plan, tx, rx),
-            bump_: Bump::new(),
+            alloc_: alloc,
             state_,
         })
     }
@@ -119,7 +117,7 @@ where
     ///
     /// 它是调用者判断「下一步该发什么」的唯一依据：前缀里的 `body_info` 已经说明体是定长
     /// 还是分块、有没有体。本层不替调用者解释成业务语义。
-    pub fn req_prefix(&self) -> Option<&RequestPrefix> {
+    pub fn req_prefix(&self) -> Option<&RequestPrefix<C::Alloc>> {
         self.core_.request_()
     }
 
@@ -154,17 +152,12 @@ where
     /// 为有限 Push 取走发送半边：此后由 [`RequestSuffixStream`] 逐 chunk 写请求后缀。
     ///
     /// 只允许在请求前缀已写出、且请求没有 body（处于 `WaitingResp`）时调用。
-    pub(crate) fn take_tx_for_suffix_(
-        mut self,
-    ) -> Result<(Self, ChannelTx<C>), ClientError> {
+    pub(crate) fn take_tx_for_suffix_(mut self) -> Result<(Self, ChannelTx<C>), ClientError> {
         if self.state_ != SessionState::WaitingResp {
             let actual = self.state_;
             return Result::Err(ClientError::State(StateError::Client { actual }));
         }
-        let tx = self
-            .core_
-            .take_tx_()
-            .ok_or(StateError::ChannelTaken)?;
+        let tx = self.core_.take_tx_().ok_or(StateError::ChannelTaken)?;
         self.state_ = SessionState::SendingSuffix;
         Result::Ok((self, tx))
     }
@@ -265,7 +258,10 @@ where
 
     type Err = <ChannelTx<C> as TrBuffTryWrite<u8>>::Err;
 
-    fn try_write<'f>(&'f mut self, demand: &'f Demand<usize>) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
+    fn try_write<'f>(
+        &'f mut self,
+        demand: &'f Demand<usize>,
+    ) -> SomeOf<Self::SegmMut<'f>, Self::Err> {
         <ChannelTx<C> as TrBuffTryWrite<u8>>::try_write(self.tx_, demand)
     }
 }
@@ -394,10 +390,7 @@ where
     }
     session.core_.set_body_state_(BodyState::Fresh);
     session.state_ = SessionState::SuffixReady;
-    let rx = session
-        .core_
-        .take_rx_()
-        .ok_or(StateError::ChannelTaken)?;
+    let rx = session.core_.take_rx_().ok_or(StateError::ChannelTaken)?;
     Result::Ok(rx)
 }
 
@@ -407,12 +400,14 @@ where
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
 {
     /// 回复体的读视图：一个类型，两种档位（由前缀决定）。
-    type RespBodyRead<'f> = RespBodyRead<'f, C>
+    type RespBodyRead<'f>
+        = RespBodyRead<'f, C>
     where
         Self: 'f;
 
     /// 响应续流的读视图：裸字节，两种 `try_into_*` 都交出同一个额度用不完的限长视图。
-    type RespSuffixRead<'f> = RespSuffixRead<'f, C>
+    type RespSuffixRead<'f>
+        = RespSuffixRead<'f, C>
     where
         Self: 'f;
 
@@ -422,22 +417,21 @@ where
         self.state_
     }
 
-    type SendReqBodyAsync<'f, R> = SendRequestBodyAsync<'f, 'f, C, R>
+    type SendReqBodyAsync<'f, R>
+        = SendRequestBodyAsync<'f, 'f, C, R>
     where
         R: 'f + TrBuffRead<u8> + TrConsumerState,
         Self: 'f;
 
-    fn send_req_body_async<'f, R>(
-        &'f mut self,
-        body: &'f mut R,
-    ) -> Self::SendReqBodyAsync<'f, R>
+    fn send_req_body_async<'f, R>(&'f mut self, body: &'f mut R) -> Self::SendReqBodyAsync<'f, R>
     where
         R: TrBuffRead<u8> + TrConsumerState,
     {
         SendRequestBodyAsync::new(self, body)
     }
 
-    type SendReqSuffixAsync<'f, R> = SendRequestSuffixAsync<'f, 'f, C, R>
+    type SendReqSuffixAsync<'f, R>
+        = SendRequestSuffixAsync<'f, 'f, C, R>
     where
         R: 'f + TrBuffRead<u8> + TrConsumerState,
         Self: 'f;
@@ -452,7 +446,8 @@ where
         SendRequestSuffixAsync::new(self, suffix)
     }
 
-    type RecvRespPrefixAsync<'f> = SessionRecvRespPrefixAsync<'f, 'f, C>
+    type RecvRespPrefixAsync<'f>
+        = SessionRecvRespPrefixAsync<'f, 'f, C>
     where
         Self: 'f;
 
@@ -576,11 +571,9 @@ fn req_copy_error_(err: CopyError) -> ClientError {
         CopyError::Write { detail } => {
             ClientError::Protocol(ProtocolError::RequestBodyWrite { detail })
         }
-        CopyError::EmptySegment => {
-            ClientError::Protocol(ProtocolError::RequestBodyRead {
-                detail: alloc::string::String::from("源或目标让出的段是空的，无法推进"),
-            })
-        }
+        CopyError::EmptySegment => ClientError::Protocol(ProtocolError::RequestBodyRead {
+            detail: alloc::string::String::from("源或目标让出的段是空的，无法推进"),
+        }),
     }
 }
 
@@ -593,11 +586,9 @@ fn suffix_copy_error_(err: CopyError) -> ClientError {
         }
         CopyError::Read { detail } => ClientError::Protocol(ProtocolError::SuffixRead { detail }),
         CopyError::Write { detail } => ClientError::Protocol(ProtocolError::SuffixWrite { detail }),
-        CopyError::EmptySegment => {
-            ClientError::Protocol(ProtocolError::SuffixRead {
-                detail: alloc::string::String::from("源或目标让出的段是空的，无法推进"),
-            })
-        }
+        CopyError::EmptySegment => ClientError::Protocol(ProtocolError::SuffixRead {
+            detail: alloc::string::String::from("源或目标让出的段是空的，无法推进"),
+        }),
     }
 }
 
@@ -659,16 +650,15 @@ where
 
     let prefix = {
         let rx = session.core_.rx_mut_()?;
-        messaging::read_response_prefix_async(rx)
+        read_response_prefix_with_async(rx, &session.alloc_)
             .may_cancel_with(cancel.child_token())
             .await
-            .map_err(|err| {
-                ClientError::Protocol(ProtocolError::ResponsePrefixDecode(err))
-            })?
+            .map_err(|err| ClientError::Protocol(ProtocolError::ResponsePrefixDecode(err)))?
     };
 
     let method = session.core_.request_().map(RequestPrefix::method);
-    let plan = BodyPlan::for_response_(prefix.body_info(), method).map_err(ClientError::Protocol)?;
+    let plan =
+        BodyPlan::for_response_(prefix.body_info(), method).map_err(ClientError::Protocol)?;
     session.core_.set_body_plan_(plan);
     session.core_.set_body_state_(BodyState::Fresh);
     session.state_ = SessionState::PrefixReady;
@@ -751,11 +741,12 @@ mod tests_ {
     //! decision depends only on the transport declaration and the request method, so no
     //! real channel is involved here.
 
-    use super::*;
     use abs_mptp::{
         messaging::BodySize,
         spec::{NumOrStr, access_method::AccessMethod},
     };
+
+    use super::*;
 
     /// 测试体边界判定把三种传输声明各归各位。
     /// Test that the body-boundary decision maps each transport declaration to its own plan.

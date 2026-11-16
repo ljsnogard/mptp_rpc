@@ -179,6 +179,11 @@ impl<A: Allocator> RequestPrefix<A> {
         self.headers_.as_ref()
     }
 
+    /// 本前缀的 allocator 句柄。
+    pub const fn allocator(&self) -> &A {
+        &self.alloc_
+    }
+
     /// 取可变头表；没有头时**不会**自动创建。
     pub fn headers_mut_if_present(&mut self) -> Option<&mut Headers<A>> {
         self.headers_.as_mut()
@@ -322,6 +327,11 @@ impl<A: Allocator> ResponsePrefix<A> {
     /// 取头表；没有头时返回 `None`。
     pub const fn headers(&self) -> Option<&Headers<A>> {
         self.headers_.as_ref()
+    }
+
+    /// 本前缀的 allocator 句柄。
+    pub const fn allocator(&self) -> &A {
+        &self.alloc_
     }
 
     /// 取可变头表；没有头时**不会**自动创建。

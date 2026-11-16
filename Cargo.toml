@@ -22,3 +22,8 @@ repository = "https://github.com/ljsnogard/mptp_rpc"
 license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
+
+# 本地开发期间指向 workspace 根目录的 `bumplist-alloc`；它的 `denco_arena` 特性尚未推送到
+# gitee。推送后删除这段 patch 即可回到正式 git 依赖。
+[patch."https://gitee.com/lino_snsalias/bumplist_alloc.rs.git"]
+bumplist_alloc = { path = "../bumplist-alloc" }

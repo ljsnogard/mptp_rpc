@@ -143,6 +143,65 @@ impl<A: Allocator> Eq for HeaderMap<A> {}
 /// as [`U16OrStr<A>`].
 pub type HeaderKey<A> = U16OrStr<A>;
 
+/// 文本头值的逻辑类型标识：与 `str` / `String` 的 denco 结构化指纹一致。
+///
+/// 文本仍写成 `Obj`，载荷是 **MessagePack string**（不是裸 UTF-8）；这样 `Allow`、
+/// `Accept` 这类标准文本头仍然可以往返，同时保持「值是 Num 或带 type_id 的 MessagePack
+/// 字节流」这一条协议形状。
+pub const K_TEXT_HEADER_TYPE_ID: u32 =
+    <str as abs_denco::type_id::TrHasTypeId>::TYPE_ID_32;
+
+/// 把一段文本写成 MessagePack string 追加到 `out`。
+fn push_msgpack_str_<A: Allocator>(out: &mut Vec<u8, A>, text: &str) {
+    let len = text.len();
+    if len <= 31usize {
+        out.push(0xA0u8 | (len as u8));
+    } else if let Result::Ok(len) = u8::try_from(len) {
+        out.push(0xD9u8);
+        out.push(len);
+    } else if let Result::Ok(len) = u16::try_from(len) {
+        out.push(0xDAu8);
+        out.extend_from_slice(&len.to_be_bytes());
+    } else {
+        out.push(0xDBu8);
+        out.extend_from_slice(&(len as u32).to_be_bytes());
+    }
+    out.extend_from_slice(text.as_bytes());
+}
+
+/// 解析一段 MessagePack string；不是单个合法 string 时返回 `None`。
+fn decode_msgpack_str_(bytes: &[u8]) -> Option<&str> {
+    let (len, offset) = match *bytes.first()? {
+        code @ 0xA0u8..=0xBFu8 => (usize::from(code & 0x1Fu8), 1usize),
+        0xD9u8 => (usize::from(*bytes.get(1usize)?), 2usize),
+        0xDAu8 => (
+            usize::from(u16::from_be_bytes([
+                *bytes.get(1usize)?,
+                *bytes.get(2usize)?,
+            ])),
+            3usize,
+        ),
+        0xDBu8 => (
+            usize::try_from(u32::from_be_bytes([
+                *bytes.get(1usize)?,
+                *bytes.get(2usize)?,
+                *bytes.get(3usize)?,
+                *bytes.get(4usize)?,
+            ]))
+            .ok()?,
+            5usize,
+        ),
+        _ => return Option::None,
+    };
+    let end = offset.checked_add(len)?;
+    let text = core::str::from_utf8(bytes.get(offset..end)?).ok()?;
+    if end == bytes.len() {
+        Option::Some(text)
+    } else {
+        Option::None
+    }
+}
+
 /// 一个头值：`u16` 数字，或带逻辑类型标识的 MessagePack 字节流。
 ///
 /// 简单标准头（`Body_Size`、`Body_Transfer`……）用 [`HeaderVal::from_num`]；复杂值用
@@ -263,6 +322,46 @@ impl<A: Allocator> HeaderVal<A> {
         let mut owned = Vec::with_capacity_in(data.len(), alloc);
         owned.extend_from_slice(data);
         HeaderVal::from_obj(type_id, owned)
+    }
+
+    /// 由一段文本构造对象形态；载荷是 MessagePack string，逻辑类型是 `str` 的指纹。
+    ///
+    /// Build the object form from text; the payload is a MessagePack string tagged with the
+    /// `str` type fingerprint.
+    pub fn from_text(text: impl AsRef<str>, alloc: A) -> Self
+    where
+        A: Clone,
+    {
+        let text = text.as_ref();
+        let mut data = Vec::with_capacity_in(text.len().saturating_add(5usize), alloc);
+        push_msgpack_str_(&mut data, text);
+        HeaderVal::from_obj(K_TEXT_HEADER_TYPE_ID, data)
+    }
+
+    /// 文本形态的借用；不是文本对象时返回 `None`。
+    ///
+    /// Borrow the textual form; returns `None` for non-text objects and numbers.
+    pub fn as_text(&self) -> Option<&str> {
+        if self.type_id()? != K_TEXT_HEADER_TYPE_ID {
+            return Option::None;
+        }
+        decode_msgpack_str_(self.data()?)
+    }
+
+    /// 尽力按 `u64` 解读：数字形态直接转换；文本形态同时认十进制与 `0x` 十六进制。
+    ///
+    /// Interpret the value as a `u64`: numbers convert directly, text accepts decimal and
+    /// `0x`-prefixed hexadecimal.
+    pub fn as_u64(&self) -> Option<u64> {
+        if let Option::Some(num) = self.as_num() {
+            return Option::Some(u64::from(num));
+        }
+        let text = self.as_text()?.trim();
+        let hex = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"));
+        match hex {
+            Option::Some(hex) => u64::from_str_radix(hex, 16u32).ok(),
+            Option::None => text.parse::<u64>().ok(),
+        }
     }
 
     /// 数字形态的取值；对象形态返回 `None`。
@@ -823,6 +922,15 @@ impl<A: Allocator + Clone> Headers<A> {
 }
 
 impl<A: AllocatorClone> Headers<A> {
+    /// 按标准键写一个文本值（覆盖已有值）；文本写成带 `str` 类型标识的 MessagePack 载荷。
+    ///
+    /// Write a textual value; the payload is a MessagePack string tagged with the `str`
+    /// type fingerprint.
+    pub fn set_text(&mut self, key: StdHeaderKey, text: impl AsRef<str>) {
+        let alloc = Arc::allocator(&self.map_).clone();
+        self.set(key, HeaderVal::from_text(text, alloc));
+    }
+
     /// 按标准键写一个数字值（覆盖已有值）。
     pub fn set_num(&mut self, key: StdHeaderKey, num: u16) {
         self.set(HeaderKey::from(key), HeaderVal::from_num(num));
@@ -896,6 +1004,11 @@ impl<A: Allocator> Headers<A> {
         self.try_get_val(StdHeaderKey::Body_Size)?
             .as_num()
             .map(usize::from)
+    }
+
+    /// `Data_Type_Id` 头声明的类型标识。
+    pub fn data_type_id(&self) -> Option<u64> {
+        self.try_get_val(StdHeaderKey::Data_Type_Id)?.as_u64()
     }
 
     /// 是否声明了 `Body_Transfer: Chunked`。
