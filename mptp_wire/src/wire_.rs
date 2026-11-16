@@ -31,12 +31,12 @@
 //! into a caller-supplied arena; the plain variants decode into `Global`.
 
 use alloc::alloc::Global;
-use core::alloc::Allocator;
+use core::alloc::{Allocator, AllocatorClone};
 
 use abs_buff::{TrBuffRead, TrBuffWrite};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_denco::{
-    de::{TrArena, TrDecodable},
+    de::{TrAllocSource, TrArena, TrDecodable},
     ser::TrEncodable,
 };
 use abs_mptp::spec::{Status, access_method::AccessMethod};
@@ -220,6 +220,62 @@ where
     ))
 }
 
+/// 从接收半边解出一个请求前缀，所有堆内存都由 `arena` 分配，但返回**拥有** allocator
+/// `A` 的前缀。
+///
+/// 与 [`read_request_prefix_in_async`] 的差别：这里的前缀把 `arena` 克隆一份存进
+/// `RequestPrefix<A>`，因此不需要把 arena 的生命周期带进会话类型；适合 session / client
+/// 持有可克隆 allocator 的场景。
+///
+/// # Errors
+///
+/// 同 [`read_request_prefix_async`]。
+pub fn read_request_prefix_with_async<'f, 'alloc, R, A>(
+    rx: &'f mut R,
+    arena: &'alloc A,
+) -> ReadRequestPrefixWithAsync<'f, 'alloc, 'f, R, A>
+where
+    R: 'f + TrBuffRead<u8>,
+    A: TrArena<'alloc> + AllocatorClone + TrAllocSource<'alloc, A> + 'alloc + 'f,
+{
+    ReadRequestPrefixWithAsync::new(rx, arena)
+}
+
+/// [`read_request_prefix_with_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(ReadRequestPrefixWith, pub, new(pub(crate)))]
+async fn read_request_prefix_with_async_<'f, 'alloc, R, A, TyTok>(
+    rx: &'f mut R,
+    arena: &'alloc A,
+    cancel: TyTok,
+) -> Result<RequestPrefix<A>, MessagingError>
+where
+    R: TrBuffRead<u8>,
+    A: TrArena<'alloc> + AllocatorClone + TrAllocSource<'alloc, A> + 'alloc + 'f,
+    'alloc: 'f,
+    TyTok: TrCancellationToken,
+{
+    let code = u8::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(MessagingError::Decode)?;
+    let method_ = method_from_u8_(code).ok_or(MessagingError::UnknownMethod { code })?;
+    let location_ = AllocString::<A>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(MessagingError::Decode)?;
+    let headers_ = Option::<Headers<A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel)
+        .await
+        .map_err(MessagingError::Decode)?;
+    Result::Ok(RequestPrefix::from_parts_(
+        method_,
+        location_,
+        headers_,
+        arena.clone(),
+    ))
+}
+
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 // 回复前缀
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -345,6 +401,53 @@ where
             .await
             .map_err(MessagingError::Decode)?;
     Result::Ok(ResponsePrefix::from_parts_(status_, headers_, arena))
+}
+
+/// 从接收半边解出一个回复前缀，所有堆内存都由 `arena` 分配，但返回**拥有** allocator
+/// `A` 的前缀。
+///
+/// # Errors
+///
+/// 同 [`read_response_prefix_async`]。
+pub fn read_response_prefix_with_async<'f, 'alloc, R, A>(
+    rx: &'f mut R,
+    arena: &'alloc A,
+) -> ReadResponsePrefixWithAsync<'f, 'alloc, 'f, R, A>
+where
+    R: 'f + TrBuffRead<u8>,
+    A: TrArena<'alloc> + AllocatorClone + TrAllocSource<'alloc, A> + 'alloc + 'f,
+{
+    ReadResponsePrefixWithAsync::new(rx, arena)
+}
+
+/// [`read_response_prefix_with_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(ReadResponsePrefixWith, pub, new(pub(crate)))]
+async fn read_response_prefix_with_async_<'f, 'alloc, R, A, TyTok>(
+    rx: &'f mut R,
+    arena: &'alloc A,
+    cancel: TyTok,
+) -> Result<ResponsePrefix<A>, MessagingError>
+where
+    R: TrBuffRead<u8>,
+    A: TrArena<'alloc> + AllocatorClone + TrAllocSource<'alloc, A> + 'alloc + 'f,
+    'alloc: 'f,
+    TyTok: TrCancellationToken,
+{
+    let code = u16::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(MessagingError::Decode)?;
+    let status_ = Status::new(code);
+    let headers_ = Option::<Headers<A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel)
+        .await
+        .map_err(MessagingError::Decode)?;
+    Result::Ok(ResponsePrefix::from_parts_(
+        status_,
+        headers_,
+        arena.clone(),
+    ))
 }
 
 #[cfg(test)]
