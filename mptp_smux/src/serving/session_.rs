@@ -489,7 +489,7 @@ fn ensure_body_allowed_(method: AccessMethod) -> Result<(), ProtocolError> {
 /// `no_body` 要求前缀本身没有声明任何体。
 fn ensure_no_body_<A>(prefix: &ResponsePrefix<A>) -> Result<(), ProtocolError>
 where
-    A: core::alloc::Allocator + Clone,
+    A: core::alloc::AllocatorClone,
 {
     if !matches!(prefix.body_info(), BodySize::NilBody) {
         return Result::Err(ProtocolError::BodyDeclaredButNotWritten);

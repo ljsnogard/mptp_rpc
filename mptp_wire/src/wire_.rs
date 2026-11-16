@@ -85,7 +85,7 @@ pub fn write_request_prefix_async<'f, A, W>(
     tx: &'f mut W,
 ) -> WriteRequestPrefixAsync<'f, 'f, A, W>
 where
-    A: Allocator,
+    A: AllocatorClone,
     W: 'f + TrBuffWrite<u8>,
 {
     WriteRequestPrefixAsync::new(prefix, tx)
@@ -100,7 +100,7 @@ async fn write_request_prefix_async_<'f, A, W, TyTok>(
     cancel: TyTok,
 ) -> Result<(), MessagingError>
 where
-    A: Allocator,
+    A: AllocatorClone,
     W: TrBuffWrite<u8>,
     TyTok: TrCancellationToken,
 {
@@ -290,7 +290,7 @@ pub fn write_response_prefix_async<'f, A, W>(
     tx: &'f mut W,
 ) -> WriteResponsePrefixAsync<'f, 'f, A, W>
 where
-    A: Allocator,
+    A: AllocatorClone,
     W: 'f + TrBuffWrite<u8>,
 {
     WriteResponsePrefixAsync::new(prefix, tx)
@@ -305,7 +305,7 @@ async fn write_response_prefix_async_<'f, A, W, TyTok>(
     cancel: TyTok,
 ) -> Result<(), MessagingError>
 where
-    A: Allocator,
+    A: AllocatorClone,
     W: TrBuffWrite<u8>,
     TyTok: TrCancellationToken,
 {

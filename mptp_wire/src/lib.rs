@@ -33,6 +33,7 @@
 // 头表内部的 `BTreeMap` / `Arc` 都带 allocator 参数；两者的 allocator 构造器目前仍受
 // `allocator_ext` / `btreemap_alloc` 控制。
 #![feature(allocator_ext)]
+#![feature(btreemap_alloc)]
 #![feature(impl_trait_in_assoc_type)]
 
 extern crate alloc;

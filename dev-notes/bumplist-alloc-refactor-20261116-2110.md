@@ -53,19 +53,18 @@
 
 ### 3.1 类型形状
 
-- `Headers<A: Allocator>`、`RequestPrefix<A>`、`ResponsePrefix<A>`、`HeaderVal<A>` 都显式
-  带 `A`，没有 `Global` 默认值；`HeaderKey<A>` 是 `U16OrStr<A>` 的别名。
+- `Headers<A: AllocatorClone>`、`RequestPrefix<A: AllocatorClone>`、
+  `ResponsePrefix<A: AllocatorClone>`、`HeaderVal<A: Allocator>` 都显式带 `A`，没有
+  `Global` 默认值；`HeaderKey<A>` 是 `U16OrStr<A>` 的别名。
 - `location` 用 `abs_str::String<A>`；头键文本用 `abs_str::String<A>`；对象载荷用
-  `Vec<u8, A>`。类型定义只要求 `A: Allocator`；构造 / 克隆 / 解码按需追加
-  `A: Clone`、`A: AllocatorClone` 或 `A: TrAllocSource`。
-- 头表内部不用 `BTreeMap`：nightly 的 `BTreeMap<K, V, A>` 方法要求 `A: AllocatorClone`
-  （一个必须显式实现的 marker trait，`A: Allocator + Clone` 不会自动满足它）。改用
-  「按 `HeaderKey` 排序的 `Vec<(K, V), A>` + 二分查找」；头数量很小，线性搬移可接受，
-  这样读路径只要求 `A: Allocator`。
-- 为了保留 `TrHeadersMut` 的共享语义，头表仍是 `Arc<HeaderMap<A>, A>`；`Arc` 的
-  `clone` / `make_mut` 要求 `A: AllocatorClone`，因此 `Headers::set` / `remove` 与
-  `TrHeadersMut` 的实现带这个约束。目标 allocator `&'a BumpListAlloc` 由 core 的
-  `impl<A: Allocator + ?Sized> AllocatorClone for &A` 满足。
+  `Vec<u8, A>`。`HeaderVal` / `HeaderKey` 只要求 `A: Allocator`；头表与前缀因为内部
+  使用 allocator-aware `BTreeMap`，类型定义要求 `A: AllocatorClone`。
+- 头表内部保持 `Arc<BTreeMap<HeaderKey<A>, HeaderVal<A>, A>, A>`：`BTreeMap` 的
+  allocator 方法要求 `A: AllocatorClone`。目标 allocator `SessionAlloc`、`Global` 与
+  `&'a BumpListAlloc` 都满足这个 marker；`&BumpListAlloc` 由 core 的
+  `impl<A: Allocator + ?Sized> AllocatorClone for &A` 提供。
+- `Arc::make_mut` 保留 `TrHeadersMut` 的写时复制语义；`Headers::set` / `remove` 与
+  `TrHeadersMut` 的实现同样带 `A: AllocatorClone`。
 
 ### 3.2 解码入口
 

@@ -2,7 +2,7 @@
 //!
 //! 头表是前缀里**唯一的开放部分**：方法与状态是固定取值，`location` 是一段文本，而头表允许
 //! 两端在标准键之外携带自定义键。本模块把这张表实现成一个便宜的句柄
-//! （`Arc<HeaderMap<A>, A>`），因此前缀解码一次之后，handler
+//! （`Arc<BTreeMap<HeaderKey<A>, HeaderVal<A>, A>, A>`），因此前缀解码一次之后，handler
 //! 拿到的克隆与框架手里的头表共享同一份存储；`A` 是调用方选择的 [`Allocator`]。
 //!
 //! # 键与值
@@ -25,11 +25,12 @@
 //!
 //! # `headers_`: the MPTP header map
 //!
-//! The header map is a cheap handle over an allocator-aware sorted `Vec` map. Keys stay
+//! The header map is a cheap handle over an allocator-aware `BTreeMap`. Keys stay
 //! numeric-or-textual; values are either numbers or a two-element MessagePack array
 //! `[type_id(u32), bin]`. Every string / byte container is allocated by `A: Allocator`.
 
 use alloc::{
+    collections::BTreeMap,
     sync::Arc,
     vec::{IntoIter, Vec},
 };
@@ -56,84 +57,6 @@ use gen_mcf2::gen_may_cancel_future;
 
 use super::num_or_str_::U16OrStr;
 
-/// 按 `HeaderKey` 排序的条目表，使用 `Vec<T, A>` 而不是 `BTreeMap`。
-///
-/// `BTreeMap` 的 allocator 方法在 nightly 上要求 `A: AllocatorClone`（一个需要显式实现的
-/// marker trait，`A: Allocator + Clone` 并不自动满足它）。为了让本 crate 的类型只要求
-/// `A: Allocator`，头表用「排序 `Vec` + 二分查找」实现；头数量很小，插入 / 删除的线性搬移
-/// 可以接受。
-struct HeaderMap<A: Allocator>(Vec<(HeaderKey<A>, HeaderVal<A>), A>);
-
-impl<A: Allocator> HeaderMap<A> {
-    /// 用 `alloc` 造一张空表。
-    fn new_in_(alloc: A) -> Self {
-        HeaderMap(Vec::new_in(alloc))
-    }
-
-    /// 头表里有多少条。
-    fn len_(&self) -> usize {
-        self.0.len()
-    }
-
-    /// 头表是否为空。
-    fn is_empty_(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// 二分查找键的位置：命中返回 `Ok`，否则返回可插入位置 `Err`。
-    fn position_(&self, key: &HeaderKey<A>) -> Result<usize, usize> {
-        self.0.binary_search_by(|(candidate, _)| candidate.cmp(key))
-    }
-
-    /// 按键取值。
-    fn get_(&self, key: &HeaderKey<A>) -> Option<&HeaderVal<A>> {
-        self.position_(key).ok().map(|pos| &self.0[pos].1)
-    }
-
-    /// 键是否存在。
-    fn contains_key_(&self, key: &HeaderKey<A>) -> bool {
-        self.position_(key).is_ok()
-    }
-
-    /// 插入或替换，返回被替换的旧值。
-    fn insert_(&mut self, key: HeaderKey<A>, val: HeaderVal<A>) -> Option<HeaderVal<A>> {
-        match self.position_(&key) {
-            Result::Ok(pos) => Option::Some(core::mem::replace(&mut self.0[pos].1, val)),
-            Result::Err(pos) => {
-                self.0.insert(pos, (key, val));
-                Option::None
-            }
-        }
-    }
-
-    /// 删除并返回整条。
-    fn remove_entry_(&mut self, key: &HeaderKey<A>) -> Option<(HeaderKey<A>, HeaderVal<A>)> {
-        match self.position_(key) {
-            Result::Ok(pos) => Option::Some(self.0.remove(pos)),
-            Result::Err(_) => Option::None,
-        }
-    }
-
-    /// 遍历全部条目。
-    fn iter_(&self) -> impl Iterator<Item = (&HeaderKey<A>, &HeaderVal<A>)> + '_ {
-        self.0.iter().map(|(key, val)| (key, val))
-    }
-}
-
-impl<A: Allocator + Clone> Clone for HeaderMap<A> {
-    fn clone(&self) -> Self {
-        HeaderMap(self.0.clone())
-    }
-}
-
-impl<A: Allocator> PartialEq for HeaderMap<A> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl<A: Allocator> Eq for HeaderMap<A> {}
-
 /// 一个头键：数字形态是协议标准键，字符串形态由 [`Allocator`] 分配。
 ///
 /// 它等价于 [`U16OrStr<A>`]；保留这个名字是为了让 [`HeaderEntry`] 的键字段有强类型，
@@ -148,8 +71,7 @@ pub type HeaderKey<A> = U16OrStr<A>;
 /// 文本仍写成 `Obj`，载荷是 **MessagePack string**（不是裸 UTF-8）；这样 `Allow`、
 /// `Accept` 这类标准文本头仍然可以往返，同时保持「值是 Num 或带 type_id 的 MessagePack
 /// 字节流」这一条协议形状。
-pub const K_TEXT_HEADER_TYPE_ID: u32 =
-    <str as abs_denco::type_id::TrHasTypeId>::TYPE_ID_32;
+pub const K_TEXT_HEADER_TYPE_ID: u32 = <str as abs_denco::type_id::TrHasTypeId>::TYPE_ID_32;
 
 /// 把一段文本写成 MessagePack string 追加到 `out`。
 fn push_msgpack_str_<A: Allocator>(out: &mut Vec<u8, A>, text: &str) {
@@ -533,7 +455,7 @@ struct BytesVisitor<A: Allocator> {
 impl<'alloc, Alloc, A> Visitor<'alloc, Alloc> for BytesVisitor<A>
 where
     Alloc: TrArena<'alloc> + 'alloc,
-    A: AllocatorClone + 'alloc,
+    A: Allocator + Clone + 'alloc,
 {
     type Value = AllocBytes<A>;
 
@@ -574,7 +496,7 @@ where
 impl<'alloc, Alloc, A> TrDecodable<'alloc, Alloc> for AllocBytes<A>
 where
     Alloc: TrArena<'alloc> + 'alloc,
-    A: AllocatorClone + TrAllocSource<'alloc, Alloc> + 'alloc,
+    A: Allocator + Clone + TrAllocSource<'alloc, Alloc> + 'alloc,
 {
     type DecodeAsync<'a, D>
         = DecodeAllocBytesAsync<'alloc, 'a, 'a, Alloc, A, D>
@@ -606,7 +528,7 @@ async fn decode_alloc_bytes_async_<'alloc, 'a, Alloc, A, D, C>(
 where
     'alloc: 'a,
     Alloc: TrArena<'alloc> + 'alloc,
-    A: AllocatorClone + TrAllocSource<'alloc, Alloc> + 'alloc + 'a,
+    A: Allocator + Clone + TrAllocSource<'alloc, Alloc> + 'alloc + 'a,
     D: TrDecoder<'alloc, Alloc> + 'a,
     D::Error: 'a,
     C: TrCancellationToken,
@@ -624,7 +546,7 @@ struct ValVisitor<A: Allocator> {
 impl<'alloc, Alloc, A> Visitor<'alloc, Alloc> for ValVisitor<A>
 where
     Alloc: TrArena<'alloc> + 'alloc,
-    A: AllocatorClone + TrAllocSource<'alloc, Alloc> + 'alloc,
+    A: Allocator + Clone + TrAllocSource<'alloc, Alloc> + 'alloc,
 {
     type Value = HeaderVal<A>;
 
@@ -693,7 +615,7 @@ async fn decode_header_obj_async_<'alloc, 'a, Alloc, A, S, C>(
 where
     'alloc: 'a,
     Alloc: TrArena<'alloc> + 'alloc,
-    A: AllocatorClone + TrAllocSource<'alloc, Alloc> + 'alloc + 'a,
+    A: Allocator + Clone + TrAllocSource<'alloc, Alloc> + 'alloc + 'a,
     S: SeqAccess<'alloc, Alloc> + 'a,
     S::Error: 'a,
     C: TrCancellationToken,
@@ -730,7 +652,7 @@ where
 impl<'alloc, Alloc, A> TrDecodable<'alloc, Alloc> for HeaderVal<A>
 where
     Alloc: TrArena<'alloc> + 'alloc,
-    A: AllocatorClone + TrAllocSource<'alloc, Alloc> + 'alloc,
+    A: Allocator + Clone + TrAllocSource<'alloc, Alloc> + 'alloc,
 {
     type DecodeAsync<'a, D>
         = DecodeHeaderValAsync<'alloc, 'a, 'a, Alloc, A, D>
@@ -762,7 +684,7 @@ async fn decode_header_val_async_<'alloc, 'a, Alloc, A, D, C>(
 where
     'alloc: 'a,
     Alloc: TrArena<'alloc> + 'alloc,
-    A: AllocatorClone + TrAllocSource<'alloc, Alloc> + 'alloc + 'a,
+    A: Allocator + Clone + TrAllocSource<'alloc, Alloc> + 'alloc + 'a,
     D: TrDecoder<'alloc, Alloc> + 'a,
     D::Error: 'a,
     C: TrCancellationToken,
@@ -851,7 +773,7 @@ impl<A: Allocator> Borrow<HeaderVal<A>> for HeaderEntry<A> {
 
 /// MPTP 头表：`HeaderKey<A>` → [`HeaderVal<A>`]。
 ///
-/// # 为什么内部是 `Arc<HeaderMap<A>, A>`
+/// # 为什么内部是 `Arc<BTreeMap<.., A>, A>`
 ///
 /// `abs_mptp` 的 [`TrHeadersMut`] 把所有修改入口都定义成按值收 `self`，却只交出旧值；修改
 /// 只可能发生在**共享状态**里，否则就丢了。因此这一档实现是一个句柄，而不是一个独占的 map。
@@ -876,8 +798,8 @@ impl<A: Allocator> Borrow<HeaderVal<A>> for HeaderEntry<A> {
 /// assert_eq!(headers.body_size(), Some(12usize));
 /// assert_eq!(headers.try_get(custom), Some(&HeaderVal::from_num(7)));
 /// ```
-pub struct Headers<A: Allocator> {
-    map_: Arc<HeaderMap<A>, A>,
+pub struct Headers<A: AllocatorClone> {
+    map_: Arc<BTreeMap<HeaderKey<A>, HeaderVal<A>, A>, A>,
 }
 
 impl<A: AllocatorClone> Clone for Headers<A> {
@@ -888,26 +810,26 @@ impl<A: AllocatorClone> Clone for Headers<A> {
     }
 }
 
-impl<A: Allocator> fmt::Debug for Headers<A> {
+impl<A: AllocatorClone> fmt::Debug for Headers<A> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_map().entries(self.map_.iter_()).finish()
+        formatter.debug_map().entries(self.map_.iter()).finish()
     }
 }
 
-impl<A: Allocator> PartialEq for Headers<A> {
+impl<A: AllocatorClone> PartialEq for Headers<A> {
     fn eq(&self, other: &Self) -> bool {
         *self.map_ == *other.map_
     }
 }
 
-impl<A: Allocator> Eq for Headers<A> {}
+impl<A: AllocatorClone> Eq for Headers<A> {}
 
-impl<A: Allocator + Clone> Headers<A> {
+impl<A: AllocatorClone> Headers<A> {
     /// 造一张空头表；map 与 `Arc` 都由 `alloc` 分配。
     ///
     /// Build an empty header map; both the map and the `Arc` are allocated by `alloc`.
     pub fn new(alloc: A) -> Self {
-        let map = HeaderMap::new_in_(alloc.clone());
+        let map = BTreeMap::new_in(alloc.clone());
         Headers {
             map_: Arc::new_in(map, alloc),
         }
@@ -941,7 +863,7 @@ impl<A: AllocatorClone> Headers<A> {
     where
         K: Into<HeaderKey<A>>,
     {
-        Arc::make_mut(&mut self.map_).insert_(key.into(), val);
+        Arc::make_mut(&mut self.map_).insert(key.into(), val);
     }
 
     /// 删除一个标准键，返回被删掉的值。
@@ -955,20 +877,20 @@ impl<A: AllocatorClone> Headers<A> {
         K: Borrow<HeaderKey<A>>,
     {
         Arc::make_mut(&mut self.map_)
-            .remove_entry_(key.borrow())
+            .remove_entry(key.borrow())
             .map(|(_, val)| val)
     }
 }
 
-impl<A: Allocator> Headers<A> {
+impl<A: AllocatorClone> Headers<A> {
     /// 头表里有多少条。
     pub fn len(&self) -> usize {
-        self.map_.len_()
+        self.map_.len()
     }
 
     /// 头表是否为空。
     pub fn is_empty(&self) -> bool {
-        self.map_.is_empty_()
+        self.map_.is_empty()
     }
 
     /// 按标准键查一个值。
@@ -981,18 +903,18 @@ impl<A: Allocator> Headers<A> {
     where
         K: Borrow<HeaderKey<A>>,
     {
-        self.map_.get_(key.borrow())
+        self.map_.get(key.borrow())
     }
 
     /// 遍历全部条目。
     pub fn iter(&self) -> impl Iterator<Item = (&HeaderKey<A>, &HeaderVal<A>)> + '_ {
-        self.map_.iter_()
+        self.map_.iter()
     }
 
     /// 只遍历数字键，并还原成本端的 [`StdHeaderKey`]。
     pub fn iter_std(&self) -> impl Iterator<Item = (StdHeaderKey, &HeaderVal<A>)> + '_ {
         self.map_
-            .iter_()
+            .iter()
             .filter_map(|(key, val)| match key.as_u16_or_str() {
                 U16OrStr::U16(code) => Option::Some((StdHeaderKey::new(*code), val)),
                 U16OrStr::Str(_) => Option::None,
@@ -1025,7 +947,7 @@ impl<A: Allocator> Headers<A> {
     }
 }
 
-impl<A: Allocator + Clone> TrHeaders for Headers<A> {
+impl<A: AllocatorClone> TrHeaders for Headers<A> {
     type Key = HeaderKey<A>;
 
     type Val = HeaderVal<A>;
@@ -1042,13 +964,13 @@ impl<A: Allocator + Clone> TrHeaders for Headers<A> {
     where
         K: Borrow<Self::Key>,
     {
-        self.map_.get_(key.borrow())
+        self.map_.get(key.borrow())
     }
 
     fn into_entries(self) -> Self::EntriesIter {
         let alloc = Arc::allocator(&self.map_).clone();
-        let mut entries = Vec::with_capacity_in(self.map_.len_(), alloc);
-        for (key, val) in self.map_.iter_() {
+        let mut entries = Vec::with_capacity_in(self.map_.len(), alloc);
+        for (key, val) in self.map_.iter() {
             entries.push(HeaderEntry::from_kv(key.clone(), val.clone()));
         }
         entries.into_iter()
@@ -1065,11 +987,11 @@ impl<A: AllocatorClone> TrHeadersMut for Headers<A> {
         K: Borrow<Self::Key>,
     {
         let key_ = key.borrow().clone();
-        if self.map_.contains_key_(&key_) {
+        if self.map_.contains_key(&key_) {
             return Result::Err(key);
         }
         let val_ = factory(key);
-        Arc::make_mut(&mut self.map_).insert_(key_.clone(), val_.clone());
+        Arc::make_mut(&mut self.map_).insert(key_.clone(), val_.clone());
         Result::Ok(HeaderEntry::from_kv(key_, val_))
     }
 
@@ -1080,16 +1002,16 @@ impl<A: AllocatorClone> TrHeadersMut for Headers<A> {
     {
         let key_ = key.into();
         Arc::make_mut(&mut self.map_)
-            .insert_(key_.clone(), val.into())
+            .insert(key_.clone(), val.into())
             .map(|old| (key_, old))
     }
 
     fn remove_header(mut self, key: impl Borrow<Self::Key>) -> Option<(Self::Key, Self::Val)> {
-        Arc::make_mut(&mut self.map_).remove_entry_(key.borrow())
+        Arc::make_mut(&mut self.map_).remove_entry(key.borrow())
     }
 }
 
-impl<A: Allocator> TrEncodable for Headers<A> {
+impl<A: AllocatorClone> TrEncodable for Headers<A> {
     type EncodeAsync<'a, E>
         = EncodeHeadersAsync<'a, 'a, A, E>
     where
@@ -1117,17 +1039,17 @@ async fn encode_headers_async_<'a, A, E, C>(
     cancel: C,
 ) -> Result<E::Ok, E::Error>
 where
-    A: Allocator + 'a,
+    A: AllocatorClone + 'a,
     E: TrEncoder + 'a,
     E::Ok: 'a,
     E::Error: 'a,
     C: TrCancellationToken,
 {
     let mut map = encoder
-        .encode_map(Option::Some(headers.map_.len_()))
+        .encode_map(Option::Some(headers.map_.len()))
         .may_cancel_with(cancel.child_token())
         .await?;
-    for (key, val) in headers.map_.iter_() {
+    for (key, val) in headers.map_.iter() {
         map.encode_key(key)
             .may_cancel_with(cancel.child_token())
             .await?;
@@ -1184,13 +1106,13 @@ where
     M::Error: 'a,
     C: TrCancellationToken,
 {
-    let mut values = HeaderMap::new_in_(alloc.clone());
+    let mut values = BTreeMap::new_in(alloc.clone());
     while let Option::Some((key, val)) = map
         .next_entry::<HeaderKey<A>, HeaderVal<A>>()
         .may_cancel_with(cancel.child_token())
         .await?
     {
-        values.insert_(key, val);
+        values.insert(key, val);
     }
     Result::Ok(Headers {
         map_: Arc::new_in(values, alloc),
