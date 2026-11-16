@@ -188,12 +188,15 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
 - `Deref` / `DerefMut` / `TrBoxed` / `TrUnique`；
 - `Drop` 先 `drop_in_place`，再从 `BlockHeader` 的 cell 下标反推 `Page`，调用
   `Page::release_page_` 把块归还到页内；零尺寸 `T` 没有 `BlockHeader`，只运行析构；
-- Page 头现在持有 type-erased 的 owner 指针（`BumpListAlloc`）与空页回收回调；
-  `Page::release_page_` 在 `live_ == 0` 时会释放页锁、通过 owner 升级到
-  `BumpListAlloc::cleanup_empty_page_`，因此**空页的摘链 / 交还底层分配器也能从
+- `BumpListAlloc<A>` 拆成 `Box<BumpListCore>` 与地址固定的 `A`：Core 非泛型，持有页
+  链表、页大小、链表锁，以及**一份**类型擦除的 `PageBacking`（数据指针 + 建页/还页两个
+  单态化函数）。Page 只持有 `BumpListCore` 指针，不再每个 Page 保存函数指针，也不带
+  `A` 泛型；移动 `BumpListAlloc` 不会让 owner 失效；
+- `Page::release_page_` 在 `live_ == 0` 时会释放页锁、直接调用
+  `BumpListCore::cleanup_empty_page_`，因此**空页的摘链 / 交还底层分配器也能从
   `BumpListBox` 的析构路径完成**，不需要 Box 持有分配器引用；
-- owner 指针最低位兼作页锁：分配器至少按指针宽度对齐，最低位为 0，省掉 Page 的独立
-  锁字段；
+- owner 指针最低位兼作页锁：Core 至少按指针宽度对齐，最低位为 0，省掉 Page 的独立
+  锁字段；Page 头回到 64 位 32 字节 / 32 位 20 字节；
 - `SessionAlloc` 的 `TrArena::Ref` 也同步为 `BumpListBox<'alloc, T>`。
 
 这样 arena 里的值既不会泄漏 `Drop`，也不会把块永久占住；新增
