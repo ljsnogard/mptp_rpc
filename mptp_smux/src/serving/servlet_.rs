@@ -20,6 +20,7 @@ use abs_smux::{
     chan::{TrChannelHalf, TrChannelHandle},
     conn::{TrChannelListener, TrDockBinding},
 };
+use bumplist_alloc::{BumpListAllocError, PageSize};
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, ResponsePrefix, read_request_prefix_with_async};
 
@@ -30,6 +31,7 @@ use super::{
     session_::ServingSession,
 };
 use crate::{
+    SessionAlloc,
     copy_::drain_to_eof_async_,
     error_::{ProtocolError, ServeError, TransportError},
     ring_prepare_::TrPrepFactory,
@@ -60,8 +62,14 @@ where
     /// 单一 handler。
     handler_: H,
 
-    /// 连接级分配器句柄；每条 session 克隆一份。
-    alloc_: C::Alloc,
+    /// 连接级 arena 句柄。
+    ///
+    /// 它覆盖**连接作用域**的对象；每条接受的子流再创建自己的 arena（见
+    /// [`MptpServlet::new_session_alloc`]），两者不共享页。
+    alloc_: SessionAlloc,
+
+    /// 新建 per-session arena 时使用的页大小。
+    page_size_: PageSize,
 
     /// `C` 只出现在通道类型与 handler 约束里。
     _use_c_: PhantomData<fn() -> C>,
@@ -72,20 +80,56 @@ where
     C: TrConfig,
     H: TrServeHandler<C>,
 {
-    /// 用单一 handler 构造 servlet。
+    /// 用单一 handler 构造 servlet；页大小取 [`PageSize::P2K`]。
     ///
     /// 一个 servlet 只服务一条连接；连接由调用者通过 listener 交给它。
-    pub const fn new(handler: H, alloc: C::Alloc) -> Self {
-        MptpServlet {
+    ///
+    /// # Panics
+    ///
+    /// [`PageSize::P2K`] 在支持 16 位 cell 下标的平台上总是受支持；不支持的目标会在
+    /// 构造连接 arena 时 panic。需要显式处理时用
+    /// [`MptpServlet::new_with_page_size`]。
+    pub fn new(handler: H) -> Self {
+        Self::new_with_page_size(handler, PageSize::P2K)
+            .expect("PageSize::P2K 应当在当前平台受支持")
+    }
+
+    /// 用单一 handler 与页大小构造 servlet。
+    ///
+    /// # Errors
+    ///
+    /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
+    pub fn new_with_page_size(
+        handler: H,
+        page_size: PageSize,
+    ) -> Result<Self, BumpListAllocError> {
+        let alloc_ = SessionAlloc::new(page_size)?;
+        Result::Ok(MptpServlet {
             handler_: handler,
-            alloc_: alloc,
+            alloc_,
+            page_size_: page_size,
             _use_c_: PhantomData,
-        }
+        })
     }
 
     /// 取回 handler。
     pub const fn handler(&self) -> &H {
         &self.handler_
+    }
+
+    /// 本 servlet 持有的连接作用域 arena 句柄。
+    pub const fn allocator(&self) -> &SessionAlloc {
+        &self.alloc_
+    }
+
+    /// 为一条入向子流创建新的 per-session arena 句柄。
+    ///
+    /// # Panics
+    ///
+    /// 只会在构造 servlet 时已经验证过的页大小上失败，因此正常路径不会 panic。
+    pub fn new_session_alloc(&self) -> SessionAlloc {
+        SessionAlloc::new(self.page_size_)
+            .expect("servlet 构造时已经验证过该页大小受支持")
     }
 
     /// 在 binding 上进入监听。
@@ -195,12 +239,15 @@ where
             })
         })?;
 
-    let prefix = read_request_prefix_with_async(&mut rx, &servlet.alloc_)
+    // 每条子流有自己的 per-session arena：请求前缀、头表副本、location 与回复前缀都
+    // 分配在这里，session 结束时整体释放。
+    let alloc = servlet.new_session_alloc();
+    let prefix = read_request_prefix_with_async(&mut rx, &alloc)
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(|err| ServeError::Protocol(ProtocolError::RequestPrefixDecode(err)))?;
 
-    ServingSession::new_(prefix, tx, rx, servlet.alloc_.clone())
+    ServingSession::new_(prefix, tx, rx, alloc)
 }
 
 /// [`MptpServlet::serve_session_async`] 的 step 函数。

@@ -15,8 +15,11 @@
 //! headers in one place.
 
 use abs_mptp::spec::{Status, access_method::AccessMethod};
-use mptp_smux::serving::{ResponseBuilder, ServingSession, config::TrConfig};
-use mptp_wire::Headers;
+use mptp_smux::{
+    SessionAlloc,
+    serving::{ResponseBuilder, ServingSession, config::TrConfig},
+};
+use mptp_wire::{Headers, ResponsePrefix};
 
 pub use crate::stream::{
     AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, RpcMethodInfo,
@@ -57,11 +60,12 @@ pub fn typed_response<'a, C>(
 where
     C: TrConfig + 'a,
 {
-    let mut headers = Headers::new_in();
+    let alloc = session.allocator().clone();
+    let mut headers = Headers::<SessionAlloc>::new_in(alloc.clone());
     apply_response_type_headers(&mut headers, method, info);
-    let mut builder = session.response(status);
-    for (key, val) in headers.iter() {
-        builder.header(key.clone(), val.clone());
-    }
-    builder
+    session.response_prefix(ResponsePrefix::with_headers(
+        status,
+        Option::Some(headers),
+        alloc,
+    ))
 }

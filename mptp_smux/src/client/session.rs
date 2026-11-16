@@ -32,8 +32,7 @@
 //! write half is closed. The response body view is a single type over the two upstream
 //! readers; `TrMptpBuffRead` extracts the one the prefix already decided.
 
-use alloc::{alloc::Global, string::ToString};
-use core::alloc::Allocator;
+use alloc::string::ToString;
 
 use abs_buff::{
     Demand, TrBuffFlush, TrBuffRead, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite,
@@ -44,7 +43,6 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     messaging::TrMsgPrefix,
 };
-use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{RequestPrefix, chunked::ChunkedEncode, read_response_prefix_with_async};
 
@@ -53,6 +51,7 @@ use super::{
     method_::Response,
 };
 use crate::{
+    SessionAlloc,
     body_::{BodyError, BodyPlan, BodyRead, BodyState, SuffixRead},
     copy_::{CopyError, copy_all_async_, copy_sized_async_},
     error_::{ClientError, ProtocolError, StateError},
@@ -72,18 +71,18 @@ pub type RespBodyError<TyErr> = BodyError<TyErr>;
 /// 一次请求 / 回复过程的会话。
 ///
 /// 字段不对外公开：调用者只能通过 [`TrMptpSession`] 的契约驱动它。
-pub struct MptpSession<C, A = Global>
+pub struct MptpSession<C>
 where
     C: TrConfig,
-    A: Allocator,
 {
     /// 共享的会话核心：两个半边、请求前缀、体边界与体进度。
-    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, C::Alloc>,
+    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, SessionAlloc>,
 
     /// 客户端侧的状态机。
     state_: SessionState,
 
-    bump_: BumpListAlloc<A>,
+    /// 本会话自己的 arena；请求前缀与回复前缀都由它分配。
+    alloc_: SessionAlloc,
 }
 
 impl<C> MptpSession<C>
@@ -97,10 +96,10 @@ where
     /// 初始状态由**前缀里的体声明**决定：带体请求处于 `SendingBody`（体还没发，不能直接读
     /// 响应前缀），没有体的请求处于 `WaitingResp`（请求已经整体发出）。
     pub(crate) fn new_(
-        request: RequestPrefix<C::Alloc>,
+        request: RequestPrefix<SessionAlloc>,
         tx: ChannelTx<C>,
         rx: ChannelRx<C>,
-        alloc: C::Alloc,
+        alloc: SessionAlloc,
     ) -> Result<Self, ClientError> {
         let plan = BodyPlan::from_info_(request.body_info())?;
         let state_ = if matches!(plan, BodyPlan::Absent) {
@@ -110,8 +109,8 @@ where
         };
         Result::Ok(MptpSession {
             core_: SessionCore::new_(request, plan, tx, rx),
-            alloc_: alloc,
             state_,
+            alloc_: alloc,
         })
     }
 
@@ -119,7 +118,7 @@ where
     ///
     /// 它是调用者判断「下一步该发什么」的唯一依据：前缀里的 `body_info` 已经说明体是定长
     /// 还是分块、有没有体。本层不替调用者解释成业务语义。
-    pub fn req_prefix(&self) -> Option<&RequestPrefix<C::Alloc>> {
+    pub fn req_prefix(&self) -> Option<&RequestPrefix<SessionAlloc>> {
         self.core_.request_()
     }
 

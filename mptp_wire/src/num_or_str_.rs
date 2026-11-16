@@ -153,6 +153,28 @@ impl<A: Allocator> U16OrStr<A> {
     pub fn into_inner(self) -> Self {
         self
     }
+
+    /// 把本键复制到另一个 allocator 上；数字形态不需要分配，字符串形态重新分配。
+    ///
+    /// Copy this key onto another allocator. Numeric keys need no allocation; textual keys
+    /// are re-allocated by `alloc`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mptp_wire::U16OrStr;
+    /// use std::alloc::Global;
+    ///
+    /// let key = U16OrStr::<Global>::from_text("x-custom", Global);
+    /// let same = key.realloc_in(&Global);
+    /// assert_eq!(same, U16OrStr::from_text("x-custom", &Global));
+    /// ```
+    pub fn realloc_in<B: Allocator + Clone>(&self, alloc: B) -> U16OrStr<B> {
+        match self {
+            U16OrStr::U16(num) => U16OrStr::U16(*num),
+            U16OrStr::Str(text) => U16OrStr::from_text(text, alloc),
+        }
+    }
 }
 
 impl<A: Allocator + Clone> U16OrStr<A> {

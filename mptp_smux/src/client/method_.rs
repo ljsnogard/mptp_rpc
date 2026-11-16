@@ -11,9 +11,7 @@
 //! still follows the `Body_Size` / `Body_Transfer` headers. `request_prefix` and the
 //! original `request_async` remain the escape hatches.
 
-use alloc::alloc::Global;
 use core::{
-    alloc::Allocator,
     future::{Future, Ready, ready},
     pin::Pin,
     task::{Context, Poll},
@@ -25,7 +23,6 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     spec::StdHeaderKey,
 };
-use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix, limited::LimitedReader};
 
@@ -38,6 +35,7 @@ use super::{
     },
 };
 use crate::{
+    SessionAlloc,
     error_::ClientError,
     x_deps::{abs_buff, abs_cancel, gen_mcf2},
 };
@@ -244,16 +242,15 @@ where
 }
 
 /// 客户端请求 builder。
-pub struct RequestBuilder<'a, C, B = NilBody, S = NoSuffix, A = Global>
+pub struct RequestBuilder<'a, C, B = NilBody, S = NoSuffix>
 where
     C: TrConfig,
-    A: Allocator,
 {
     /// 发起请求的客户端。
-    client_: &'a MptpClient<C, A>,
+    client_: &'a MptpClient<C>,
 
-    /// 请求前缀。
-    prefix_: RequestPrefix<&'a BumpListAlloc<A>>,
+    /// 请求前缀；它的 allocator 是本次请求自己的 arena。
+    prefix_: RequestPrefix<SessionAlloc>,
 
     /// 目标垛口；缺省取配置。
     dock_: Option<Dock<C>>,
@@ -300,7 +297,7 @@ where
     C: TrConfig,
 {
     /// 由「客户端 + 前缀」构造。
-    pub(crate) fn new_(client: &'a MptpClient<C>, prefix: RequestPrefix<C::Alloc>) -> Self {
+    pub(crate) fn new_(client: &'a MptpClient<C>, prefix: RequestPrefix<SessionAlloc>) -> Self {
         RequestBuilder {
             client_: client,
             prefix_: prefix,
@@ -322,8 +319,37 @@ where
     }
 
     /// 追加 / 覆盖一个请求头。
-    pub fn header(mut self, key: impl Into<HeaderKey<C::Alloc>>, val: HeaderVal<C::Alloc>) -> Self {
+    pub fn header(
+        mut self,
+        key: impl Into<HeaderKey<SessionAlloc>>,
+        val: HeaderVal<SessionAlloc>,
+    ) -> Self {
         self.prefix_.headers_mut().set(key, val);
+        self
+    }
+
+    /// 追加 / 覆盖一个文本形态的请求头；值由本请求的 arena 分配。
+    pub fn header_text(
+        mut self,
+        key: impl Into<HeaderKey<SessionAlloc>>,
+        text: impl AsRef<str>,
+    ) -> Self {
+        let alloc = self.prefix_.allocator().clone();
+        self.prefix_
+            .headers_mut()
+            .set(key, HeaderVal::from_text(text, alloc));
+        self
+    }
+
+    /// 追加 / 覆盖一个**按名字**给出的文本请求头（例如 `Authorization`）。
+    ///
+    /// 键与值都由本请求的 arena 分配；调用者不需要知道 allocator 类型。
+    pub fn header_text_named(mut self, name: &str, text: impl AsRef<str>) -> Self {
+        let alloc = self.prefix_.allocator().clone();
+        self.prefix_.headers_mut().set(
+            HeaderKey::from_text(name, alloc.clone()),
+            HeaderVal::from_text(text, alloc),
+        );
         self
     }
 
@@ -471,7 +497,7 @@ where
     session_: MptpSession<C>,
 
     /// 回复前缀。
-    prefix_: ResponsePrefix<C::Alloc>,
+    prefix_: ResponsePrefix<SessionAlloc>,
 }
 
 impl<C> Response<C>
@@ -484,12 +510,12 @@ where
     }
 
     /// 回复头表。
-    pub fn headers(&self) -> Option<&mptp_wire::Headers<C::Alloc>> {
+    pub fn headers(&self) -> Option<&mptp_wire::Headers<SessionAlloc>> {
         self.prefix_.headers()
     }
 
     /// 回复前缀。
-    pub fn prefix(&self) -> &ResponsePrefix<C::Alloc> {
+    pub fn prefix(&self) -> &ResponsePrefix<SessionAlloc> {
         &self.prefix_
     }
 
@@ -530,7 +556,7 @@ where
     /// 由两半构造回复；供 crate 内的后缀写端在 `finish` 后组装。
     pub(crate) const fn from_parts_(
         session: MptpSession<C>,
-        prefix: ResponsePrefix<C::Alloc>,
+        prefix: ResponsePrefix<SessionAlloc>,
     ) -> Self {
         Response {
             session_: session,

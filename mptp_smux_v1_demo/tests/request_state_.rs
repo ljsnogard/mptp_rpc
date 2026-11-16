@@ -16,7 +16,7 @@ mod common;
 
 use abs_mptp::spec::Status;
 use common::{SceneFixture, SceneTestClient, with_timeout_};
-use mptp_smux::{HeaderKey, HeaderVal};
+use mptp_smux::HeaderVal;
 use mptp_smux_v1_demo::scene::K_HDR_PRINCIPAL;
 
 /// 测试中间件写入的主体能被同一请求的处理器读到。
@@ -40,7 +40,7 @@ async fn middleware_stashes_principal_() {
         client
             .client_()
             .view("/test/state")
-            .header(K_HDR_PRINCIPAL, HeaderVal::from_text("alice"))
+            .header_text_named(K_HDR_PRINCIPAL, "alice")
             .send_async()
             .await
     })
@@ -49,13 +49,13 @@ async fn middleware_stashes_principal_() {
     assert_eq!(resp.status(), Status::Ok, "端点应回复 200");
     let echoed = resp
         .headers()
-        .and_then(|headers| headers.try_get(HeaderKey::from_text(K_HDR_PRINCIPAL)))
+        .and_then(|headers| headers.try_get_str(K_HDR_PRINCIPAL))
         .and_then(HeaderVal::as_text);
     assert_eq!(echoed, Some("alice"), "处理器应读到中间件写入的主体");
     // 组标记来自 router 的 `with_group_metadata`，端点自身没有声明——证明继承生效。
     let group = resp
         .headers()
-        .and_then(|headers| headers.try_get(HeaderKey::from_text("X-Scene-Group")))
+        .and_then(|headers| headers.try_get_str("X-Scene-Group"))
         .and_then(HeaderVal::as_text);
     assert_eq!(group, Some("scene"), "端点应继承 router 的组默认元数据");
 }
@@ -82,7 +82,7 @@ async fn missing_principal_is_anonymous_() {
     assert_eq!(resp.status(), Status::Ok, "端点应回复 200");
     let echoed = resp
         .headers()
-        .and_then(|headers| headers.try_get(HeaderKey::from_text(K_HDR_PRINCIPAL)))
+        .and_then(|headers| headers.try_get_str(K_HDR_PRINCIPAL))
         .and_then(HeaderVal::as_text);
     assert_eq!(echoed, Some("anonymous"), "无主体头时应降级为匿名");
 }

@@ -42,6 +42,7 @@ use abs_cancel::{CancelledToken, TrMayCancel};
 use abs_mptp::spec::access_method::AccessMethod;
 use denco_macro::{TrDecodable, TrEncodable, TrHasTypeId};
 use futures::executor::block_on;
+use std::alloc::Global;
 use mptp_smux::Headers;
 use rpc_core_v1::{
     client::{ClientProxy, TrRpcClientConfig, call_unary_async},
@@ -228,7 +229,7 @@ fn pull_room_events_() {
         .with_accept(AcceptType::new(BodyCodec::MsgPack, Some(item_id)));
 
     // 客户端请求前缀：Pull 没有 body，只声明 suffix codec + Accept。
-    let mut request_headers = Headers::new_in();
+    let mut request_headers = Headers::new_in(Global);
     apply_request_type_headers(&mut request_headers, AccessMethod::Pull, &info);
     write_accept(
         &mut request_headers,
@@ -290,7 +291,7 @@ fn push_messages_() {
     let info = RpcDataTypeInfo::new(BodyCodec::MsgPack)
         .with_request_suffix(ChatMessage::DATA_TYPE_ID)
         .with_accept(AcceptType::new(BodyCodec::MsgPack, None));
-    let mut headers = Headers::new_in();
+    let mut headers = Headers::new_in(Global);
     apply_request_type_headers(&mut headers, AccessMethod::Push, &info);
     println!(
         "  A → 请求头: Body_Type=MsgPack, Data_Type_Id={}",
@@ -347,7 +348,7 @@ fn type_mismatch_() {
     println!("\n[Type] A 用错误的 Data_Type_Id 发 Push");
     let info =
         RpcDataTypeInfo::new(BodyCodec::MsgPack).with_request_suffix(ChatMessage::DATA_TYPE_ID);
-    let mut headers = Headers::new_in();
+    let mut headers = Headers::new_in(Global);
     rpc_core_v1::stream::write_body_codec(&mut headers, BodyCodec::MsgPack);
     rpc_core_v1::stream::write_data_type_id(
         &mut headers,
@@ -396,7 +397,7 @@ fn unary_headers_() {
     println!("\n[Call] A 修改显示名 im/v1/session/set_display_name");
     let request = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_request_body(User::DATA_TYPE_ID);
     let response = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_response_body(User::DATA_TYPE_ID);
-    let mut headers = Headers::new_in();
+    let mut headers = Headers::new_in(Global);
     apply_request_type_headers(&mut headers, AccessMethod::Call, &request);
     write_accept(
         &mut headers,
@@ -412,7 +413,7 @@ fn unary_headers_() {
         validate_request_types(AccessMethod::Call, &headers, &request),
         User::DATA_TYPE_ID
     );
-    let mut resp_headers = Headers::new_in();
+    let mut resp_headers = Headers::new_in(Global);
     rpc_core_v1::stream::apply_response_type_headers(
         &mut resp_headers,
         AccessMethod::Call,

@@ -28,12 +28,9 @@
 //! [`MptpClient::request_to_dock_async`](super::MptpClient::request_to_dock_async)。`MptpClient`
 //! **自己不持有任何垛口**：本端每次由连接安排，远端每次由调用决定。
 
-use alloc::{
-    alloc::Global,
-    string::ToString,
-};
+use alloc::string::ToString;
 use core::{
-    alloc::{Allocator, AllocatorClone},
+    alloc::AllocatorClone,
     mem::MaybeUninit,
     ops::Deref,
 };
@@ -46,10 +43,11 @@ use abs_smux::{
     conn::{TrConnection, TrDockBinding},
     dock::TrDock,
 };
-use bumplist_alloc::{BumpListAlloc, PageSize};
+use bumplist_alloc::{BumpListAllocError, PageSize};
 use gen_mcf2::gen_may_cancel_future;
 
 use crate::{
+    SessionAlloc,
     error_::{ClientError, ProtocolError, TransportError},
     messaging,
     ring_prepare_::TrPrepFactory,
@@ -65,42 +63,89 @@ use super::{
 /// 客户端持有的连接智能指针。
 type SharedConn<C> = <C as abs_mptp::client::config::TrConfig>::SharedConn;
 
-/// MPTP 客户端：持有共享连接，按需在其上开子流发请求。
+/// MPTP 客户端：持有共享连接与客户端作用域的 allocation source。
 ///
-/// 它只持有连接：**没有**本端垛口（每次由连接安排），**也没有**远端垛口（每次调用的实参
-/// 或配置声明的缺省值）。于是同一个 `Client` 可以向任意垛口发起请求。
-pub struct MptpClient<C, A = Global>
+/// 它只持有连接与自己的 arena：**没有**本端垛口（每次由连接安排），**也没有**远端垛口
+/// （每次调用的实参或配置声明的缺省值）。于是同一个 `Client` 可以向任意垛口发起请求。
+///
+/// # 内存作用域
+///
+/// `MptpClient` 自己的 [`SessionAlloc`] 覆盖**客户端作用域**的对象（例如代理级附加头、
+/// 连接级缓存）。一次请求从 [`MptpClient::request`] 开始使用的是**新的** per-request
+/// arena：它随请求前缀进入 `RequestBuilder`，最终由 `MptpSession` 持有；请求结束
+/// （会话 drop）时整个 arena 随之释放。两者都不需要调用方再声明 allocator 类型。
+pub struct MptpClient<C>
 where
     C: TrConfig,
-    A: Allocator,
 {
     /// 共享连接。
     conn_: SharedConn<C>,
 
-    /// 客户端持有的分配器句柄；每个 session 克隆一份。
-    bump_: BumpListAlloc<A>,
+    /// 客户端作用域的 arena 句柄。
+    alloc_: SessionAlloc,
+
+    /// 新建 per-request arena 时使用的页大小。
+    page_size_: PageSize,
 }
 
-impl<C, A> MptpClient<C, A>
+impl<C> MptpClient<C>
 where
     C: TrConfig,
-    A: Allocator,
 {
-    /// 由共享连接构造客户端。
+    /// 由共享连接构造客户端；页大小取 [`PageSize::P2K`]。
     ///
     /// 没有策略参数：默认的 ring 准备工厂是一个**类型**
     /// （[`TrConfig::DefaultPrepFactory`]），由本 crate 在每次裁决前用环境现场构造，没有实例
     /// 需要提前注入；目标垛口也是每次调用的实参（缺省时读配置）。
-    pub fn new_in(conn: SharedConn<C>, alloc: A) -> Self {
-        MptpClient {
-            conn_: conn,
-            bump_: BumpListAlloc::new_in(alloc, PageSize::P2K).expect("PageSize::P2K should succeed"),
-        }
+    ///
+    /// # Panics
+    ///
+    /// [`PageSize::P2K`] 在支持 16 位 cell 下标的平台上总是受支持；不支持的目标会在
+    /// 构造客户端 arena 时 panic。需要显式处理时用
+    /// [`MptpClient::new_with_page_size`]。
+    pub fn new(conn: SharedConn<C>) -> Self {
+        Self::new_with_page_size(conn, PageSize::P2K)
+            .expect("PageSize::P2K 应当在当前平台受支持")
     }
 
-    /// 本客户端持有的分配器句柄。
-    pub const fn allocator(&self) -> &BumpListAlloc<A> {
-        &self.bump_
+    /// 由共享连接与页大小构造客户端。
+    ///
+    /// # Errors
+    ///
+    /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
+    pub fn new_with_page_size(
+        conn: SharedConn<C>,
+        page_size: PageSize,
+    ) -> Result<Self, BumpListAllocError> {
+        let alloc_ = SessionAlloc::new(page_size)?;
+        Result::Ok(MptpClient {
+            conn_: conn,
+            alloc_,
+            page_size_: page_size,
+        })
+    }
+
+    /// 本客户端持有的客户端作用域 arena 句柄。
+    pub const fn allocator(&self) -> &SessionAlloc {
+        &self.alloc_
+    }
+
+    /// 本客户端使用的页大小。
+    pub const fn page_size(&self) -> PageSize {
+        self.page_size_
+    }
+
+    /// 为一次请求创建新的 per-request arena 句柄。
+    ///
+    /// 返回的句柄交给请求前缀；`MptpSession` 从前缀里接管同一个 arena，因此请求结束、
+    /// 会话 drop 时它的全部堆内存一起释放。
+    ///
+    /// # Panics
+    ///
+    /// 只会在构造客户端时已经验证过的页大小上失败，因此正常路径不会 panic。
+    pub fn new_session_alloc(&self) -> SessionAlloc {
+        SessionAlloc::new(self.page_size_)
+            .expect("客户端构造时已经验证过该页大小受支持")
     }
 
     /// 统一入口：显式方法 + 位置。
@@ -112,7 +157,7 @@ where
         let location = location.into();
         RequestBuilder::new_(
             self,
-            messaging::RequestPrefix::new(method, &location, &self.bump_),
+            messaging::RequestPrefix::new(method, &location, self.new_session_alloc()),
         )
     }
 
@@ -157,7 +202,7 @@ where
     /// escape hatch：完全自定义前缀（含头、方法、位置）。
     pub fn request_prefix(
         &self,
-        prefix: messaging::RequestPrefix<C::Alloc>,
+        prefix: messaging::RequestPrefix<SessionAlloc>,
     ) -> RequestBuilder<'_, C> {
         RequestBuilder::new_(self, prefix)
     }

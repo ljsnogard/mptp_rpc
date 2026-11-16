@@ -17,7 +17,7 @@ use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
 use mptp_serving::{HandlerFuture, MethodSet, MptpContext, TrEndpointHandler, box_future_};
 use mptp_smux::{
-    HeaderVal, ServeError,
+    ServeError,
     serving::{ServingSession, SuffixStream, config::TrConfig},
 };
 use rpc_core_v1::serving::{TrReplyError, write_ok_async};
@@ -170,11 +170,8 @@ impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for ScenePlanets {
                         (registry.planet_count_(), registry.directory_version_())
                     };
                     let mut builder = ctx.session_mut().response(Status::Ok);
-                    builder.header(K_HDR_PLANET_COUNT, HeaderVal::from_text(count.to_string()));
-                    builder.header(
-                        K_HDR_DIRECTORY_VERSION,
-                        HeaderVal::from_text(version.to_string()),
-                    );
+                    builder.header_text(K_HDR_PLANET_COUNT, count.to_string());
+                    builder.header_text(K_HDR_DIRECTORY_VERSION, version.to_string());
                     builder.no_body_async().await?;
                     Ok(())
                 }

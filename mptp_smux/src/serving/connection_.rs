@@ -18,6 +18,7 @@ use alloc::sync::Arc;
 
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_smux::chan::TrChannelHalf;
+use bumplist_alloc::{BumpListAllocError, PageSize};
 
 use super::{
     config::{ChannelHandle, ChannelRx, DockBinding, MuxCfg, TrConfig},
@@ -50,17 +51,39 @@ where
     H: TrServeHandler<C>,
     S: Send + Sync + 'static,
 {
-    /// 由「binding + handler + 状态」构造。
+    /// 由「binding + handler + 状态」构造；连接 arena 的页大小取 [`PageSize::P2K`]。
     ///
     /// 调用方负责先把连接绑定到默认 serving dock（`bind_async`），再把 binding 交进来；
     /// `state` 是共享状态，通常 `Arc::clone` 一份给 handler（如 `mptp_serving::RadixRouter`
     /// 的 `new_with_state`）。
-    pub fn new(binding: DockBinding<C>, handler: H, state: Arc<S>, alloc: C::Alloc) -> Self {
-        MptpConnection {
+    ///
+    /// # Panics
+    ///
+    /// [`PageSize::P2K`] 在支持 16 位 cell 下标的平台上总是受支持；不支持的目标会在
+    /// 构造连接 arena 时 panic。需要显式处理时用
+    /// [`MptpConnection::new_with_page_size`]。
+    pub fn new(binding: DockBinding<C>, handler: H, state: Arc<S>) -> Self {
+        Self::new_with_page_size(binding, handler, state, PageSize::P2K)
+            .expect("PageSize::P2K 应当在当前平台受支持")
+    }
+
+    /// 由「binding + handler + 状态 + 页大小」构造。
+    ///
+    /// # Errors
+    ///
+    /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
+    pub fn new_with_page_size(
+        binding: DockBinding<C>,
+        handler: H,
+        state: Arc<S>,
+        page_size: PageSize,
+    ) -> Result<Self, BumpListAllocError> {
+        let servlet_ = MptpServlet::new_with_page_size(handler, page_size)?;
+        Result::Ok(MptpConnection {
             binding_: binding,
-            servlet_: MptpServlet::new(handler, alloc),
+            servlet_,
             state_: state,
-        }
+        })
     }
 
     /// 本连接的 servlet。

@@ -48,18 +48,18 @@ where
     H: TrReqHandler<C> + Send + Sync + 'static,
     H::Err: 'static,
 {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a, C::Alloc> {
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
         let arena = ctx.arena();
         let method = ctx.method();
         // 先同步取走两半，再装箱：异步块只捕获拥有所有权的两半与 handler 引用，
         // 不需要 `&mut ServingSession` 满足 `Send`。
         let Option::Some((tx, rx, mut headers, location)) = ctx.session_mut().take_parts() else {
-            return box_future_::<C, _, _>(arena, async {
+            return box_future_(arena, async {
                 Result::Err(ServeError::State(StateError::ChannelTaken))
             });
         };
 
-        box_future_::<C, _, _>(arena, async move {
+        box_future_(arena, async move {
             self.handler_
                 .handle_async(method, &location, &mut headers, tx, rx)
                 .await

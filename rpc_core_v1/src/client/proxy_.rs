@@ -15,6 +15,7 @@
 //! performs one unary exchange; macro-generated methods only build the body enum variant.
 
 use alloc::{
+    alloc::Global,
     format,
     string::{String, ToString},
 };
@@ -62,7 +63,7 @@ where
     ///
     /// 它只在**显式**调用 [`with_headers`](Self::with_headers) 后才有值：业务方法参数表
     /// 不出现凭据，头由代理作为切面数据携带。
-    headers_: Option<Headers>,
+    headers_: Option<Headers<Global>>,
 
     /// interface marker。
     _iface_: PhantomData<I>,
@@ -102,10 +103,10 @@ where
     /// # Examples
     ///
     /// ```text
-    /// let headers = Headers::new();
+    /// let headers = Headers::new_in(std::alloc::Global);
     /// let ticket = client.call::<AdminSvc>().with_headers(headers).login().await?;
     /// ```
-    pub fn with_headers(mut self, headers: Headers) -> Self {
+    pub fn with_headers(mut self, headers: Headers<Global>) -> Self {
         self.headers_ = Option::Some(headers);
         self
     }
@@ -113,7 +114,7 @@ where
     /// 本代理附加的请求头（未设置时为 `None`）。
     ///
     /// 宏生成的客户端方法用它把代理级头传给 unary 调用入口。
-    pub fn headers(&self) -> Option<&Headers> {
+    pub fn headers(&self) -> Option<&Headers<Global>> {
         self.headers_.as_ref()
     }
 }
@@ -202,7 +203,8 @@ where
 
     // 业务体不预编码：请求头只声明「分块」，编码器与 `send_req_body_async` 通过
     // 一对 SPSC ring 并发推进——编码写满时等待，发送搬走多少就再编多少。
-    let mut headers = Headers::new_in();
+    let alloc = client.new_session_alloc();
+    let mut headers = Headers::new_in(alloc.clone());
     headers.set_num(
         StdHeaderKey::Body_Transfer,
         StdHeaderVal::Body_Transfer_Chunked.into_inner(),
@@ -212,7 +214,7 @@ where
         StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
     );
     let prefix =
-        RequestPrefix::with_headers(AccessMethod::Call, location.clone(), Option::Some(headers));
+        RequestPrefix::with_headers(AccessMethod::Call, &location, Option::Some(headers), alloc);
 
     let mut session = client
         .request_async(prefix)
@@ -251,7 +253,7 @@ where
     if response.status() != Status::Ok {
         let size = response
             .headers()
-            .and_then(Headers::body_size)
+            .and_then(|headers| headers.body_size())
             .unwrap_or(0usize);
         let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
         return Result::Err(RpcError::Remote {
@@ -301,7 +303,8 @@ where
     Req: TrEncodable + 'f,
     K: TrCancellationToken,
 {
-    let mut headers = Headers::new_in();
+    let alloc = client.new_session_alloc();
+    let mut headers = Headers::new_in(alloc.clone());
     headers.set_num(
         StdHeaderKey::Body_Transfer,
         StdHeaderVal::Body_Transfer_Chunked.into_inner(),
@@ -310,7 +313,7 @@ where
         StdHeaderKey::Body_Type,
         StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
     );
-    let prefix = RequestPrefix::with_headers(method, location.clone(), Option::Some(headers));
+    let prefix = RequestPrefix::with_headers(method, &location, Option::Some(headers), alloc);
     let mut session = client
         .request_async(prefix)
         .may_cancel_with(cancel.child_token())
@@ -345,7 +348,7 @@ where
     if response.status() != Status::Ok {
         let size = response
             .headers()
-            .and_then(Headers::body_size)
+            .and_then(|headers| headers.body_size())
             .unwrap_or(0usize);
         let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
         return Result::Err(RpcError::Remote {
@@ -412,7 +415,7 @@ pub fn call_endpoint_typed_with_headers_async<'f, C, Req, Rep>(
     path: &'static str,
     info: &'static RpcDataTypeInfo,
     request: Req,
-    extra_headers: Option<&Headers>,
+    extra_headers: Option<&Headers<Global>>,
 ) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<Rep>> + 'f
 where
     C: crate::client::TrRpcClientConfig + 'f,
@@ -438,7 +441,7 @@ async fn endpoint_call_typed_async_<'f, C, Req, Rep, K>(
     location: String,
     info: &'static RpcDataTypeInfo,
     request: Req,
-    extra_headers: Option<Headers>,
+    extra_headers: Option<Headers<Global>>,
     cancel: K,
 ) -> RpcResult<Rep>
 where
@@ -447,10 +450,11 @@ where
     Rep: TrDecodableOwned + 'f,
     K: TrCancellationToken,
 {
-    let mut headers = Headers::new_in();
+    let alloc = client.new_session_alloc();
+    let mut headers = Headers::new_in(alloc.clone());
     if let Option::Some(extra) = extra_headers {
         for (key, val) in extra.iter() {
-            headers.set(key.clone(), val.clone());
+            headers.set(key.realloc_in(alloc.clone()), val.realloc_in(alloc.clone()));
         }
     }
     headers.set_num(
@@ -461,7 +465,8 @@ where
     if let Option::Some(accept) = info.accept() {
         write_accept(&mut headers, accept);
     }
-    let prefix = RequestPrefix::with_headers(method, location.clone(), Option::Some(headers));
+    let prefix =
+        RequestPrefix::with_headers(method, &location, Option::Some(headers), alloc.clone());
     let mut session = client
         .request_async(prefix)
         .may_cancel_with(cancel.child_token())
@@ -496,7 +501,7 @@ where
     if response.status() != Status::Ok {
         let size = response
             .headers()
-            .and_then(Headers::body_size)
+            .and_then(|headers| headers.body_size())
             .unwrap_or(0usize);
         let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
         return Result::Err(RpcError::Remote {
@@ -505,7 +510,7 @@ where
         });
     }
 
-    let empty_headers = Headers::new_in();
+    let empty_headers = Headers::new_in(alloc.clone());
     let response_headers = response.headers().unwrap_or(&empty_headers);
     validate_response_types(method, response_headers, info).map_err(|rejection| {
         RpcError::Remote {
@@ -586,7 +591,8 @@ where
     Rep: TrDecodableOwned + 'f,
     K: TrCancellationToken,
 {
-    let mut headers = Headers::new_in();
+    let alloc = client.new_session_alloc();
+    let mut headers = Headers::new_in(alloc.clone());
     headers.set_num(
         StdHeaderKey::Body_Transfer,
         StdHeaderVal::Body_Transfer_Chunked.into_inner(),
@@ -595,7 +601,7 @@ where
         StdHeaderKey::Body_Type,
         StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
     );
-    let prefix = RequestPrefix::with_headers(method, location.clone(), Option::Some(headers));
+    let prefix = RequestPrefix::with_headers(method, &location, Option::Some(headers), alloc);
     let mut session = client
         .request_async(prefix)
         .may_cancel_with(cancel.child_token())
@@ -630,7 +636,7 @@ where
     if response.status() != Status::Ok {
         let size = response
             .headers()
-            .and_then(Headers::body_size)
+            .and_then(|headers| headers.body_size())
             .unwrap_or(0usize);
         let body = read_body_async_(&mut body_read, size, cancel.child_token()).await?;
         return Result::Err(RpcError::Remote {

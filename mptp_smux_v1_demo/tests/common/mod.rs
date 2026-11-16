@@ -35,7 +35,7 @@ use mptp_serving::{
     TrMiddleware, box_future_,
 };
 use mptp_smux::{
-    HeaderKey, HeaderVal, ServeError,
+    HeaderVal, ServeError,
     client::{MptpClient, Response},
     serving::{MptpServlet, SuffixStream},
     x_deps::abs_smux,
@@ -446,10 +446,10 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
         box_future_(arena, async move {
             let before = ctx.reply_written();
             ctx.headers_mut()
-                .set("X-Ctx-Probe", HeaderVal::from_text("mutated"));
+                .set_text_named("X-Ctx-Probe", "mutated");
             let mutated = ctx
                 .headers()
-                .try_get(HeaderKey::from_text("X-Ctx-Probe"))
+                .try_get_str("X-Ctx-Probe")
                 .and_then(HeaderVal::as_text)
                 == Some("mutated");
             ctx.response(Status::Ok).no_body_async().await?;
@@ -500,7 +500,7 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
         let arena = ctx.arena();
         box_future_(arena, async move {
             let mut response = ctx.response(Status::Ok);
-            response.header("X-Multi-Route", HeaderVal::from_text("view"));
+            response.header_text_named("X-Multi-Route", "view");
             response.no_body_async().await?;
             Ok(())
         })
@@ -555,8 +555,8 @@ impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S, SceneRe
                 .unwrap_or_else(|| String::from("anonymous"));
             let group = ctx.request_state().group.unwrap_or("no-group").to_string();
             let mut response = ctx.response(Status::Ok);
-            response.header("X-Scene-Principal", HeaderVal::from_text(principal));
-            response.header("X-Scene-Group", HeaderVal::from_text(group));
+            response.header_text_named("X-Scene-Principal", principal);
+            response.header_text_named("X-Scene-Group", group);
             response.no_body_async().await?;
             Ok(())
         })
@@ -610,7 +610,7 @@ where
         box_future_(arena, async move {
             let denied = ctx
                 .headers()
-                .try_get(HeaderKey::from_text("X-Scene-Deny"))
+                .try_get_str("X-Scene-Deny")
                 .is_some();
             if denied {
                 // 由管线统一写 403 无体回复。
@@ -919,7 +919,11 @@ impl SceneTestClient {
         let resp = with_timeout_(async { self.client_.post(uri).send_async().await }).await?;
         let allow = resp
             .headers()
-            .and_then(|headers| headers.try_get(mptp_smux::serving::K_TMP_ALLOW_HEADER_KEY))
+            .and_then(|headers| {
+                headers.try_get(mptp_smux::HeaderKey::from_num(
+                    mptp_smux::serving::K_TMP_ALLOW_HEADER_KEY,
+                ))
+            })
             .and_then(|value| value.as_text().map(str::to_string));
         Ok((resp.status(), allow))
     }

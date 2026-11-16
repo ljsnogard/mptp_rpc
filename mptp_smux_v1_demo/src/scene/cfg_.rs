@@ -22,7 +22,7 @@ use buffex_compio_adapt::{
 };
 use mm_ptr::{Owned, Shared};
 use mptp_smux::{
-    K_DEFAULT_SERVING_DOCK, RingBuffs, TrPrepFactory, TrPrepareCtx,
+    K_DEFAULT_SERVING_DOCK, RingBuffs, SessionAlloc, TrPrepFactory, TrPrepareCtx,
     client::{ClientPrepCtx, config as client_cfg},
     messaging::{Headers, RequestPrefix, ResponsePrefix},
     serving::{ServingPrepCtx, config as serving_cfg},
@@ -103,9 +103,9 @@ impl abs_mptp::client::config::TrConfig for ClientCfg {
 
     type SharedConn = SharedConn;
 
-    type ReqPrefix = RequestPrefix;
+    type ReqPrefix = RequestPrefix<SessionAlloc>;
 
-    type RespPrefix = ResponsePrefix;
+    type RespPrefix = ResponsePrefix<SessionAlloc>;
 }
 
 impl client_cfg::TrConfig for ClientCfg {
@@ -175,13 +175,13 @@ pub struct ServingCfg;
 impl abs_mptp::serving::config::TrConfig for ServingCfg {
     type MuxConn = Conn;
 
-    type ReqHeaders = Headers;
+    type ReqHeaders = Headers<SessionAlloc>;
 
-    type RespHeaders = Headers;
+    type RespHeaders = Headers<SessionAlloc>;
 
-    type ReqPrefix = RequestPrefix;
+    type ReqPrefix = RequestPrefix<SessionAlloc>;
 
-    type RespPrefix = ResponsePrefix;
+    type RespPrefix = ResponsePrefix<SessionAlloc>;
 }
 
 impl serving_cfg::TrConfig for ServingCfg {

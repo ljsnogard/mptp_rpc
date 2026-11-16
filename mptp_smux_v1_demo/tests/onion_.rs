@@ -16,7 +16,6 @@ mod common;
 
 use abs_mptp::spec::Status;
 use common::{SceneFixture, SceneTestClient, wait_until_async_, with_timeout_};
-use mptp_smux::HeaderVal;
 
 /// 读取洋葱记录快照。
 fn trace_snapshot_(fixture: &SceneFixture) -> Vec<&'static str> {
@@ -81,7 +80,7 @@ async fn short_circuit_skips_handler_() {
         client
             .client_()
             .view("/test/order")
-            .header("X-Scene-Deny", HeaderVal::from_text("1"))
+            .header_text_named("X-Scene-Deny", "1")
             .send_async()
             .await
     })

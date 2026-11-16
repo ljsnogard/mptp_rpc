@@ -14,7 +14,7 @@ mod common;
 
 use abs_mptp::spec::Status;
 use common::{SceneFixture, SceneTestClient, with_timeout_};
-use mptp_smux::{HeaderKey, MethodSet};
+use mptp_smux::MethodSet;
 use mptp_smux_v1_demo::scene::PlanetEvent;
 
 /// 测试同一路径上的 VIEW 与 PULL 各自命中自己的端点。
@@ -41,7 +41,7 @@ async fn view_and_pull_share_one_path_() {
     assert_eq!(resp.status(), Status::Ok, "View 应回复 200");
     let marker = resp
         .headers()
-        .and_then(|headers| headers.try_get(HeaderKey::from_text("X-Multi-Route")))
+        .and_then(|headers| headers.try_get_str("X-Multi-Route"))
         .and_then(|value| value.as_text());
     assert_eq!(marker, Some("view"), "View 应命中 view 端点");
 

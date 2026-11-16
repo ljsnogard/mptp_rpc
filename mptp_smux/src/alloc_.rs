@@ -1,20 +1,32 @@
-//! 会话 / 客户端 / 服务端共享的 clonable 分配器句柄。
+//! 会话 / 客户端 / 服务端各自持有的 allocation source 句柄。
 //!
 //! [`SessionAlloc`] 是 [`BumpListAlloc`] 的 `Arc` 句柄：它实现
-//! [`Allocator`](core::alloc::Allocator)、[`TrArena`] 与 [`TrArenaBytes`]，因此同一个
-//! allocator 既能给 `Vec` / `abs_str::String` 用，也能直接交给 `MpDecoder::new_in`。
+//! [`Allocator`](core::alloc::Allocator)、[`AllocatorClone`]、
+//! [`TrArena`] 与 [`TrArenaBytes`]，因此同一个 allocator 既能给 `Vec` /
+//! `abs_str::String` / 头表用，也能直接交给 `MpDecoder::new_in`。
 //!
-//! 为什么不是裸 `&'a BumpListAlloc`：`abs_mptp::client::TrMptpClient::Session` 是一个
-//! **不带生命周期的关联类型**，session 不能借用 client 的分配器；因此每个 client /
-//! session / servlet 持有一份 `Arc` 句柄的克隆，内存由所有克隆共享的同一个
-//! [`BumpListAlloc`] 提供。句柄是 `Clone` 且 `'static`，所以会话类型不需要任何生命周期
-//! 参数。
+//! # 为什么是句柄，而不是 `&'a BumpListAlloc`
 //!
-//! # `alloc_`: the clonable session allocator handle
+//! 每个持有者（`MptpClient`、`MptpSession`、`MptpServlet`、`ServingSession`、
+//! `MptpContext`）需要**既拥有 arena，又把由该 arena 分配的容器保存成自己的字段**
+//! （请求前缀、头表、location……）。如果字段里的 allocator 是指向结构体自身字段的
+//! `&'a BumpListAlloc`，那就是自引用，安全 Rust 构造不出来。
 //!
-//! `SessionAlloc` is an `Arc<BumpListAlloc>` handle implementing `Allocator`, `TrArena` and
-//! `TrArenaBytes`. Every client / session / servlet holds a clone, so all allocations share
-//! one arena while the session types stay lifetime-free.
+//! `Arc` 句柄把「arena 的地址」与「持有者结构体的地址」解耦：句柄按值保存、可克隆、
+//! 是 `'static` 的；所有克隆共享同一个 [`BumpListAlloc`]，最后一个句柄（包括被前缀 /
+//! 头表持有的克隆）释放时才回收页。于是：
+//!
+//! - 持有者可以按值保存 `RequestPrefix<SessionAlloc>` 这类字段，不需要生命周期参数；
+//! - 会话类型保持 `'static`，`abs_mptp` 的关联类型不需要改 GAT；
+//! - 每个持有者可以按自己的生命周期创建**独立的** arena：client 一份、每个 session
+//!   一份、servlet 一份、每个请求的 context 一份。
+//!
+//! # `alloc_`: the per-owner allocation source handle
+//!
+//! `SessionAlloc` is an `Arc<BumpListAlloc>` handle implementing `Allocator`,
+//! `AllocatorClone`, `TrArena` and `TrArenaBytes`. Each owner holds its own handle, so an
+//! arena can be released when that owner (and every object allocated from it) goes away,
+//! while the session types stay lifetime-free.
 
 use alloc::sync::Arc;
 use core::{
@@ -68,6 +80,13 @@ impl SessionAlloc {
     /// 底层分配器的共享引用。
     pub fn bump(&self) -> &BumpListAlloc {
         &self.inner_
+    }
+
+    /// 本 arena 的页大小。
+    ///
+    /// 持有者用它为新作用域创建同样页大小的 arena，避免一个进程里出现多种页大小。
+    pub fn page_size(&self) -> PageSize {
+        self.inner_.page_size()
     }
 }
 
