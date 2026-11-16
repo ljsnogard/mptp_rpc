@@ -18,8 +18,6 @@ abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 mptp_smux = { path = "../mptp_smux" }
 # 路径树匹配：复用 matchit_route（no_std + bumpalo），不新造第二套匹配算法。
 matchit_route = { path = "../matchit_route" }
-# 请求级 arena：handler future 用它的 boxed::Box 分配（带 Drop 语义，内存随 arena 释放）。
-bumpalo = { version = "3.20.3", features = ["boxed"] }
 # 克隆 `location` 用带分配器的 String（no_std 纪律：String 一律 abs_str::String<A>）。
 abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git", default-features = false, features = [
     "str_alloc",
@@ -33,6 +31,14 @@ cantok_rs = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 [dev-dependencies]
 # 单元测试用 tokio 驱动会话；库本体不选运行时。
 tokio = { version = "1", features = ["macros", "rt"] }
-# 仅在测试里验证「`rpc_core_v1` 的类型元信息标记能按类型挂进 EndpointMetadata」；
-# 库本体仍然不依赖 RPC 核心，保持 serving 在 RPC 层之下。
-rpc_core_v1 = { path = "../rpc_core_v1", default-features = false }
+# `rpc_core_v1` 的迁移尚未完成：等它的 Headers / Prefix 类型补上 allocator 参数后再恢复
+# 「类型元信息标记挂进 EndpointMetadata」那条测试的 dev-dependency。
+
+[features]
+# `examples/im_session.rs` 依赖尚未迁移到 allocator 泛型的 `rpc_core_v1`；默认关闭，
+# 下游迁移完成后删除本 feature 与下面的 `required-features`。
+im-session-example = []
+
+[[example]]
+name = "im_session"
+required-features = ["im-session-example"]

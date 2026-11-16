@@ -17,26 +17,25 @@
 //! `Ok(None)` without calling `next`.
 
 use alloc::alloc::Global;
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Allocator;
-use core::future::Future;
-use core::pin::Pin;
 
 use abs_mptp::spec::Status;
-use bumpalo::boxed::Box as BumpBox;
 use mptp_smux::ServeError;
 use mptp_smux::serving::config::TrConfig;
 
+use super::arena_::ArenaFuture;
 use super::context_::MptpContext;
 use super::endpoint_::Endpoint;
 use super::handler_::box_future_;
 
-/// 中间件 `call` 返回的 future：分配在请求级 arena 里、类型擦除的 [`BumpBox`]。
+/// 中间件 `call` 返回的 future：分配在请求级 arena 里、类型擦除的 [`ArenaFuture`]。
 ///
 /// 不带 `Send`：与 [`TrEndpointHandler`](crate::TrEndpointHandler) 一致，future 链天然 `!Send`，`Send` 边界在分派层。
-pub type MiddlewareFuture<'f> =
-    Pin<BumpBox<'f, dyn Future<Output = Result<Option<Status>, ServeError>> + 'f>>;
+pub type MiddlewareFuture<'a, C> =
+    ArenaFuture<'a, <C as TrConfig>::Alloc, Result<Option<Status>, ServeError>>;
 
 /// 中间件的 `next` 回调：把控制权交给链上的下一环。
 ///
@@ -44,7 +43,7 @@ pub type MiddlewareFuture<'f> =
 /// [`Pipeline`] 在请求作用域、从请求级 arena 里构造，因此可以在中间件的 future 里跨
 /// `.await` 存活；中间件调用 `next(ctx)` 即放行，不调用即短路。
 pub type NextFn<'a, 'f, C, S = (), R = ()> =
-    dyn FnMut(&'a mut MptpContext<'f, C, S, R>) -> MiddlewareFuture<'a> + 'a;
+    dyn FnMut(&'a mut MptpContext<'f, C, S, R>) -> MiddlewareFuture<'a, C> + 'a;
 
 /// 一个横切策略中间件。
 ///
@@ -71,7 +70,7 @@ where
         endpoint: &'a Endpoint<C, S, R, M>,
         ctx: &'a mut MptpContext<'f, C, S, R>,
         next: &'a mut NextFn<'a, 'f, C, S, R>,
-    ) -> MiddlewareFuture<'a>;
+    ) -> MiddlewareFuture<'a, C>;
 }
 
 /// 一条有序的中间件链，末端接终端处理器。
@@ -155,7 +154,7 @@ where
     /// 之所以把回调放进请求级 arena 而不是栈上局部变量：`next` 的借用生命周期是 `'a`
     /// （中间件的 future 持有它跨 `.await`），而栈上局部变量活不到调用者选定的 `'a`。
     /// 闭包只捕获 `&self` / `&endpoint` / `usize`，没有 `Drop` 需要执行，因此用
-    /// [`Bump::alloc`](bumpalo::Bump::alloc) 放进 arena 不会遗漏析构。
+    /// [`Box::new_in`] 放进 arena 不会遗漏析构。
     async fn run_from_<'a, 'f>(
         &'a self,
         index: usize,
@@ -167,11 +166,20 @@ where
             return Result::Ok(Option::None);
         };
         let arena = ctx.arena();
-        let next = move |ctx: &'a mut MptpContext<'f, C, S, R>| -> MiddlewareFuture<'a> {
+        let next = move |ctx: &'a mut MptpContext<'f, C, S, R>| -> MiddlewareFuture<'a, C> {
             let arena = ctx.arena();
-            box_future_(arena, self.run_from_(index + 1usize, endpoint, ctx))
+            let fut: MiddlewareFuture<'a, C> =
+                box_future_::<C, _, _>(arena, self.run_from_(index + 1usize, endpoint, ctx));
+            fut
         };
-        let next: &'a mut NextFn<'a, 'f, C, S, R> = arena.alloc(next);
+        let next_box: Box<_, &'a C::Alloc> = Box::new_in(next, arena);
+        let (raw, alloc) = Box::into_raw_with_allocator(next_box);
+        let raw: *mut NextFn<'a, 'f, C, S, R> = raw;
+        // SAFETY: `raw` 仍指向同一个 arena box，只是把闭包指针拓宽成 trait object；
+        // 闭包没有 Drop 需要执行，内存随请求级 allocator 整体释放。
+        let next_box: Box<NextFn<'a, 'f, C, S, R>, &'a C::Alloc> =
+            unsafe { Box::from_raw_in(raw, alloc) };
+        let next: &'a mut NextFn<'a, 'f, C, S, R> = Box::leak(next_box);
         middleware.call(endpoint, ctx, next).await
     }
 }

@@ -149,3 +149,22 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
   `--features server` 均通过（顺带修正 `take_rx_` 的 `server` cfg：客户端
   `into_resp_suffix_async` 也需要它）。
 - `cargo clippy -p mptp_smux --all-targets` 无警告。
+
+## 5. 第 4 步：`mptp_serving` 的请求级 arena
+
+- `MptpContext::arena()` 从 `&'f bumpalo::Bump` 改为 `&'f C::Alloc`；请求级 `R` 也用
+  `Box::new_in(R::default(), &alloc)` 分配。
+- handler / middleware 的 future 改为 `ArenaFuture<'a, C::Alloc, O>`：
+  - 当前 nightly 的 `Pin<Box<dyn Future, &A>>` 要求 `A: StaticAllocator`；`SessionAlloc`
+    析构会释放 arena，不能虚假实现该 marker；
+  - `ArenaFuture` 内部是普通 `Box<dyn Future, &'a A>`，轮询时把内层 future 固定在其堆地址
+    上；盒子析构按同一个 allocator 归还。
+- `box_future_` 改为泛型 `C`，返回 `ArenaFuture`；`HandlerFuture` / `MiddlewareFuture` /
+  `NextFn` 的签名随之更新。
+- `serve_handler_` 的 `location` 从 `Global` 改为会话 allocator；405 的 `Allow` 头同样用
+  会话 allocator。
+- `rpc_core_v1` 作为 dev-dependency 暂时移除：它的 `Headers` / `RequestPrefix` 还没有
+  allocator 参数，编译不过。对应的元数据测试用 `cfg(any())` 暂停，`examples/im_session.rs`
+  用 `im-session-example` feature 关闭；下游迁移完成后恢复。
+- 验证：`cargo test -p mptp_serving`（14 passed）与
+  `cargo clippy -p mptp_serving --all-targets` 通过。
