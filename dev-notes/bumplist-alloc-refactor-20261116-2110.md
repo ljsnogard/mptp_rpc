@@ -188,8 +188,12 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
 - `Deref` / `DerefMut` / `TrBoxed` / `TrUnique`；
 - `Drop` 先 `drop_in_place`，再从 `BlockHeader` 的 cell 下标反推 `Page`，调用
   `Page::release_` 把块归还到页内；零尺寸 `T` 没有 `BlockHeader`，只运行析构；
-- `Page::release_` 负责块归还与空页重置；多余的空白页摘链 / 交还底层分配器仍由
-  `BumpListAlloc` 的回收路径负责（`BumpListBox` 不持有分配器引用，无法取链表锁）；
+- Page 头现在持有 type-erased 的 owner 指针（`BumpListAlloc`）与空页回收回调；
+  `Page::release_` 在 `live_ == 0` 时会释放页锁、通过 owner 升级到
+  `BumpListAlloc::cleanup_empty_page_`，因此**空页的摘链 / 交还底层分配器也能从
+  `BumpListBox` 的析构路径完成**，不需要 Box 持有分配器引用；
+- owner 指针最低位兼作页锁：分配器至少按指针宽度对齐，最低位为 0，省掉 Page 的独立
+  锁字段；
 - `SessionAlloc` 的 `TrArena::Ref` 也同步为 `BumpListBox<'alloc, T>`。
 
 这样 arena 里的值既不会泄漏 `Drop`，也不会把块永久占住；新增
