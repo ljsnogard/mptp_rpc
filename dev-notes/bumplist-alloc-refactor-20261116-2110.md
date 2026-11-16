@@ -183,10 +183,12 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
 初版 `denco_arena` 把 `Ref<T>` 定义成 `&'alloc mut T`，这只会借出一块内存，**不会**
 运行 `T` 的析构函数。按与 bumpalo `BumpBox` 相同的语义，改为 `bumplist_alloc::BumpListBox`：
 
-- 拥有 `NonNull<T>` 与 `&'alloc BumpListAlloc<A>`；
+- 只拥有 `NonNull<T>` 与 `PhantomData<&'alloc T>`；不带 `A` 参数，也不引用
+  `BumpListAlloc`；
 - `Deref` / `DerefMut` / `TrBoxed` / `TrUnique`；
-- `Drop` 先 `drop_in_place`，再用同一个 allocator `deallocate` 归还块；
-- `SessionAlloc` 的 `TrArena::Ref` 也同步为 `BumpListBox`。
+- `Drop` 只 `drop_in_place`；块不单独归还，随分配器析构整体释放（与 bumpalo
+  `BumpBox` 同一种所有权模型）；
+- `SessionAlloc` 的 `TrArena::Ref` 也同步为 `BumpListBox<'alloc, T>`。
 
 这样 arena 里的值既不会泄漏 `Drop`，也不会把块永久占住；新增
 `arena_value_runs_drop_` 测试验证析构函数恰好运行一次。
