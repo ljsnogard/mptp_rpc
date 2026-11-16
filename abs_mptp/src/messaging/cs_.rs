@@ -11,10 +11,15 @@
 
 use core::{borrow::Borrow, fmt::Debug};
 
-use crate::spec::{
-    self, NumOrStr, StdHeaderKey, StdHeaderVal, TrHeaders, TrNumOrStr, access_method::AccessMethod,
+use funty::Fundamental as _;
+
+use crate::{
+    spec::{
+        access_method::AccessMethod, self,
+        NumOrStr, StdHeaderKey, StdHeaderVal, TrHeaders, TrNumOrStr,
+    },
+    x_deps::funty,
 };
-use crate::x_deps::funty::Fundamental as _;
 
 /// 报文体按哪种方式传输。
 ///

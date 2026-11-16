@@ -58,6 +58,12 @@ where
     /// 底层 MPTP 客户端。
     client_: &'a MptpClient<C>,
 
+    /// 附加到本代理 unary 调用的请求头（缺省无）。
+    ///
+    /// 它只在**显式**调用 [`with_headers`](Self::with_headers) 后才有值：业务方法参数表
+    /// 不出现凭据，头由代理作为切面数据携带。
+    headers_: Option<Headers>,
+
     /// interface marker。
     _iface_: PhantomData<I>,
 }
@@ -74,6 +80,7 @@ where
     pub const fn new(client: &'a MptpClient<C>) -> Self {
         ClientProxy {
             client_: client,
+            headers_: Option::None,
             _iface_: PhantomData,
         }
     }
@@ -81,6 +88,33 @@ where
     /// 取底层客户端。
     pub const fn client(&self) -> &'a MptpClient<C> {
         self.client_
+    }
+
+    /// 给本代理附加额外请求头（消费式构建）。
+    ///
+    /// 这些头由宏生成的客户端代理传给
+    /// [`call_endpoint_typed_with_headers_async`]，因此对**本代理**上的所有 unary 方法
+    /// 生效，而方法签名不需要增加参数。典型用法是 `Authorization: Bearer <token>`。
+    ///
+    /// 协议必需的头（`Body_Transfer` / `Body_Type` / `Data_Type_Id` / `Accept`）在合并时
+    /// 后写，因此额外头不能覆盖它们。
+    ///
+    /// # Examples
+    ///
+    /// ```text
+    /// let headers = Headers::new();
+    /// let ticket = client.call::<AdminSvc>().with_headers(headers).login().await?;
+    /// ```
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers_ = Option::Some(headers);
+        self
+    }
+
+    /// 本代理附加的请求头（未设置时为 `None`）。
+    ///
+    /// 宏生成的客户端方法用它把代理级头传给 unary 调用入口。
+    pub fn headers(&self) -> Option<&Headers> {
+        self.headers_.as_ref()
     }
 }
 
@@ -349,16 +383,53 @@ where
     Req: TrEncodable + 'f,
     Rep: TrDecodableOwned + 'f,
 {
+    call_endpoint_typed_with_headers_async::<C, Req, Rep>(
+        client,
+        method,
+        path,
+        info,
+        request,
+        Option::None,
+    )
+}
+
+/// 发起一次带方法级类型头**和调用方额外请求头**的 unary 调用。
+///
+/// 与 [`call_endpoint_typed_async`] 的区别只有 `extra_headers`：它被合并进请求前缀，
+/// 使「凭据走请求头」这类横切数据不必出现在业务方法参数表里。合并顺序是「额外头先写、
+/// 协议头后写」，因此 `Body_Transfer` / `Body_Type` / `Data_Type_Id` / `Accept` 不会被
+/// 额外头覆盖。
+///
+/// `ClientProxy::with_headers` 配合宏生成的客户端代理会自动走本入口。
+///
+/// # Errors
+///
+/// 同 [`call_endpoint_typed_async`]。
+#[allow(clippy::needless_lifetimes)]
+pub fn call_endpoint_typed_with_headers_async<'f, C, Req, Rep>(
+    client: &'f MptpClient<C>,
+    method: AccessMethod,
+    path: &'static str,
+    info: &'static RpcDataTypeInfo,
+    request: Req,
+    extra_headers: Option<&Headers>,
+) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<Rep>> + 'f
+where
+    C: crate::client::TrRpcClientConfig + 'f,
+    Req: TrEncodable + 'f,
+    Rep: TrDecodableOwned + 'f,
+{
     EndpointCallTypedAsync::<'f, 'f, C, Req, Rep>::new(
         client,
         method,
         path.to_string(),
         info,
         request,
+        extra_headers.cloned(),
     )
 }
 
-/// [`call_endpoint_typed_async`] 的 step 函数。
+/// [`call_endpoint_typed_with_headers_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(EndpointCallTyped, pub(crate), new(pub(crate)))]
 async fn endpoint_call_typed_async_<'f, C, Req, Rep, K>(
@@ -367,6 +438,7 @@ async fn endpoint_call_typed_async_<'f, C, Req, Rep, K>(
     location: String,
     info: &'static RpcDataTypeInfo,
     request: Req,
+    extra_headers: Option<Headers>,
     cancel: K,
 ) -> RpcResult<Rep>
 where
@@ -376,6 +448,11 @@ where
     K: TrCancellationToken,
 {
     let mut headers = Headers::new();
+    if let Option::Some(extra) = extra_headers {
+        for (key, val) in extra.iter() {
+            headers.set(key.clone(), val.clone());
+        }
+    }
     headers.set_num(
         StdHeaderKey::Body_Transfer,
         StdHeaderVal::Body_Transfer_Chunked.into_inner(),

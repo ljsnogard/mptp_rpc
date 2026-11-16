@@ -34,6 +34,8 @@
 
 use alloc::string::ToString;
 
+use bumpalo::Bump;
+
 use abs_buff::{
     Demand, TrBuffFlush, TrBuffRead, TrBuffTryFlush, TrBuffTryWrite, TrBuffWrite,
     buffer::TrConsumerState,
@@ -79,6 +81,8 @@ where
     /// 共享的会话核心：两个半边、请求前缀、体边界与体进度。
     core_: SessionCore<ChannelTx<C>, ChannelRx<C>>,
 
+    bump_: Bump,
+
     /// 客户端侧的状态机。
     state_: SessionState,
 }
@@ -106,6 +110,7 @@ where
         };
         Result::Ok(MptpSession {
             core_: SessionCore::new_(request, plan, tx, rx),
+            bump_: Bump::new(),
             state_,
         })
     }
@@ -402,14 +407,12 @@ where
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
 {
     /// 回复体的读视图：一个类型，两种档位（由前缀决定）。
-    type RespBodyRead<'f>
-        = RespBodyRead<'f, C>
+    type RespBodyRead<'f> = RespBodyRead<'f, C>
     where
         Self: 'f;
 
     /// 响应续流的读视图：裸字节，两种 `try_into_*` 都交出同一个额度用不完的限长视图。
-    type RespSuffixRead<'f>
-        = RespSuffixRead<'f, C>
+    type RespSuffixRead<'f> = RespSuffixRead<'f, C>
     where
         Self: 'f;
 
@@ -419,21 +422,22 @@ where
         self.state_
     }
 
-    type SendReqBodyAsync<'f, R>
-        = SendRequestBodyAsync<'f, 'f, C, R>
+    type SendReqBodyAsync<'f, R> = SendRequestBodyAsync<'f, 'f, C, R>
     where
         R: 'f + TrBuffRead<u8> + TrConsumerState,
         Self: 'f;
 
-    fn send_req_body_async<'f, R>(&'f mut self, body: &'f mut R) -> Self::SendReqBodyAsync<'f, R>
+    fn send_req_body_async<'f, R>(
+        &'f mut self,
+        body: &'f mut R,
+    ) -> Self::SendReqBodyAsync<'f, R>
     where
         R: TrBuffRead<u8> + TrConsumerState,
     {
         SendRequestBodyAsync::new(self, body)
     }
 
-    type SendReqSuffixAsync<'f, R>
-        = SendRequestSuffixAsync<'f, 'f, C, R>
+    type SendReqSuffixAsync<'f, R> = SendRequestSuffixAsync<'f, 'f, C, R>
     where
         R: 'f + TrBuffRead<u8> + TrConsumerState,
         Self: 'f;
@@ -448,8 +452,7 @@ where
         SendRequestSuffixAsync::new(self, suffix)
     }
 
-    type RecvRespPrefixAsync<'f>
-        = SessionRecvRespPrefixAsync<'f, 'f, C>
+    type RecvRespPrefixAsync<'f> = SessionRecvRespPrefixAsync<'f, 'f, C>
     where
         Self: 'f;
 

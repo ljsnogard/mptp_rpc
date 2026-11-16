@@ -47,7 +47,7 @@ use super::{
 };
 
 /// 没有请求体。
-pub struct NoBody;
+pub struct NilBody;
 
 /// 已经序列化好的定长请求体。
 pub struct BytesBody<'a> {
@@ -147,7 +147,7 @@ impl<'a, T: 'a> TrMayCancel<'a> for ReadyMayCancel<T> {
     }
 }
 
-impl<C> TrBodySend<C> for NoBody
+impl<C> TrBodySend<C> for NilBody
 where
     C: TrConfig,
 {
@@ -249,7 +249,7 @@ where
 }
 
 /// 客户端请求 builder。
-pub struct RequestBuilder<'a, C, B = NoBody, S = NoSuffix>
+pub struct RequestBuilder<'a, C, B = NilBody, S = NoSuffix>
 where
     C: TrConfig,
 {
@@ -290,7 +290,7 @@ fn set_chunked_header_(prefix: &mut RequestPrefix) {
     );
 }
 
-impl<'a, C> RequestBuilder<'a, C, NoBody, NoSuffix>
+impl<'a, C> RequestBuilder<'a, C, NilBody, NoSuffix>
 where
     C: TrConfig,
 {
@@ -300,7 +300,7 @@ where
             client_: client,
             prefix_: prefix,
             dock_: Option::None,
-            body_: NoBody,
+            body_: NilBody,
             suffix_: NoSuffix,
         }
     }

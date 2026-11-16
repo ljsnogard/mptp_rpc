@@ -45,7 +45,7 @@ pub use crate::{
     client::{
         ClientProxy, DefaultRpcAllocConfig, ServiceSelector, TrRpcClientConfig, TrRpcClientExt,
         call_endpoint_async, call_endpoint_no_body_async, call_endpoint_typed_async,
-        open_pull_async, open_push_async,
+        call_endpoint_typed_with_headers_async, open_pull_async, open_push_async,
     },
     messaging::{RpcError, RpcResult, TrRpcInterface},
     serving::{

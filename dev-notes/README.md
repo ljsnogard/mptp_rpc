@@ -111,3 +111,25 @@
   下一会话实施 `rpc_svc_macro` Call 请求信封的交接提示词：基线、**哪些章节仍是现行
   设计、哪些是旧形状**、宏的 trait / `impl_of` 目标输出、`CC-01..CC-20` 验收、已知坑与
   推荐步骤；开头带有 demo 工作区未提交变更的警告。
+- [`rpc-client-headers-20261115-1600.md`](rpc-client-headers-20261115-1600.md)：
+  typed unary 客户端携带额外请求头的决策 + 实施记录：C1 / C2 / C3 选型，
+  `ClientProxy::with_headers` + `call_endpoint_typed_with_headers_async` 的公开 API、
+  宏生成代理的接线、合并顺序（额外头先写、协议头后写）、兼容性 / 迁移与验证。
+- [`rpc-session-cookie-proposal-20261116-0843.md`](rpc-session-cookie-proposal-20261116-0843.md)：
+  **提案草案（未实施）**：MPTP 会话与 Cookie 语义。把 demo 的「手动附头」升级为框架能力：
+  `mptp_wire::cookie`（解析 / 序列化）、`MptpClient` 连接级 `CookieJar`（自动处理
+  `Set-Cookie` / `Cookie`，Pull / Push / unary 一致）、`ServingSession` 待写回复头
+  （覆盖宏生成 Call 与 401）、`TrSessionStore` + `SessionMiddleware` + `IssueSession`
+  元数据；含 `SessionId` 约定、scope / 过期 / 单值 `Headers` 现状、兼容性、安全与分阶段测试。
+  另含 §12 扩展方案研究：固定 Dock 对作为会话——`DockBinding` 可保持；关闭 channel 是
+  **MPTP** 的决定（`ServingSession::finish_async` / `MptpSession` drop），不是 smux 的硬约束；
+  每请求 open/close 同一 pair 会吃 `Duplicate` / `WaitClose`（默认 5s、最少 1s），但**每会话
+  一条持久 channel + unary keep-alive** 可行：需要新增 MPTP keep-alive 约定（`Connection`
+  头 + 请求边界），顺序 unary 不需要新帧格式、也不需要改 `smux_v1`；限制是
+  Pull/Push/suffix 不能复用、单 channel 串行有 HOL blocking、30s 空闲超时需要心跳。
+  另含 §13 决策：**v1 不在 `#[rpc]` 宏里表达 Session / 授权**。授权留给服务端
+  router / `SessionMiddleware` / endpoint metadata，客户端只靠连接级 CookieJar 自动附
+  凭据，401/403 作为契约；宏保持“协议形状”职责。附 ASP.NET Core 的调研摘要
+  （`UseAuthentication` / `UseAuthorization` / `[Authorize]` / `SignInAsync` / policy
+  provider / result handler）、为什么不需要宏、服务端 / 客户端最小机制、收益与代价，
+  以及唯一建议的可选宏改动：通用 `install_into_with_metadata` hook。

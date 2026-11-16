@@ -29,6 +29,9 @@ mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2
 # 因此不需要 `abs_art_facade::Runtime`。后端的点亮是全图并集的，由**应用**（下游 crate）
 # 自己声明 `abs_art-facade/rt-*` 即可，不需要经本 crate 逐层转发。
 
+# 会话级 arena：MptpSession 用它的 boxed::Box 分配（带 Drop 语义，内存随 arena 释放）。
+bumpalo = { version = "3.20.3", features = ["boxed"] }
+
 [features]
 # 两端对等：同时编译客户端与服务端。
 default = ["client", "server"]

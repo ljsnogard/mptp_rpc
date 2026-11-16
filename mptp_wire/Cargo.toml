@@ -14,6 +14,7 @@ abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 abs_mptp = { path = "../abs_mptp" }
+abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git" }
 denco_macro = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
 gen_mcf2 = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 mp_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }

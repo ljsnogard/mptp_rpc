@@ -57,8 +57,6 @@ pub enum SessionState {
     Terminated,
 }
 
-
-
 /// 一个与对端之间的会话对象。通常一个会话就是围绕一个 abs_smux 概念里的
 /// channel 进行的通信过程。
 ///

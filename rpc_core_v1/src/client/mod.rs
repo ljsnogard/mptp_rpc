@@ -19,6 +19,6 @@ pub use alloc_config_::TrRpcClientAllocConfig;
 pub use config::{DefaultRpcAllocConfig, Dock, TrRpcClientConfig};
 pub use proxy_::{
     ClientProxy, ServiceSelector, TrRpcClientExt, call_endpoint_async, call_endpoint_no_body_async,
-    call_endpoint_typed_async, call_unary_async,
+    call_endpoint_typed_async, call_endpoint_typed_with_headers_async, call_unary_async,
 };
 pub use typed_::{open_pull_async, open_push_async};

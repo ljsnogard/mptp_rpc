@@ -814,8 +814,8 @@ impl VisitMut for SelfToSvc_ {
 /// - 多参方法的 `__Req_*` 位置字段结构体；
 /// - 请求枚举 `XxxServiceCall`（变体线上名 = 方法名）；
 /// - 每方法 `RpcDataTypeInfo`、方法表 `RpcServiceInfo`；
-/// - `ClientProxy` 的 trait impl（每方法构造枚举变体并调用
-///   `call_endpoint_typed_async`）。
+/// - `ClientProxy` 的 trait impl（每方法构造枚举变体，调用
+///   `call_endpoint_typed_with_headers_async`，把代理级请求头一并带上）。
 pub(crate) fn expand_service_(model: &ServiceModel_) -> syn::Result<zyn::Output> {
     let trait_item = service_trait_item_(model);
     let marker = service_marker_(model);
@@ -1110,12 +1110,13 @@ fn service_client_method_(model: &ServiceModel_, method: &CallMethodModel_) -> :
     quote! {
         #(#attrs)*
         #sig {
-            ::rpc_core_v1::client::call_endpoint_typed_async::<__rpc_c, _, #response_ty>(
+            ::rpc_core_v1::client::call_endpoint_typed_with_headers_async::<__rpc_c, _, #response_ty>(
                 self.client(),
                 ::rpc_core_v1::x_deps::abs_mptp::spec::access_method::AccessMethod::Call,
                 <#api as ::rpc_core_v1::messaging::TrRpcInterface>::PREFIX,
                 &#info,
                 #body,
+                self.headers(),
             )
         }
     }
