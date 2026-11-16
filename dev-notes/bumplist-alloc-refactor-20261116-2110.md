@@ -177,3 +177,16 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
   `LimitedReader::new(src, size)` 包住源，分块搬运不会读到声明长度之后。
 - 服务端：`sized_async` 超过上限时返回
   `ProtocolError::InvalidBodySize`，提示改用分块体，而不是静默写成 `u16::MAX`。
+
+## 7. 修正：`TrArena::Ref<T>` 必须是会 Drop 的 Box
+
+初版 `denco_arena` 把 `Ref<T>` 定义成 `&'alloc mut T`，这只会借出一块内存，**不会**
+运行 `T` 的析构函数。按与 bumpalo `BumpBox` 相同的语义，改为 `bumplist_alloc::BumpListBox`：
+
+- 拥有 `NonNull<T>` 与 `&'alloc BumpListAlloc<A>`；
+- `Deref` / `DerefMut` / `TrBoxed` / `TrUnique`；
+- `Drop` 先 `drop_in_place`，再用同一个 allocator `deallocate` 归还块；
+- `SessionAlloc` 的 `TrArena::Ref` 也同步为 `BumpListBox`。
+
+这样 arena 里的值既不会泄漏 `Drop`，也不会把块永久占住；新增
+`arena_value_runs_drop_` 测试验证析构函数恰好运行一次。
