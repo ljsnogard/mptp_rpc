@@ -188,10 +188,10 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
 - `Deref` / `DerefMut` / `TrBoxed` / `TrUnique`；
 - `Drop` 先 `drop_in_place`，再从 `BlockHeader` 的 cell 下标反推 `Page`，调用
   `Page::release_page_` 把块归还到页内；零尺寸 `T` 没有 `BlockHeader`，只运行析构；
-- `BumpListAlloc<A>` 拆成 `Box<BumpListCore>` 与地址固定的 `A`：Core 非泛型，持有页
-  链表、页大小、链表锁，以及**一份**类型擦除的 `PageBacking`（数据指针 + 建页/还页两个
-  单态化函数）。Page 只持有 `BumpListCore` 指针，不再每个 Page 保存函数指针，也不带
-  `A` 泛型；移动 `BumpListAlloc` 不会让 owner 失效；
+- `BumpListAlloc<A>` 内联非泛型 `BumpListCore` 与 `A`：Core 持有页链表、页大小、链表
+  锁以及建页/还页两个单态化函数指针。Core 保存一个整分配器自指针，函数用 `offset_of!`
+  从中取出 `A`；Page 只持有 Core 指针，不再每个 Page 保存函数指针，也不带 `A` 泛型。
+  没有 `Box`；Core 的整分配器自指针在每次分配 / 归还 / 析构前刷新。代价是创建第一个 Page 后分配器不能移动；
 - `Page::release_page_` 在 `live_ == 0` 时会释放页锁、直接调用
   `BumpListCore::cleanup_empty_page_`，因此**空页的摘链 / 交还底层分配器也能从
   `BumpListBox` 的析构路径完成**，不需要 Box 持有分配器引用；
