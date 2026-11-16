@@ -17,10 +17,7 @@
 //! Requests are `method + location + headers`; responses are `status + headers`. The
 //! location string and the header map are both allocated by `A`.
 
-use core::{
-    alloc::{Allocator, AllocatorClone},
-    fmt,
-};
+use core::{alloc::AllocatorClone, fmt};
 
 use abs_mptp::{
     messaging::{TrMsgPrefix, TrRequestPrefix, TrResponsePrefix},
@@ -50,7 +47,7 @@ use super::headers_::Headers;
 /// assert_eq!(prefix.method(), AccessMethod::Call);
 /// assert_eq!(prefix.location(), "/api/v1/customer/goods");
 /// ```
-pub struct RequestPrefix<A: Allocator> {
+pub struct RequestPrefix<A: AllocatorClone> {
     /// 访问方法。
     pub(crate) method_: AccessMethod,
 
@@ -75,7 +72,7 @@ impl<A: AllocatorClone> Clone for RequestPrefix<A> {
     }
 }
 
-impl<A: Allocator> fmt::Debug for RequestPrefix<A> {
+impl<A: AllocatorClone> fmt::Debug for RequestPrefix<A> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RequestPrefix")
@@ -86,7 +83,7 @@ impl<A: Allocator> fmt::Debug for RequestPrefix<A> {
     }
 }
 
-impl<A: Allocator> PartialEq for RequestPrefix<A> {
+impl<A: AllocatorClone> PartialEq for RequestPrefix<A> {
     fn eq(&self, other: &Self) -> bool {
         self.method_ == other.method_
             && *self.location_ == *other.location_
@@ -94,9 +91,9 @@ impl<A: Allocator> PartialEq for RequestPrefix<A> {
     }
 }
 
-impl<A: Allocator> Eq for RequestPrefix<A> {}
+impl<A: AllocatorClone> Eq for RequestPrefix<A> {}
 
-impl<A: Allocator> RequestPrefix<A> {
+impl<A: AllocatorClone> RequestPrefix<A> {
     /// 由已分配好的四部分构造；供本 crate 的线格式解码使用。
     ///
     /// Build from already allocated parts; used by this crate's wire decoder.
@@ -163,7 +160,7 @@ impl<A: AllocatorClone> RequestPrefix<A> {
     }
 }
 
-impl<A: Allocator> RequestPrefix<A> {
+impl<A: AllocatorClone> RequestPrefix<A> {
     /// 本请求使用的访问方法。
     pub const fn method(&self) -> AccessMethod {
         self.method_
@@ -195,7 +192,7 @@ impl<A: Allocator> RequestPrefix<A> {
     }
 }
 
-impl<A: Allocator + Clone> TrMsgPrefix for RequestPrefix<A> {
+impl<A: AllocatorClone> TrMsgPrefix for RequestPrefix<A> {
     type Headers<'f>
         = Headers<A>
     where
@@ -206,7 +203,7 @@ impl<A: Allocator + Clone> TrMsgPrefix for RequestPrefix<A> {
     }
 }
 
-impl<A: Allocator + Clone> TrRequestPrefix for RequestPrefix<A> {
+impl<A: AllocatorClone> TrRequestPrefix for RequestPrefix<A> {
     fn method(&self) -> AccessMethod {
         self.method_
     }
@@ -234,7 +231,7 @@ impl<A: Allocator + Clone> TrRequestPrefix for RequestPrefix<A> {
 ///
 /// assert_eq!(prefix.status(), Status::Ok);
 /// ```
-pub struct ResponsePrefix<A: Allocator> {
+pub struct ResponsePrefix<A: AllocatorClone> {
     /// 状态码。
     pub(crate) status_: Status,
 
@@ -255,7 +252,7 @@ impl<A: AllocatorClone> Clone for ResponsePrefix<A> {
     }
 }
 
-impl<A: Allocator> fmt::Debug for ResponsePrefix<A> {
+impl<A: AllocatorClone> fmt::Debug for ResponsePrefix<A> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ResponsePrefix")
@@ -265,15 +262,15 @@ impl<A: Allocator> fmt::Debug for ResponsePrefix<A> {
     }
 }
 
-impl<A: Allocator> PartialEq for ResponsePrefix<A> {
+impl<A: AllocatorClone> PartialEq for ResponsePrefix<A> {
     fn eq(&self, other: &Self) -> bool {
         self.status_ == other.status_ && self.headers_ == other.headers_
     }
 }
 
-impl<A: Allocator> Eq for ResponsePrefix<A> {}
+impl<A: AllocatorClone> Eq for ResponsePrefix<A> {}
 
-impl<A: Allocator> ResponsePrefix<A> {
+impl<A: AllocatorClone> ResponsePrefix<A> {
     /// 由已分配好的三部分构造；供本 crate 的线格式解码使用。
     ///
     /// Build from already allocated parts; used by this crate's wire decoder.
@@ -318,7 +315,7 @@ impl<A: AllocatorClone> ResponsePrefix<A> {
     }
 }
 
-impl<A: Allocator> ResponsePrefix<A> {
+impl<A: AllocatorClone> ResponsePrefix<A> {
     /// 本次回复的状态码。
     pub const fn status(&self) -> Status {
         self.status_
@@ -350,7 +347,7 @@ impl<A: Allocator> ResponsePrefix<A> {
     }
 }
 
-impl<A: Allocator + Clone> TrMsgPrefix for ResponsePrefix<A> {
+impl<A: AllocatorClone> TrMsgPrefix for ResponsePrefix<A> {
     type Headers<'f>
         = Headers<A>
     where
@@ -361,7 +358,7 @@ impl<A: Allocator + Clone> TrMsgPrefix for ResponsePrefix<A> {
     }
 }
 
-impl<A: Allocator + Clone> TrResponsePrefix for ResponsePrefix<A> {
+impl<A: AllocatorClone> TrResponsePrefix for ResponsePrefix<A> {
     fn status(&self) -> Status {
         self.status_
     }

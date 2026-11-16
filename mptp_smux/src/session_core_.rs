@@ -10,7 +10,7 @@
 //! progress. Directional state lives in `MptpSession` / `ServingSession`; the boundary,
 //! views and teardown primitives are implemented once.
 
-use core::alloc::Allocator;
+use core::alloc::AllocatorClone;
 
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_cancel::TrCancellationToken;
@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// 一次会话的共享核心。
-pub(crate) struct SessionCore<Tx, Rx, A: Allocator> {
+pub(crate) struct SessionCore<Tx, Rx, A: AllocatorClone> {
     /// 本次请求的前缀。服务端只用体边界，不读前缀，因此允许在 `server`-only 构建里
     /// 保留这个字段。
     #[allow(dead_code)]
@@ -43,7 +43,7 @@ pub(crate) struct SessionCore<Tx, Rx, A: Allocator> {
     body_: BodyState,
 }
 
-impl<Tx, Rx, A: Allocator> SessionCore<Tx, Rx, A> {
+impl<Tx, Rx, A: AllocatorClone> SessionCore<Tx, Rx, A> {
     /// 由「请求前缀 + 体边界 + 两个半边」构造。
     pub(crate) fn new_(request: RequestPrefix<A>, body_plan: BodyPlan, tx: Tx, rx: Rx) -> Self {
         SessionCore {
