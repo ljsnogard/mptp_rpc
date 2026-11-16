@@ -38,12 +38,7 @@ pub trait TrHeaders {
     type Key: TrNumOrStr<NumType: Into<StdHeaderKey>>;
 
     /// 头的值类型。
-    ///
-    /// 条目按值取用，通用实现需要 `Clone` 一份值来判断它是数字还是文本。
-    ///
-    /// The header value type. Entries are handled by value, so generic helpers need
-    /// `Clone` to inspect whether a value is numeric or textual.
-    type Val: TrNumOrStr<NumType: Into<StdHeaderVal>> + Clone;
+    type Val: TrNumOrObj<NumType: Into<StdHeaderKey>>;
 
     /// 一次查询 / 遍历交出的条目类型：它同时能借出键与值。
     ///
@@ -261,15 +256,6 @@ impl StdHeaderVal {
     /// The standard `Body_Type` value: the body is JSON.
     pub const Mime_Body_Type_Json   : StdHeaderVal = StdHeaderVal(0x02);
 
-    /// `Body_Transfer` 的标准取值：报文体按**分块**方式传输。
-    ///
-    /// 每个块自带 2 字节大端长度前缀，以长度 `0` 的块结束；总长不写在 `Body_Size` 里。
-    ///
-    /// The standard `Body_Transfer` value: the body is transferred in **chunks**. Each
-    /// chunk carries its own 2-byte big-endian length prefix and a zero-length chunk ends
-    /// the body; the total length is not declared in `Body_Size`.
-    pub const Body_Transfer_Chunked  : StdHeaderVal = StdHeaderVal(0x20);
-
     /// 表明客户端的主要目的是调用 RPC
     ///
     /// Signals that the client's main purpose is invoking RPC.
@@ -279,6 +265,15 @@ impl StdHeaderVal {
     ///
     /// Signals that the client's main purpose is proxying.
     pub const User_Proxy_Client     : StdHeaderVal = StdHeaderVal(0x11);
+
+    /// `Body_Transfer` 的标准取值：报文体按**分块**方式传输。
+    ///
+    /// 每个块自带 2 字节大端长度前缀，以长度 `0` 的块结束；总长不写在 `Body_Size` 里。
+    ///
+    /// The standard `Body_Transfer` value: the body is transferred in **chunks**. Each
+    /// chunk carries its own 2-byte big-endian length prefix and a zero-length chunk ends
+    /// the body; the total length is not declared in `Body_Size`.
+    pub const Body_Transfer_Chunked  : StdHeaderVal = StdHeaderVal(0x20);
 }
 
 impl StdHeaderVal {
@@ -296,6 +291,7 @@ impl From<u16> for StdHeaderVal {
     }
 }
 
+/// 通常用于 Header Key。
 pub trait TrNumOrStr {
     type NumType: funty::Unsigned;
     type StrType: Borrow<str>;
@@ -306,6 +302,27 @@ pub trait TrNumOrStr {
 
     fn try_match_str(self) -> Result<Self::StrType, Self::NumType>;
 }
+
+/// 通常用于支持 Cookie, MPTP 不鼓励把 Cookie 写成原始的 string 而是按照 Messagepack 格式
+/// 编码成定长的字节流。
+pub trait TrNumOrObj {
+    type NumType: funty::Unsigned;
+    type ObjType: TrTypedEnvelope;
+
+    fn as_num_or_obj<'f>(&'f self) -> NumOrObj<Self::NumType, &'f [u8]>;
+
+    fn try_match_num(self) -> Result<Self::NumType, Self::ObjType>;
+
+    fn try_match_obj(self) -> Result<Self::ObjType, Self::NumType>;
+}
+
+/// 将数据结构打包成定长的 Messagepack 字节流，并将类型信息以 type_id 的形式预告。
+pub trait TrTypedEnvelope {
+    fn type_id(&self) -> u32;
+
+    fn data(&self) -> &[u8];
+}
+
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum NumOrStr<N, S>
@@ -375,5 +392,79 @@ where
             Self::Str(s) => Result::Ok(s),
             Self::Num(n) => Result::Err(n),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum NumOrObj<N, B>
+where
+    N: funty::Unsigned,
+    B: Borrow<[u8]>,
+{
+    Num(N),
+    Obj(ObjEnvelope<B>),
+}
+
+impl<N, B> TrNumOrObj for NumOrObj<N, B>
+where
+    N: funty::Unsigned,
+    B: Borrow<[u8]>,
+{
+    type NumType = N;
+    type ObjType = ObjEnvelope<B>;
+
+    fn as_num_or_obj<'f>(&'f self) -> NumOrObj<Self::NumType, &'f [u8]> {
+        match self {
+            NumOrObj::Num(n) => NumOrObj::Num(*n),
+            NumOrObj::Obj(o) => NumOrObj::Obj(o.as_ref())
+        }
+    }
+
+    fn try_match_num(self) -> Result<Self::NumType, Self::ObjType> {
+        match self {
+            NumOrObj::Num(n) => Result::Ok(n),
+            NumOrObj::Obj(e) => Result::Err(e),
+        }
+    }
+
+    fn try_match_obj(self) -> Result<Self::ObjType, Self::NumType> {
+        match self {
+            NumOrObj::Obj(o) => Result::Ok(o),
+            NumOrObj::Num(n) => Result::Err(n),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ObjEnvelope<B>
+where
+    B: Borrow<[u8]>,
+{
+    type_: u32,
+    data_: B,
+}
+
+impl<B> ObjEnvelope<B>
+where
+    B: Borrow<[u8]>,
+{
+    fn as_ref(&self) -> ObjEnvelope<&[u8]> {
+        ObjEnvelope {
+            type_: self.type_,
+            data_: self.data_.borrow(),
+        }
+    }
+}
+
+impl<B> TrTypedEnvelope for ObjEnvelope<B>
+where
+    B: Borrow<[u8]>,
+{
+    fn type_id(&self) -> u32 {
+        self.type_
+    }
+
+    fn data(&self) -> &[u8] {
+        self.data_.borrow()
     }
 }

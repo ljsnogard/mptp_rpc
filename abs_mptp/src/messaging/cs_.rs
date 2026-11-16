@@ -16,7 +16,7 @@ use funty::Fundamental as _;
 use crate::{
     spec::{
         access_method::AccessMethod, self,
-        NumOrStr, StdHeaderKey, StdHeaderVal, TrHeaders, TrNumOrStr,
+        NumOrObj, NumOrStr, StdHeaderKey, StdHeaderVal, TrHeaders, TrNumOrStr, TrNumOrObj,
     },
     x_deps::funty,
 };
@@ -61,12 +61,12 @@ pub trait TrMsgPrefix {
     /// 本前缀携带的头表类型。
     ///
     /// The header-map type carried by this prefix.
-    type Headers: spec::TrHeaders;
+    type Headers<'f>: spec::TrHeaders where Self: 'f;
 
     /// 取头表；没有头时返回 `None`。
     ///
     /// The header map, or `None` when the message carries no headers.
-    fn headers(&self) -> Option<&Self::Headers>;
+    fn headers(&self) -> Option<&Self::Headers<'_>>;
 
     /// 本条报文的体按哪种方式传输。
     ///
@@ -111,13 +111,12 @@ pub trait TrMsgPrefix {
         }
 
         if let Option::Some(value) = headers.try_get_std_header(StdHeaderKey::Body_Transfer) {
-            let value = value.clone();
-            let chunked = match TrNumOrStr::into(value) {
-                NumOrStr::Num(num) => {
+            let chunked = match value.as_num_or_obj() {
+                NumOrObj::Num(num) => {
                     let code: StdHeaderVal = num.into();
                     code == StdHeaderVal::Body_Transfer_Chunked
                 }
-                NumOrStr::Str(text) => text.borrow().trim().eq_ignore_ascii_case("chunked"),
+                NumOrObj::Obj(text) => text.borrow().trim().eq_ignore_ascii_case("chunked"),
             };
             if chunked {
                 return BodySize::ChunkedData;
