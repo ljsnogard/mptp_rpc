@@ -1,5 +1,9 @@
 # 新会话提示词：mptp_rpc 的 BumpListAlloc / allocator 重构续作
 
+> **状态（2026-11-17）：本提示词已执行完毕。** 最终形状、迁移清单与验证结果见
+> `bumplist-alloc-refactor-20261116-2110.md` §8；下面第 3 节的「未完成」列表只作历史
+> 记录，已全部完成（`SessionAlloc` 句柄 + 每个所有者自持 arena，`C::Alloc` 已删除）。
+>
 > 生成时间：2026-11-16 22:43（Asia/Shanghai）
 > 当前 `mptp_rpc` 分支：`feat/bumplist_alloc`，HEAD `4f239b5`
 > 当前 `bumplist-alloc`：`main` 两个提交，HEAD `1b22f17`

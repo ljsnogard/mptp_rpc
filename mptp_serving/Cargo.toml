@@ -31,14 +31,7 @@ cantok_rs = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 [dev-dependencies]
 # 单元测试用 tokio 驱动会话；库本体不选运行时。
 tokio = { version = "1", features = ["macros", "rt"] }
-# `rpc_core_v1` 的迁移尚未完成：等它的 Headers / Prefix 类型补上 allocator 参数后再恢复
-# 「类型元信息标记挂进 EndpointMetadata」那条测试的 dev-dependency。
+# 元数据测试与 `im_session` 示例需要 `rpc_core_v1` 的类型标记；它已迁移到
+# `SessionAlloc` 前缀，可以正常作为 dev-dependency 编译。
+rpc_core_v1 = { path = "../rpc_core_v1" }
 
-[features]
-# `examples/im_session.rs` 依赖尚未迁移到 allocator 泛型的 `rpc_core_v1`；默认关闭，
-# 下游迁移完成后删除本 feature 与下面的 `required-features`。
-im-session-example = []
-
-[[example]]
-name = "im_session"
-required-features = ["im-session-example"]

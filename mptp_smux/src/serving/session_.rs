@@ -30,6 +30,7 @@ use mptp_wire::{
 
 use super::config::{ChannelRx, ChannelTx, TrConfig};
 use crate::{
+    SessionAlloc,
     body_::{BodyPlan, BodyRead, BodyState, SuffixRead},
     copy_::{CopyError, copy_all_async_, copy_sized_async_, drain_to_eof_async_},
     error_::{ProtocolError, ServeError, StateError},
@@ -48,8 +49,8 @@ pub type RequestSuffixRead<'f, C> = SuffixRead<'f, ChannelRx<C>>;
 pub type ServingParts<C> = (
     ChannelTx<C>,
     ChannelRx<C>,
-    Headers<<C as TrConfig>::Alloc>,
-    String<<C as TrConfig>::Alloc>,
+    Headers<SessionAlloc>,
+    String<SessionAlloc>,
 );
 
 /// 一条入向子流上的服务端会话。
@@ -58,19 +59,19 @@ where
     C: TrConfig,
 {
     /// 共享核心：两个半边、请求前缀、体边界与体进度。
-    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, C::Alloc>,
+    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, SessionAlloc>,
 
     /// 本次请求的方法。
     method_: AccessMethod,
 
     /// 本次请求的位置。
-    location_: String<C::Alloc>,
+    location_: String<SessionAlloc>,
 
     /// 请求头表的可变副本；handler 的修改不写回前缀。
-    headers_: Headers<C::Alloc>,
+    headers_: Headers<SessionAlloc>,
 
     /// 已经写出的回复前缀。
-    resp_prefix_: Option<ResponsePrefix<C::Alloc>>,
+    resp_prefix_: Option<ResponsePrefix<SessionAlloc>>,
 
     /// 服务端状态机。
     state_: ServingState,
@@ -79,7 +80,7 @@ where
     responded_: bool,
 
     /// 会话从 servlet 克隆来的分配器句柄。
-    alloc_: C::Alloc,
+    alloc_: SessionAlloc,
 }
 
 impl<C> ServingSession<C>
@@ -88,10 +89,10 @@ where
 {
     /// 由「已解码的请求前缀 + 两个半边」构造。
     pub(crate) fn new_(
-        prefix: RequestPrefix<C::Alloc>,
+        prefix: RequestPrefix<SessionAlloc>,
         tx: ChannelTx<C>,
         rx: ChannelRx<C>,
-        alloc: C::Alloc,
+        alloc: SessionAlloc,
     ) -> Result<Self, ServeError> {
         let plan = BodyPlan::from_info_(prefix.body_info()).map_err(ServeError::Protocol)?;
         let method_ = prefix.method();
@@ -123,22 +124,22 @@ where
     }
 
     /// 本会话持有的分配器句柄。
-    pub fn allocator(&self) -> &C::Alloc {
+    pub fn allocator(&self) -> &SessionAlloc {
         &self.alloc_
     }
 
     /// 请求头表的可变副本。
-    pub fn headers(&self) -> &Headers<C::Alloc> {
+    pub fn headers(&self) -> &Headers<SessionAlloc> {
         &self.headers_
     }
 
     /// 可变请求头表。
-    pub fn headers_mut(&mut self) -> &mut Headers<C::Alloc> {
+    pub fn headers_mut(&mut self) -> &mut Headers<SessionAlloc> {
         &mut self.headers_
     }
 
     /// 已经写出的回复前缀。
-    pub fn sent_response_prefix(&self) -> Option<&ResponsePrefix<C::Alloc>> {
+    pub fn sent_response_prefix(&self) -> Option<&ResponsePrefix<SessionAlloc>> {
         self.resp_prefix_.as_ref()
     }
 
@@ -171,7 +172,10 @@ where
     }
 
     /// 用给定的回复前缀构造 helper。
-    pub fn response_prefix(&mut self, prefix: ResponsePrefix<C::Alloc>) -> ResponseBuilder<'_, C> {
+    pub fn response_prefix(
+        &mut self,
+        prefix: ResponsePrefix<SessionAlloc>,
+    ) -> ResponseBuilder<'_, C> {
         ResponseBuilder {
             session_: self,
             prefix_: prefix,
@@ -350,7 +354,7 @@ where
     session_: &'a mut ServingSession<C>,
 
     /// 待写出的回复前缀。
-    prefix_: ResponsePrefix<C::Alloc>,
+    prefix_: ResponsePrefix<SessionAlloc>,
 }
 
 impl<'a, C> ResponseBuilder<'a, C>
@@ -360,10 +364,35 @@ where
     /// 追加 / 覆盖一个回复头。
     pub fn header(
         &mut self,
-        key: impl Into<HeaderKey<C::Alloc>>,
-        val: HeaderVal<C::Alloc>,
+        key: impl Into<HeaderKey<SessionAlloc>>,
+        val: HeaderVal<SessionAlloc>,
     ) -> &mut Self {
         self.prefix_.headers_mut().set(key, val);
+        self
+    }
+
+    /// 追加 / 覆盖一个文本形态的回复头；值由本会话的 arena 分配。
+    pub fn header_text(
+        &mut self,
+        key: impl Into<HeaderKey<SessionAlloc>>,
+        text: impl AsRef<str>,
+    ) -> &mut Self {
+        let alloc = self.prefix_.allocator().clone();
+        self.prefix_
+            .headers_mut()
+            .set(key, HeaderVal::from_text(text, alloc));
+        self
+    }
+
+    /// 追加 / 覆盖一个**按名字**给出的文本回复头。
+    ///
+    /// 键与值都由本会话的 arena 分配；调用者不需要知道 allocator 类型。
+    pub fn header_text_named(&mut self, name: &str, text: impl AsRef<str>) -> &mut Self {
+        let alloc = self.prefix_.allocator().clone();
+        self.prefix_.headers_mut().set(
+            HeaderKey::from_text(name, alloc.clone()),
+            HeaderVal::from_text(text, alloc),
+        );
         self
     }
 
@@ -500,7 +529,7 @@ where
 /// 写回复前缀，并标记为已回复。
 async fn write_response_prefix_inner_<C, K>(
     session: &mut ServingSession<C>,
-    prefix: ResponsePrefix<C::Alloc>,
+    prefix: ResponsePrefix<SessionAlloc>,
     cancel: K,
 ) -> Result<(), ServeError>
 where

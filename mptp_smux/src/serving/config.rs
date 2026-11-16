@@ -23,9 +23,6 @@
 //
 // `MuxCfg` 也在其中：工厂实现者要写 `type Ctx<'a> = ServingPrepCtx<'a, MuxCfg<MyCfg>>`，
 // 拿不到它就写不出那个 GAT。
-use core::alloc::AllocatorClone;
-
-use abs_denco::de::{TrAllocSource, TrArena};
 pub use abs_mptp::serving::config::{
     ChannelHandle, ChannelRx, ChannelTx, Dock, DockBinding, Listener, MuxCfg, MuxConn, ReqPrefix,
     RespPrefix, TrConfig as TrMptpServConfig,
@@ -33,6 +30,7 @@ pub use abs_mptp::serving::config::{
 
 use super::prep_ctx_::ServingPrepCtx;
 use crate::{
+    SessionAlloc,
     messaging::{Headers, RequestPrefix, ResponsePrefix},
     ring_prepare_::TrPrepFactory,
 };
@@ -53,21 +51,12 @@ pub trait TrConfig
 where
     Self: Sized
         + TrMptpServConfig<
-            ReqPrefix = RequestPrefix<<Self as TrConfig>::Alloc>,
-            RespPrefix = ResponsePrefix<<Self as TrConfig>::Alloc>,
-            ReqHeaders = Headers<<Self as TrConfig>::Alloc>,
-            RespHeaders = Headers<<Self as TrConfig>::Alloc>,
+            ReqPrefix = RequestPrefix<SessionAlloc>,
+            RespPrefix = ResponsePrefix<SessionAlloc>,
+            ReqHeaders = Headers<SessionAlloc>,
+            RespHeaders = Headers<SessionAlloc>,
         >,
 {
-    /// 服务端 / 会话共享的分配器句柄。
-    ///
-    /// 与客户端那份相同：`Clone + 'static`，servlet 持有一份，每个 `ServingSession`
-    /// 克隆一份。`SessionAlloc` 是本 crate 提供的实现。
-    type Alloc: AllocatorClone
-        + 'static
-        + for<'a> TrArena<'a>
-        + for<'a> TrAllocSource<'a, Self::Alloc>;
-
     /// 默认的 ring 准备**工厂类型**。
     ///
     /// 声明的是类型，不是实例：工厂由 `mptp_smux` 在**每条**入向子流裁决前用环境现场构造

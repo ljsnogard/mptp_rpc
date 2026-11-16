@@ -10,19 +10,21 @@
 
 use core::future::Future;
 
-use mptp_smux::{ServeError, serving::config::TrConfig};
+use mptp_smux::{ServeError, SessionAlloc};
 
 use super::{
     arena_::{ArenaFuture, arena_future_},
     context_::MptpContext,
 };
 
-/// handler 返回的 future：分配在会话 allocator 里、类型擦除的 arena box。
+/// handler 返回的 future：分配在请求级 arena 里、类型擦除的 arena box。
 ///
 /// 不带 `Send`：与设计一致，future 链天然 `!Send`，`Send` 边界在分派层。
 ///
-/// The future returned by a handler: a type-erased box allocated in the session's allocator.
-pub type HandlerFuture<'a, A> = ArenaFuture<'a, A, Result<(), ServeError>>;
+/// The future returned by a handler: a type-erased box allocated in the request-scoped
+/// arena. The allocator handle is owned by the future, so the handler does not borrow the
+/// context in the future's allocator type.
+pub type HandlerFuture<'a> = ArenaFuture<'a, Result<(), ServeError>>;
 
 /// 一个路由目标：只做业务。
 ///
@@ -31,36 +33,30 @@ pub type HandlerFuture<'a, A> = ArenaFuture<'a, A, Result<(), ServeError>>;
 ///
 /// 对象安全：返回类型是类型擦除的 arena box（[`HandlerFuture`]），因此可以放进
 /// [`alloc::sync::Arc<dyn TrEndpointHandler>`](alloc::sync::Arc)。future 从 [`MptpContext`]
-/// 自带的请求级 allocator 分配，不产生 Global 堆分配。
+/// 自带的请求级 arena 分配，不产生 Global 堆分配。
 ///
 /// 注意：返回的 future **不带 `Send`**（见 integration-decisions 的 !Send 结论）——
 /// `gen_mcf2` 生成的带高阶类型的 future 无法被编译器穿透，future 链天然 `!Send`，`Send`
 /// 边界放在分派层，不在 handler / 中间件这一层。
 pub trait TrEndpointHandler<C, S = (), R = ()>: Send + Sync
 where
-    C: TrConfig,
+    C: mptp_smux::serving::config::TrConfig,
 {
     /// 处理一次已完成路由的请求。
     ///
     /// `'a` 是本次借用的生命周期，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，
     /// 这样调用方可以在一次 `.await` 之后重新借用 `ctx`（中间件链的关键）。
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S, R>,
-    ) -> HandlerFuture<'a, C::Alloc>;
+    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a>;
 }
 
-/// 把 future 分配进请求级 allocator，返回类型擦除的 arena box。
+/// 把 future 分配进请求级 arena，返回类型擦除的 arena box。
 ///
-/// 终端处理器 / 中间件先经 [`MptpContext::arena`] 取出 allocator 句柄（`&'f C::Alloc`），
-/// 构造好 future 后交给本函数；本函数把借用收窄到 `'a` 再分配，避免 `Box<'f, F>` 要求
-/// `F: 'f`（future 只捕获 `'a` 数据）。`O` 是 future 的输出类型，泛型以同时服务 handler
-/// 与中间件。
-pub fn box_future_<'a, 'f, C, F, O>(arena: &'f C::Alloc, fut: F) -> ArenaFuture<'a, C::Alloc, O>
+/// 终端处理器 / 中间件先经 [`MptpContext::arena`] 取出 allocator 句柄克隆，构造好 future
+/// 后交给本函数；allocator 句柄随 future 一起持有，因此 future 的 `'a` 只描述它捕获的
+/// 数据，不要求 `&MptpContext` 活到 `'a`。
+pub fn box_future_<'a, F, O>(arena: SessionAlloc, fut: F) -> ArenaFuture<'a, O>
 where
-    C: TrConfig,
     F: Future<Output = O> + 'a,
-    'f: 'a,
 {
     arena_future_(arena, fut)
 }

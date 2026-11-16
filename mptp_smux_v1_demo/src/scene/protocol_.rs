@@ -14,13 +14,14 @@
 //! Only the business contract lives here: URIs, header keys, denco types and codecs.
 //! The suffix stream is raw bytes; every event is one self-describing denco value.
 
+use core::alloc::AllocatorClone;
 use std::sync::Arc;
 
 use abs_buff::TrBuffRead;
 use abs_cancel::NonCancellableToken;
 use abs_denco::{de::TrDecodableOwned, ser::TrEncodable};
 use mp_denco::{MpDecoder, MpEncoder};
-use mptp_wire::HeaderKey;
+use mptp_wire::{HeaderKey, Headers};
 
 /// 一颗行星的稳定标识。
 pub type PlanetId = u64;
@@ -47,10 +48,10 @@ pub const K_SCENE_UNSUBSCRIBE: &str = "/scene/unsubscribe";
 pub const K_PLANET_URI_PREFIX: &str = "/scene/planets/";
 
 /// `Head /scene/planets` 的行星数量头（临时自定义键）。
-pub const K_HDR_PLANET_COUNT: HeaderKey = HeaderKey::from_num(0x0090);
+pub const K_HDR_PLANET_COUNT: u16 = 0x0090;
 
 /// `Head /scene/planets` 的目录版本头（临时自定义键）。
-pub const K_HDR_DIRECTORY_VERSION: HeaderKey = HeaderKey::from_num(0x0091);
+pub const K_HDR_DIRECTORY_VERSION: u16 = 0x0091;
 
 /// 行星数量头的文本名。
 pub const K_HDR_PLANET_COUNT_NAME: &str = "x-planet-count";
@@ -464,8 +465,10 @@ pub async fn encode_event_async_(event: &PlanetEvent) -> Result<Arc<[u8]>, Scene
 }
 
 /// 把头值读成 `u64`（文本形态解析十进制，数字形态直接转换）。
-pub fn header_u64_(headers: &mptp_wire::Headers, key: HeaderKey) -> Option<u64> {
-    let value = headers.try_get(key)?;
+///
+/// `key` 是裸 `u16`：头键常量不携带 allocator，查询时再按头表自身的 allocator 构造键。
+pub fn header_u64_<A: AllocatorClone>(headers: &Headers<A>, key: u16) -> Option<u64> {
+    let value = headers.try_get(HeaderKey::from_num(key))?;
     value
         .as_text()
         .and_then(|text| text.trim().parse::<u64>().ok())

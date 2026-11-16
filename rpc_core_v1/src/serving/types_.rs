@@ -15,16 +15,18 @@
 //! headers in one place.
 
 use abs_mptp::spec::{Status, access_method::AccessMethod};
-use mptp_smux::serving::{ResponseBuilder, ServingSession, config::TrConfig};
-use mptp_wire::Headers;
+use mptp_smux::{
+    SessionAlloc,
+    serving::{ResponseBuilder, ServingSession, config::TrConfig},
+};
+use mptp_wire::{Headers, ResponsePrefix};
 
 pub use crate::stream::{
     AcceptType, BodyCodec, DataTypeId, RpcDataTypeInfo, RpcEndpointInfo, RpcMethodInfo,
     RpcServiceInfo, TrDataTypeId, TypeHeaderError, TypePolicy, TypeRejection,
-    apply_request_type_headers,
-    apply_response_type_headers, read_accept, read_body_codec, read_data_type_id,
-    validate_request_types, validate_response_types, write_accept, write_body_codec,
-    write_data_type_id,
+    apply_request_type_headers, apply_response_type_headers, read_accept, read_body_codec,
+    read_data_type_id, validate_request_types, validate_response_types, write_accept,
+    write_body_codec, write_data_type_id,
 };
 use crate::x_deps::{abs_mptp, mptp_smux, mptp_wire};
 
@@ -57,11 +59,12 @@ pub fn typed_response<'a, C>(
 where
     C: TrConfig + 'a,
 {
-    let mut headers = Headers::new_in();
+    let alloc = session.allocator().clone();
+    let mut headers = Headers::<SessionAlloc>::new_in(alloc.clone());
     apply_response_type_headers(&mut headers, method, info);
-    let mut builder = session.response(status);
-    for (key, val) in headers.iter() {
-        builder.header(key.clone(), val.clone());
-    }
-    builder
+    session.response_prefix(ResponsePrefix::with_headers(
+        status,
+        Option::Some(headers),
+        alloc,
+    ))
 }

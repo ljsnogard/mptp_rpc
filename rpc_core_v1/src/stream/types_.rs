@@ -19,7 +19,7 @@ use alloc::{
     format,
     string::{String, ToString},
 };
-use core::{fmt, str::FromStr};
+use core::{alloc::AllocatorClone, fmt, str::FromStr};
 
 use abs_mptp::spec::{Status, StdHeaderKey, access_method::AccessMethod};
 use mptp_wire::Headers;
@@ -105,9 +105,11 @@ impl FromStr for DataTypeId {
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let text = text.trim();
-        let raw = mptp_wire::HeaderVal::<String>::from_text(text)
-            .as_u64()
-            .ok_or_else(|| TypeHeaderError::MalformedDataTypeId(text.to_string()))?;
+        let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            Option::Some(hex) => u64::from_str_radix(hex, 16u32),
+            Option::None => text.parse::<u64>(),
+        };
+        let raw = parsed.map_err(|_| TypeHeaderError::MalformedDataTypeId(text.to_string()))?;
         DataTypeId::new(raw).ok_or_else(|| TypeHeaderError::MalformedDataTypeId(text.to_string()))
     }
 }
@@ -396,7 +398,9 @@ impl core::error::Error for TypeHeaderError {}
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 读取 `Body_Type`；头缺失返回 `None`。
-pub fn read_body_codec(headers: &Headers) -> Result<Option<BodyCodec>, TypeHeaderError> {
+pub fn read_body_codec<A: AllocatorClone>(
+    headers: &Headers<A>,
+) -> Result<Option<BodyCodec>, TypeHeaderError> {
     let Some(val) = headers.try_get_val(StdHeaderKey::Body_Type) else {
         return Result::Ok(Option::None);
     };
@@ -416,7 +420,7 @@ pub fn read_body_codec(headers: &Headers) -> Result<Option<BodyCodec>, TypeHeade
 }
 
 /// 写 `Body_Type`：有标准数字用数字，否则写 MIME。
-pub fn write_body_codec(headers: &mut Headers, codec: BodyCodec) {
+pub fn write_body_codec<A: AllocatorClone>(headers: &mut Headers<A>, codec: BodyCodec) {
     match codec.standard_code() {
         Option::Some(code) => headers.set_num(StdHeaderKey::Body_Type, code),
         Option::None => headers.set_text(StdHeaderKey::Body_Type, codec.mime()),
@@ -424,7 +428,9 @@ pub fn write_body_codec(headers: &mut Headers, codec: BodyCodec) {
 }
 
 /// 读取 `Data_Type_Id`；头缺失返回 `None`，头存在但值非法返回错误。
-pub fn read_data_type_id(headers: &Headers) -> Result<Option<DataTypeId>, TypeHeaderError> {
+pub fn read_data_type_id<A: AllocatorClone>(
+    headers: &Headers<A>,
+) -> Result<Option<DataTypeId>, TypeHeaderError> {
     let Some(val) = headers.try_get_val(StdHeaderKey::Data_Type_Id) else {
         return Result::Ok(Option::None);
     };
@@ -438,12 +444,14 @@ pub fn read_data_type_id(headers: &Headers) -> Result<Option<DataTypeId>, TypeHe
 }
 
 /// 写 `Data_Type_Id`（固定 `0x` 十六进制文本）。
-pub fn write_data_type_id(headers: &mut Headers, id: DataTypeId) {
+pub fn write_data_type_id<A: AllocatorClone>(headers: &mut Headers<A>, id: DataTypeId) {
     headers.set_text(StdHeaderKey::Data_Type_Id, id.to_string());
 }
 
 /// 读取 `Accept`；头缺失返回 `None`。
-pub fn read_accept(headers: &Headers) -> Result<Option<AcceptType>, TypeHeaderError> {
+pub fn read_accept<A: AllocatorClone>(
+    headers: &Headers<A>,
+) -> Result<Option<AcceptType>, TypeHeaderError> {
     let Some(val) = headers.try_get_val(StdHeaderKey::Accept) else {
         return Result::Ok(Option::None);
     };
@@ -454,7 +462,7 @@ pub fn read_accept(headers: &Headers) -> Result<Option<AcceptType>, TypeHeaderEr
 }
 
 /// 写 `Accept`。
-pub fn write_accept(headers: &mut Headers, accept: AcceptType) {
+pub fn write_accept<A: AllocatorClone>(headers: &mut Headers<A>, accept: AcceptType) {
     headers.set_text(StdHeaderKey::Accept, accept.to_string());
 }
 
@@ -854,9 +862,9 @@ impl core::error::Error for TypeRejection {}
 ///
 /// 必填头缺失 / 畸形返回 `400` 对应变体；codec、`Data_Type_Id`、`Accept` 不匹配返回
 /// `406` 对应变体。`TypePolicy::Optional` 只放宽「头缺失」。
-pub fn validate_request_types(
+pub fn validate_request_types<A: AllocatorClone>(
     method: AccessMethod,
-    headers: &Headers,
+    headers: &Headers<A>,
     info: &RpcDataTypeInfo,
 ) -> Result<(), TypeRejection> {
     let strict = info.policy() == TypePolicy::Strict;
@@ -940,9 +948,9 @@ pub fn validate_request_types(
 /// # Errors
 ///
 /// 缺失 / 畸形头返回 `400` 对应变体；codec 或类型 ID 不匹配返回 `406` 对应变体。
-pub fn validate_response_types(
+pub fn validate_response_types<A: AllocatorClone>(
     method: AccessMethod,
-    headers: &Headers,
+    headers: &Headers<A>,
     info: &RpcDataTypeInfo,
 ) -> Result<(), TypeRejection> {
     let strict = info.policy() == TypePolicy::Strict;
@@ -952,7 +960,10 @@ pub fn validate_response_types(
             let expected = info
                 .response_suffix()
                 .or_else(|| info.accept().and_then(|accept| accept.type_id()));
-            match (read_data_type_id(headers).map_err(malformed_data_type_id_)?, expected) {
+            match (
+                read_data_type_id(headers).map_err(malformed_data_type_id_)?,
+                expected,
+            ) {
                 (Option::Some(actual), Option::Some(expected)) if actual != expected => {
                     Result::Err(TypeRejection::DataTypeMismatch { expected, actual })
                 }
@@ -961,25 +972,22 @@ pub fn validate_response_types(
                         header: "Data_Type_Id",
                     })
                 }
-                (Option::Some(_), Option::None) => Result::Err(
-                    TypeRejection::UnexpectedDataHeader { header: "Data_Type_Id" },
-                ),
+                (Option::Some(_), Option::None) => {
+                    Result::Err(TypeRejection::UnexpectedDataHeader {
+                        header: "Data_Type_Id",
+                    })
+                }
                 _ => Result::Ok(()),
             }
         }
-        AccessMethod::Call
-        | AccessMethod::Post
-        | AccessMethod::View
-        | AccessMethod::Push => validate_body_direction_(
-            headers,
-            info,
-            strict,
-            info.response_body(),
-            "响应 body",
-        ),
+        AccessMethod::Call | AccessMethod::Post | AccessMethod::View | AccessMethod::Push => {
+            validate_body_direction_(headers, info, strict, info.response_body(), "响应 body")
+        }
         AccessMethod::Head | AccessMethod::Drop => {
             if strict
-                && (read_body_codec(headers).map_err(malformed_codec_)?.is_some()
+                && (read_body_codec(headers)
+                    .map_err(malformed_codec_)?
+                    .is_some()
                     || read_data_type_id(headers)
                         .map_err(malformed_data_type_id_)?
                         .is_some())
@@ -994,8 +1002,8 @@ pub fn validate_response_types(
 }
 
 /// 校验一个「有 body」方向的 codec 与 `Data_Type_Id`。
-fn validate_body_direction_(
-    headers: &Headers,
+fn validate_body_direction_<A: AllocatorClone>(
+    headers: &Headers<A>,
     info: &RpcDataTypeInfo,
     strict: bool,
     expected_id: Option<DataTypeId>,
@@ -1033,8 +1041,8 @@ fn validate_body_direction_(
 }
 
 /// 校验 `Body_Type`。
-fn validate_codec_(
-    headers: &Headers,
+fn validate_codec_<A: AllocatorClone>(
+    headers: &Headers<A>,
     info: &RpcDataTypeInfo,
     strict: bool,
     required: bool,
@@ -1055,8 +1063,8 @@ fn validate_codec_(
 }
 
 /// 校验可选的 `Accept`（Call / Push 的响应期望）。
-fn validate_optional_accept_(
-    headers: &Headers,
+fn validate_optional_accept_<A: AllocatorClone>(
+    headers: &Headers<A>,
     info: &RpcDataTypeInfo,
 ) -> Result<(), TypeRejection> {
     let Some(expected) = info.accept() else {
@@ -1111,8 +1119,8 @@ fn malformed_accept_(err: TypeHeaderError) -> TypeRejection {
 /// 把元信息写进请求头（客户端 / 服务端共用的「本方向」写法）。
 ///
 /// 只写方向表允许的头；不会写对端方向的 `Accept`（由调用者显式写）。
-pub fn apply_request_type_headers(
-    headers: &mut Headers,
+pub fn apply_request_type_headers<A: AllocatorClone>(
+    headers: &mut Headers<A>,
     method: AccessMethod,
     info: &RpcDataTypeInfo,
 ) {
@@ -1138,8 +1146,8 @@ pub fn apply_request_type_headers(
 }
 
 /// 把元信息写进响应头（服务端「本方向」的写法）。
-pub fn apply_response_type_headers(
-    headers: &mut Headers,
+pub fn apply_response_type_headers<A: AllocatorClone>(
+    headers: &mut Headers<A>,
     method: AccessMethod,
     info: &RpcDataTypeInfo,
 ) {
@@ -1163,6 +1171,8 @@ pub fn apply_response_type_headers(
 
 #[cfg(test)]
 mod tests_ {
+    use alloc::alloc::Global;
+
     use super::*;
 
     /// 测试 `DataTypeId` 的十六进制 / 十进制往返与零值拒绝。
@@ -1229,7 +1239,7 @@ mod tests_ {
     /// - Verdict: every read matches; absent headers read as `None`.
     #[test]
     fn headers_roundtrip_() {
-        let mut headers = Headers::new_in();
+        let mut headers = Headers::new_in(Global);
         assert_eq!(read_body_codec(&headers), Result::Ok(Option::None));
         assert_eq!(read_data_type_id(&headers), Result::Ok(Option::None));
         assert_eq!(read_accept(&headers), Result::Ok(Option::None));
@@ -1274,7 +1284,7 @@ mod tests_ {
             .with_response_suffix(id)
             .with_accept(AcceptType::new(BodyCodec::MsgPack, Option::Some(id)));
 
-        let mut ok = Headers::new_in();
+        let mut ok = Headers::new_in(Global);
         write_body_codec(&mut ok, BodyCodec::MsgPack);
         write_accept(
             &mut ok,
@@ -1285,7 +1295,7 @@ mod tests_ {
             Result::Ok(())
         );
 
-        let mut missing = Headers::new_in();
+        let mut missing = Headers::new_in(Global);
         write_body_codec(&mut missing, BodyCodec::MsgPack);
         assert_eq!(
             validate_request_types(AccessMethod::Pull, &missing, &info),
@@ -1298,7 +1308,7 @@ mod tests_ {
             Status::BadRequest
         );
 
-        let mut wrong = Headers::new_in();
+        let mut wrong = Headers::new_in(Global);
         write_body_codec(&mut wrong, BodyCodec::MsgPack);
         write_accept(
             &mut wrong,
@@ -1335,7 +1345,7 @@ mod tests_ {
         let id = DataTypeId::new(0x21u64).unwrap();
         let strict = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_request_suffix(id);
 
-        let mut ok = Headers::new_in();
+        let mut ok = Headers::new_in(Global);
         write_body_codec(&mut ok, BodyCodec::MsgPack);
         write_data_type_id(&mut ok, id);
         assert_eq!(
@@ -1343,7 +1353,7 @@ mod tests_ {
             Result::Ok(())
         );
 
-        let mut missing = Headers::new_in();
+        let mut missing = Headers::new_in(Global);
         write_body_codec(&mut missing, BodyCodec::MsgPack);
         assert_eq!(
             validate_request_types(AccessMethod::Push, &missing, &strict),
@@ -1352,7 +1362,7 @@ mod tests_ {
             })
         );
 
-        let mut wrong = Headers::new_in();
+        let mut wrong = Headers::new_in(Global);
         write_body_codec(&mut wrong, BodyCodec::MsgPack);
         write_data_type_id(&mut wrong, DataTypeId::new(0x22u64).unwrap());
         assert!(matches!(
@@ -1387,7 +1397,7 @@ mod tests_ {
     fn validate_call_direction_() {
         let id = DataTypeId::new(0x31u64).unwrap();
         let info = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_request_body(id);
-        let mut headers = Headers::new_in();
+        let mut headers = Headers::new_in(Global);
         write_body_codec(&mut headers, BodyCodec::Json);
         write_data_type_id(&mut headers, id);
         let rejection = validate_request_types(AccessMethod::Call, &headers, &info).unwrap_err();
@@ -1395,7 +1405,7 @@ mod tests_ {
         assert_eq!(rejection.status(), Status::NotAcceptable);
 
         let bodyless = RpcDataTypeInfo::new(BodyCodec::MsgPack);
-        let mut headers = Headers::new_in();
+        let mut headers = Headers::new_in(Global);
         write_data_type_id(&mut headers, id);
         let rejection =
             validate_request_types(AccessMethod::Call, &headers, &bodyless).unwrap_err();
@@ -1422,7 +1432,7 @@ mod tests_ {
         let id = DataTypeId::new(0x41u64).unwrap();
         let info = RpcDataTypeInfo::new(BodyCodec::MsgPack).with_response_suffix(id);
 
-        let mut ok = Headers::new_in();
+        let mut ok = Headers::new_in(Global);
         write_body_codec(&mut ok, BodyCodec::MsgPack);
         write_data_type_id(&mut ok, id);
         assert_eq!(
@@ -1430,14 +1440,13 @@ mod tests_ {
             Result::Ok(())
         );
 
-        let mut missing = Headers::new_in();
+        let mut missing = Headers::new_in(Global);
         write_body_codec(&mut missing, BodyCodec::MsgPack);
-        let rejection =
-            validate_response_types(AccessMethod::Pull, &missing, &info).unwrap_err();
+        let rejection = validate_response_types(AccessMethod::Pull, &missing, &info).unwrap_err();
         assert!(matches!(rejection, TypeRejection::MissingHeader { .. }));
         assert_eq!(rejection.status(), Status::BadRequest);
 
-        let mut wrong = Headers::new_in();
+        let mut wrong = Headers::new_in(Global);
         write_body_codec(&mut wrong, BodyCodec::MsgPack);
         write_data_type_id(&mut wrong, DataTypeId::new(0x42u64).unwrap());
         let rejection = validate_response_types(AccessMethod::Pull, &wrong, &info).unwrap_err();

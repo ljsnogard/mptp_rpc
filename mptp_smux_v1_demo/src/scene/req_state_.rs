@@ -11,7 +11,7 @@
 //! minimal auth flow: a middleware stashes the principal, handlers read it back.
 
 use mptp_serving::{Endpoint, MiddlewareFuture, MptpContext, NextFn, TrMiddleware};
-use mptp_smux::{HeaderKey, HeaderVal, serving::config::TrConfig};
+use mptp_smux::{HeaderVal, serving::config::TrConfig};
 
 /// 请求头：测试 / 演示用的主体名（真实业务应换成令牌解析）。
 pub const K_HDR_PRINCIPAL: &str = "X-Scene-Principal";
@@ -56,7 +56,7 @@ where
         mptp_serving::box_future_(arena, async move {
             let principal = ctx
                 .headers()
-                .try_get(HeaderKey::from_text(K_HDR_PRINCIPAL))
+                .try_get_str(K_HDR_PRINCIPAL)
                 .and_then(HeaderVal::as_text)
                 .map(str::to_string);
             // 组标记是 router 在绑定时继承进端点的元数据，端点自身没有声明。

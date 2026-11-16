@@ -193,9 +193,9 @@ where
     /// 共享连接对象的分配器来自分配约定，而不是本 crate 的固定选择。
     type SharedConn = Shared<TyConn, TyAllocCfg::SharedConnAlloc>;
 
-    type ReqPrefix = mptp_wire::RequestPrefix;
+    type ReqPrefix = mptp_wire::RequestPrefix<mptp_smux::SessionAlloc>;
 
-    type RespPrefix = mptp_wire::ResponsePrefix;
+    type RespPrefix = mptp_wire::ResponsePrefix<mptp_smux::SessionAlloc>;
 }
 
 impl<TyConn, TyDock, TyAllocCfg> mptp_cli_cfg::TrConfig for ClientConfig<TyConn, TyDock, TyAllocCfg>
@@ -261,13 +261,13 @@ where
 {
     type MuxConn = TyConn;
 
-    type ReqHeaders = mptp_wire::Headers;
+    type ReqHeaders = mptp_wire::Headers<mptp_smux::SessionAlloc>;
 
-    type RespHeaders = mptp_wire::Headers;
+    type RespHeaders = mptp_wire::Headers<mptp_smux::SessionAlloc>;
 
-    type ReqPrefix = mptp_wire::RequestPrefix;
+    type ReqPrefix = mptp_wire::RequestPrefix<mptp_smux::SessionAlloc>;
 
-    type RespPrefix = mptp_wire::ResponsePrefix;
+    type RespPrefix = mptp_wire::ResponsePrefix<mptp_smux::SessionAlloc>;
 }
 
 impl<TyConn, TyDock, TyAllocCfg> mptp_srv_cfg::TrConfig

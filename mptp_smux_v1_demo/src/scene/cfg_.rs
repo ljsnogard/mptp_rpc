@@ -17,18 +17,15 @@ use abs_mm::{
     CoreAlloc,
     res_man::{TrAllocBy, TrUnique},
 };
-use buffex_compio_adapt::{
-    BuffRead, BuffWrite, DefaultAllocConfig, SharedRingOf,
-};
+use buffex_compio_adapt::{BuffRead, BuffWrite, DefaultAllocConfig, SharedRingOf};
 use mm_ptr::{Owned, Shared};
 use mptp_smux::{
-    K_DEFAULT_SERVING_DOCK, RingBuffs, TrPrepFactory, TrPrepareCtx,
+    K_DEFAULT_SERVING_DOCK, RingBuffs, SessionAlloc, TrPrepFactory, TrPrepareCtx,
     client::{ClientPrepCtx, config as client_cfg},
     messaging::{Headers, RequestPrefix, ResponsePrefix},
     serving::{ServingPrepCtx, config as serving_cfg},
     x_deps::abs_smux,
 };
-
 use smux_v1::{
     connection::{DefaultConnCfg, MuxConnection},
     flow_ctrl::DefaultPolicy,
@@ -47,18 +44,12 @@ pub type RingBuff = Owned<[MaybeUninit<u8>], CoreAlloc>;
 pub type Dock = abs_smux::dock::Dock<u32>;
 
 /// TCP 读半边：设备 → 环。
-pub type Rx = BuffRead<
-    compio::net::TcpStream,
-    DefaultAllocConfig,
-    SharedRingOf<DefaultAllocConfig>,
->;
+pub type Rx =
+    BuffRead<compio::net::TcpStream, DefaultAllocConfig, SharedRingOf<DefaultAllocConfig>>;
 
 /// TCP 写半边：环 → 设备。
-pub type Tx = BuffWrite<
-    compio::net::TcpStream,
-    DefaultAllocConfig,
-    SharedRingOf<DefaultAllocConfig>,
->;
+pub type Tx =
+    BuffWrite<compio::net::TcpStream, DefaultAllocConfig, SharedRingOf<DefaultAllocConfig>>;
 
 /// 本 demo 显式固定的运行时值类型。
 ///
@@ -74,8 +65,7 @@ pub type SceneScope = abs_art_facade::CompioLocalScope;
 pub type SceneJoinHandle<T> = abs_art_facade::CompioJoinHandle<T>;
 
 /// 本 demo 的复用连接（运行时值固定为 compio）。
-pub type Conn =
-    MuxConnection<DefaultConnCfg<Tx, Rx, NoMetrics, DefaultPolicy, SceneRt>>;
+pub type Conn = MuxConnection<DefaultConnCfg<Tx, Rx, NoMetrics, DefaultPolicy, SceneRt>>;
 
 /// 取当前 compio 上下文里的运行时值。
 ///
@@ -103,9 +93,9 @@ impl abs_mptp::client::config::TrConfig for ClientCfg {
 
     type SharedConn = SharedConn;
 
-    type ReqPrefix = RequestPrefix;
+    type ReqPrefix = RequestPrefix<SessionAlloc>;
 
-    type RespPrefix = ResponsePrefix;
+    type RespPrefix = ResponsePrefix<SessionAlloc>;
 }
 
 impl client_cfg::TrConfig for ClientCfg {
@@ -138,7 +128,8 @@ impl TrPrepFactory for ClientPrepFactory {
         }
     }
 
-    type GetPreparedAsync<'f> = PrepareClientAsync<'f, 'f>
+    type GetPreparedAsync<'f>
+        = PrepareClientAsync<'f, 'f>
     where
         Self: 'f;
 
@@ -175,13 +166,13 @@ pub struct ServingCfg;
 impl abs_mptp::serving::config::TrConfig for ServingCfg {
     type MuxConn = Conn;
 
-    type ReqHeaders = Headers;
+    type ReqHeaders = Headers<SessionAlloc>;
 
-    type RespHeaders = Headers;
+    type RespHeaders = Headers<SessionAlloc>;
 
-    type ReqPrefix = RequestPrefix;
+    type ReqPrefix = RequestPrefix<SessionAlloc>;
 
-    type RespPrefix = ResponsePrefix;
+    type RespPrefix = ResponsePrefix<SessionAlloc>;
 }
 
 impl serving_cfg::TrConfig for ServingCfg {

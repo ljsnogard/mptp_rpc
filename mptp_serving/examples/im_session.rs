@@ -33,7 +33,7 @@
 //! cargo run -p mptp_serving --example im_session
 //! ```
 
-use std::sync::Arc;
+use std::{alloc::Global, sync::Arc};
 
 use abs_async_iter::{TrAsyncIterator, TrFlux};
 use abs_buff::{TrBuffRead, TrBuffWrite, buffer::TrConsumerState};
@@ -344,7 +344,7 @@ fn main() {
     );
 
     // 客户端 Pull 请求头：Body_Type + Accept(item type)。
-    let mut headers = rpc_core_v1::x_deps::mptp_smux::Headers::new();
+    let mut headers = rpc_core_v1::x_deps::mptp_smux::Headers::new_in(Global);
     rpc_core_v1::serving::apply_request_type_headers(&mut headers, AccessMethod::Pull, &info);
     rpc_core_v1::serving::write_accept(
         &mut headers,

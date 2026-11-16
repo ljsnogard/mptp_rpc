@@ -319,6 +319,29 @@ impl<A: Allocator> HeaderVal<A> {
     pub fn data(&self) -> Option<&[u8]> {
         self.as_obj().map(ObjEnvelope::data)
     }
+
+    /// 把本值复制到另一个 allocator 上；数字形态不需要分配，对象载荷重新分配。
+    ///
+    /// Copy this value onto another allocator. Numeric values need no allocation; object
+    /// payloads are re-allocated by `alloc`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mptp_wire::HeaderVal;
+    /// use std::alloc::Global;
+    ///
+    /// let value = HeaderVal::<Global>::from_bytes(0x1234, b"payload", Global);
+    /// let copied = value.realloc_in(&Global);
+    /// assert_eq!(copied.type_id(), Some(0x1234));
+    /// assert_eq!(copied.data(), Some(&b"payload"[..]));
+    /// ```
+    pub fn realloc_in<B: Allocator + Clone>(&self, alloc: B) -> HeaderVal<B> {
+        match &self.0 {
+            U16OrObj::Num(num) => HeaderVal::from_num(*num),
+            U16OrObj::Obj(obj) => HeaderVal::from_bytes(obj.type_id(), obj.data(), alloc),
+        }
+    }
 }
 
 impl<A: Allocator> From<StdHeaderVal> for HeaderVal<A> {
@@ -365,7 +388,8 @@ impl<A: Allocator> TrNumOrObj for HeaderVal<A> {
 struct BinRef<'b>(&'b [u8]);
 
 impl<'b> TrEncodable for BinRef<'b> {
-    type EncodeAsync<'a, E> = E::EncodeBytesAsync<'a, 'b>
+    type EncodeAsync<'a, E>
+        = E::EncodeBytesAsync<'a, 'b>
     where
         Self: 'a,
         E: TrEncoder + 'a,
@@ -787,7 +811,7 @@ impl<A: Allocator> Borrow<HeaderVal<A>> for HeaderEntry<A> {
 /// use mptp_wire::{HeaderKey, HeaderVal, Headers};
 /// use std::alloc::Global;
 ///
-/// let mut headers = Headers::new(Global);
+/// let mut headers = Headers::new_in(Global);
 /// headers.set_num(abs_mptp::spec::StdHeaderKey::Body_Size, 12);
 /// headers.set_num(abs_mptp::spec::StdHeaderKey::Body_Type, 1);
 ///
@@ -834,15 +858,43 @@ impl<A: AllocatorClone> Headers<A> {
         }
     }
 
-    /// [`Headers::new`] 的别名，保留旧名字。
+    /// [`Headers::new_in`] 的别名，保留旧名字。
     ///
-    /// An alias of [`Headers::new`], kept for the old name.
+    /// An alias of [`Headers::new_in`], kept for the old name.
     pub fn empty(alloc: A) -> Self {
         Self::new_in(alloc)
     }
 }
 
 impl<A: AllocatorClone> Headers<A> {
+    /// 把整张头表复制到另一个 allocator 上；所有键与值都重新分配。
+    ///
+    /// Copy the whole header map onto another allocator; every key and value is
+    /// re-allocated. This is the bridge between an assembly-time map (for example a
+    /// `Global`-allocated proxy header set) and a request-scoped arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abs_mptp::spec::StdHeaderKey;
+    /// use mptp_wire::Headers;
+    /// use std::alloc::Global;
+    ///
+    /// let mut source = Headers::new_in(Global);
+    /// source.set_num(StdHeaderKey::Body_Size, 12);
+    ///
+    /// let other = Global;
+    /// let copied: Headers<&Global> = source.realloc_in(&other);
+    /// assert_eq!(copied.body_size(), Some(12usize));
+    /// ```
+    pub fn realloc_in<B: AllocatorClone>(&self, alloc: B) -> Headers<B> {
+        let mut out = Headers::new_in(alloc.clone());
+        for (key, val) in self.map_.iter() {
+            out.set(key.realloc_in(alloc.clone()), val.realloc_in(alloc.clone()));
+        }
+        out
+    }
+
     /// 按标准键写一个文本值（覆盖已有值）；文本写成带 `str` 类型标识的 MessagePack 载荷。
     ///
     /// Write a textual value; the payload is a MessagePack string tagged with the `str`
@@ -850,6 +902,32 @@ impl<A: AllocatorClone> Headers<A> {
     pub fn set_text(&mut self, key: StdHeaderKey, text: impl AsRef<str>) {
         let alloc = Arc::allocator(&self.map_).clone();
         self.set(key, HeaderVal::from_text(text, alloc));
+    }
+
+    /// 按**文本键名**写一个文本值；键与值都由本头表自身的 allocator 分配。
+    ///
+    /// 这是 [`Headers::set_text`] 的字符串键版本：常见于中间件把 `Authorization` 这类
+    /// 自定义头原样搬到同一张表上，调用者不需要再取一次 allocator。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mptp_wire::{HeaderVal, Headers};
+    /// use std::alloc::Global;
+    ///
+    /// let mut headers = Headers::new_in(Global);
+    /// headers.set_text_named("x-custom", "value");
+    /// assert_eq!(
+    ///     headers.try_get_str("x-custom").and_then(HeaderVal::as_text),
+    ///     Some("value")
+    /// );
+    /// ```
+    pub fn set_text_named(&mut self, name: &str, text: impl AsRef<str>) {
+        let alloc = Arc::allocator(&self.map_).clone();
+        self.set(
+            HeaderKey::from_text(name, alloc.clone()),
+            HeaderVal::from_text(text, alloc),
+        );
     }
 
     /// 按标准键写一个数字值（覆盖已有值）。
@@ -903,6 +981,36 @@ impl<A: AllocatorClone> Headers<A> {
         K: Borrow<HeaderKey<A>>,
     {
         self.map_.get(key.borrow())
+    }
+
+    /// 按文本键名查一个值；不需要为查询构造一个带 allocator 的 `HeaderKey`。
+    ///
+    /// 只匹配字符串形态的键；数字键请走 [`Headers::try_get_val`] 或
+    /// [`Headers::try_get_std_header`]。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mptp_wire::{HeaderKey, HeaderVal, Headers};
+    /// use std::alloc::Global;
+    ///
+    /// let mut headers = Headers::new_in(Global);
+    /// headers.set(
+    ///     HeaderKey::from_text("x-custom", Global),
+    ///     HeaderVal::from_text("value", Global),
+    /// );
+    /// assert_eq!(
+    ///     headers.try_get_str("x-custom").and_then(HeaderVal::as_text),
+    ///     Some("value")
+    /// );
+    /// ```
+    pub fn try_get_str(&self, name: &str) -> Option<&HeaderVal<A>> {
+        self.map_
+            .iter()
+            .find_map(|(key, val)| match key.as_u16_or_str() {
+                U16OrStr::Str(text) if **text == *name => Option::Some(val),
+                _ => Option::None,
+            })
     }
 
     /// 遍历全部条目。
@@ -1287,6 +1395,37 @@ mod tests_ {
             Option::Some(HeaderVal::from_num(7u16))
         );
         assert!(headers.is_empty());
+    }
+
+    /// 测试整张头表可以跨 allocator 复制，数字与对象值都保留。
+    /// Test that a whole header map can be copied across allocators, keeping numeric and
+    /// object values.
+    ///
+    /// - 手段：在 `Global` 上写一个数字头与一个对象头，再 `realloc_in(&Global)` 到 `&Global`。
+    /// - 判断：目标表的 `body_size`、对象头的 `type_id` 与载荷都与源表一致。
+    ///
+    /// - Means: write a numeric and an object header on `Global`, then call
+    ///   `realloc_in(&Global)` to copy them onto `&Global`.
+    /// - Verdict: the target map's `body_size`, object `type_id` and payload match the
+    ///   source.
+    #[test]
+    fn headers_realloc_in_copies_entries_() {
+        let mut source = Headers::new_in(Global);
+        source.set_num(StdHeaderKey::Body_Size, 12u16);
+        source.set(
+            HeaderKey::from_text("x-custom", Global),
+            HeaderVal::from_bytes(0x1234, b"payload", Global),
+        );
+
+        let other = Global;
+        let copied: Headers<&Global> = source.realloc_in(&other);
+
+        assert_eq!(copied.body_size(), Option::Some(12usize));
+        let value = copied
+            .try_get(HeaderKey::from_text("x-custom", &other))
+            .expect("自定义头应当被复制");
+        assert_eq!(value.type_id(), Option::Some(0x1234));
+        assert_eq!(value.data(), Option::Some(&b"payload"[..]));
     }
 
     /// 测试对象形态的头值保留 `type_id` 与字节流。

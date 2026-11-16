@@ -17,13 +17,19 @@ use abs_mptp::spec::{Status, access_method::AccessMethod};
 use abs_str::str_alloc::String as AbsString;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_smux::{
-    HeaderKey, HeaderVal, ResponsePrefix, ServeError,
+    HeaderKey, HeaderVal, PageSize, ResponsePrefix, ServeError, SessionAlloc,
     serving::{K_TMP_ALLOW_HEADER_KEY, ServingSession, TrServeHandler, config::TrConfig},
 };
 
 use super::{
     MatchOutcome, MptpContext, RadixRouter, RouteParams, TrRouteMatcher, router_::ErrorHook,
 };
+
+/// 请求级 context arena 的页大小。
+///
+/// handler / 中间件 future 由编译器生成，常见多 KB；比会话 arena 大一档可以避免大多数
+/// future 回退到 `Global`。单块仍然超过该页时由 `arena_future_` 兜底。
+const K_CONTEXT_PAGE_SIZE: PageSize = PageSize::P16K;
 
 impl<C, S, R, A> TrServeHandler<C> for RadixRouter<C, S, R, A>
 where
@@ -66,12 +72,17 @@ where
     R: Default + 'static,
     K: TrCancellationToken,
 {
+    // 请求级 arena：location、路由参数所借用的文本、请求级运行期状态以及 handler /
+    // 中间件 future 都从它分配；context 持有句柄，请求结束整体释放。
+    //
+    // 页大小比会话 arena 大一档：handler / 中间件 future 是编译器生成的 async 块，
+    // 常见多 KB；放不下的单块会由 `arena_future_` 回退到 `Global`，不会 abort。
+    let arena = SessionAlloc::new(K_CONTEXT_PAGE_SIZE).expect("K_CONTEXT_PAGE_SIZE 应当受支持");
     // 克隆 location：匹配结果的 params 借用 location，而调用 handler 需要 `&mut session`；
     // 两者不能同时借 session，因此把 location 放到独立的堆上（带分配器的 String）。
-    let alloc = session.allocator().clone();
-    let location = AbsString::from_str_in(session.location(), alloc.clone());
+    let location = AbsString::from_str_in(session.location(), arena.clone());
     // 请求级运行期状态：中间件 stash、处理器读；随本次请求结束整体释放。
-    let mut request_state = Box::new_in(R::default(), &alloc);
+    let mut request_state = Box::new_in(R::default(), arena.clone());
 
     match router.match_route(method, &location) {
         MatchOutcome::Found {
@@ -80,7 +91,7 @@ where
         } => {
             let cancel = router.cancel_token();
             let mut ctx = MptpContext::new_(
-                &alloc,
+                arena,
                 method,
                 &location,
                 params,
@@ -114,7 +125,7 @@ where
             let params = RouteParams::empty();
             let cancel = router.cancel_token();
             let mut ctx = MptpContext::new_(
-                &alloc,
+                arena,
                 method,
                 &location,
                 params,

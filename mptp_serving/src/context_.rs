@@ -18,9 +18,12 @@
 
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
-use mptp_smux::serving::{
-    RequestBodyAsync, RequestSuffixAsync, ResponseBuilder, ServingSession,
-    config::{ChannelRx, TrConfig},
+use mptp_smux::{
+    SessionAlloc,
+    serving::{
+        RequestBodyAsync, RequestSuffixAsync, ResponseBuilder, ServingSession,
+        config::{ChannelRx, TrConfig},
+    },
 };
 
 use super::{RequestCancel, route_params_::RouteParams};
@@ -40,8 +43,11 @@ where
     /// 本次请求的方法。
     method_: AccessMethod,
 
-    /// 请求级 arena（借用自请求作用域）：handler future 从它分配。
-    arena_: &'f C::Alloc,
+    /// 请求级 arena 句柄：handler / 中间件 future 从它分配。
+    ///
+    /// 它按值持有 `Arc<BumpListAlloc>` 句柄，因此 context 既拥有 arena，又能把由该
+    /// arena 分配的 future 交出去；句柄克隆不产生自引用。
+    arena_: SessionAlloc,
 
     /// 本次请求的位置（借用调用方的克隆）。
     location_: &'f str,
@@ -72,7 +78,7 @@ where
     // 借用再包一层，因此显式允许超参数。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_(
-        arena: &'f C::Alloc,
+        arena: SessionAlloc,
         method: AccessMethod,
         location: &'f str,
         route: RouteParams<'f>,
@@ -98,13 +104,14 @@ where
         self.method_
     }
 
-    /// 请求级 arena 句柄（`&'f C::Alloc`）。
+    /// 请求级 arena 句柄的克隆。
     ///
-    /// 终端处理器用它把 future 分配进 arena：先取出句柄、再构造 future、最后经
-    /// [`crate::handler_::box_future_`] 装箱。
+    /// 返回的是 `SessionAlloc` 的**克隆**而不是 `&SessionAlloc`：处理器先取出句柄、
+    /// 再构造 future、最后经 [`crate::handler_::box_future_`] 装箱。按值交出句柄让
+    /// future 自己拥有 allocator，避免把 `&MptpContext` 借进 future 的类型里。
     #[doc(hidden)]
-    pub fn arena(&self) -> &'f C::Alloc {
-        self.arena_
+    pub fn arena(&self) -> SessionAlloc {
+        self.arena_.clone()
     }
 
     /// 本次请求的位置。
@@ -121,7 +128,7 @@ where
     ///
     /// 处理器 / 中间件经它读取请求头（例如 `#[from_header]` 参数来源）；需要改写头表时用
     /// [`headers_mut`](Self::headers_mut)。
-    pub fn headers(&self) -> &mptp_smux::Headers<C::Alloc> {
+    pub fn headers(&self) -> &mptp_smux::Headers<SessionAlloc> {
         self.session_.headers()
     }
 
@@ -129,7 +136,7 @@ where
     ///
     /// 改写的是会话持有的请求头副本，**不**写回已经解码好的请求前缀；因此可以用它做
     /// 「中间件把规范化后的头交给后续处理器」这类请求内改写。
-    pub fn headers_mut(&mut self) -> &mut mptp_smux::Headers<C::Alloc> {
+    pub fn headers_mut(&mut self) -> &mut mptp_smux::Headers<SessionAlloc> {
         self.session_.headers_mut()
     }
 

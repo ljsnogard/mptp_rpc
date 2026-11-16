@@ -10,6 +10,8 @@
 //! selective subscription, unsubscribe, resubscribe snapshot, update broadcast and
 //! `Removed` cleanup after the owner disconnects.
 
+#![recursion_limit = "256"]
+
 use std::{net::SocketAddr, process::ExitCode, time::Duration};
 
 use abs_art_facade::{TrJoinHandle, TrLocalScope};

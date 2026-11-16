@@ -95,7 +95,7 @@
 
 ## 4. 第 3 步：`mptp_smux` 的会话分配器
 
-### 4.1 为什么是 `C::Alloc` 关联类型
+### 4.1 为什么是 `C::Alloc` 关联类型（已被 §8 取代）
 
 `abs_mptp::client::TrMptpClient::Session` 是一个**不带生命周期**的关联类型，因此 session
 不能借用 client 的 `&'a BumpListAlloc`——否则必须把该 trait 改成 GAT。为了不改协议层 trait，
@@ -109,7 +109,7 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
 `ServingSession<C>` 克隆一份。会话类型因此仍然只有 `C` 一个参数，没有生命周期、没有
 自引用。前缀 / 头表 / location 的 allocator 类型就是 `C::Alloc`。
 
-### 4.2 `SessionAlloc`
+### 4.2 `SessionAlloc`（最终形态见 §8）
 
 本 crate 提供 `SessionAlloc`：`Arc<BumpListAlloc>` 的 clonable 句柄，实现
 `Allocator`、`AllocatorClone`、`TrArena`、`TrArenaBytes` 与
@@ -200,3 +200,82 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
 
 这样 arena 里的值既不会泄漏 `Drop`，也不会把块永久占住；新增
 `arena_value_runs_drop_` 测试验证析构函数恰好运行一次。
+
+## 8. 最终形状：每个所有者自持 arena 句柄（2026-11-17）
+
+> 本节取代 §4.1 / §4.2 里「用 `C::Alloc` 关联类型 + SessionAlloc 句柄」的中间方案。
+> 目标形状由项目负责人在 2026-11-17 明确：`MptpClient` / `MptpContext` / `MptpSession`
+> 自身就是内存分配源，前缀与头表统一使用 arena 句柄，不再为每种细化类型配置 allocator。
+
+### 8.1 决策
+
+1. **唯一的 arena 类型是 `SessionAlloc`**：`Arc<BumpListAlloc<Global>>` 的句柄，实现
+   `Allocator`、`AllocatorClone`、`TrArena`、`TrArenaBytes` 与 `TrAllocSource`。
+   `RequestPrefix` / `ResponsePrefix` / `Headers` / `HeaderKey` / `HeaderVal` 的 `A`
+   一律取它。
+2. **删除 `client::config::TrConfig::Alloc` 与 `serving::config::TrConfig::Alloc`**。
+   两份配置现在把前缀 / 头表类型直接钉成 `...<SessionAlloc>`；下游配置不再回答
+   allocator 类型。
+3. **每个所有者持有自己的 `SessionAlloc`**：
+   - `MptpClient<C>`：客户端作用域 arena（默认 P2K）；`new(conn)` /
+     `new_with_page_size(conn, page_size)` / `new_session_alloc()`。
+   - `MptpSession<C>`：从请求前缀接管 per-request arena；请求前缀、回复前缀都由它分配，
+     会话 drop（最后一个句柄释放）时一起回收。
+   - `MptpServlet<C, H>`：连接作用域 arena（默认 P2K）；
+     `new(handler)` / `new_with_page_size`。
+   - `ServingSession<C>`：每条入向子流在 `accept_async` 时创建自己的 arena；请求前缀、
+     头表副本、location 与回复前缀都在这里。
+   - `MptpContext<'f, C, S, R>`：请求级 arena（默认 P16K）；location、请求级状态 `R`、
+     handler / 中间件 future 都从这里分配。`MptpContext::arena()` 返回**句柄克隆**。
+   - `MptpConnection` 不再接收 allocator 参数，servlet 自己创建连接 arena。
+4. **不再把 `&'a BumpListAlloc` 放进会被保存的字段**。如果 `ServingSession` 同时拥有
+   `bump: BumpListAlloc` 与 `headers: Headers<&BumpListAlloc>`，后者就指向结构体自己的
+   字段，属于自引用，安全 Rust 构造不出来。`Arc` 句柄把 arena 地址与持有者地址解耦：
+   句柄是 `Clone + 'static` 的，因此可以按值保存 `RequestPrefix<SessionAlloc>` 这类字段，
+   会话类型也不需要生命周期参数，`abs_mptp` 的 `Session` 关联类型不必改 GAT。
+
+### 8.2 为什么 `MptpContext::arena()` 返回克隆而不是 `&SessionAlloc`
+
+`HandlerFuture` / `MiddlewareFuture` 需要把 future 装进 arena，同时 future 自己又借用
+`&mut MptpContext`。如果 allocator 是 `&ctx.arena`，就会在 `box_future_` 的调用点同时
+产生对 ctx 的共享借用与可变借用。返回句柄克隆后，future 自己拥有一个 arena 句柄，
+`'a` 只描述 future 捕获的数据，不再与 allocator 的借用冲突；`ArenaFuture` 也因此改为
+按值持有 allocator。
+
+### 8.3 页大小与超大块兜底
+
+`BumpListAlloc` 的一个块不能跨页，单块上限是该页的可用容量。实测发现一个 demo 的
+handler future 有 4456 字节，超过 P2K 页容量会导致 `Box::new_in` abort。处理：
+
+- 请求级 context arena 默认用 `PageSize::P16K`（handler / 中间件 future 常见多 KB）；
+- `mptp_serving::arena_::arena_future_` 先用 `Layout::new::<F>()` 向 arena 探测一次：
+  放得下就让 future 进 arena，放不下回退 `Global`，避免整个请求因 future 太大而 abort；
+- 会话 / 连接 arena 仍默认 P2K；需要更大的头表或前缀时用 `new_with_page_size` 调大，
+  但要记住单块仍不能跨页。
+
+### 8.4 保留的 allocator 配置
+
+`TrRpcClientAllocConfig::{SharedConnAlloc, RingAlloc}` 与 `TrServingAllocConfig` 保留。
+它们描述的是共享连接句柄与 smux ring 存储的来源，生命周期与所有权不属于「一次请求的
+arena」，与本次统一的 arena 目标不冲突。
+
+### 8.5 迁移清单与验证
+
+- `mptp_wire`：`Headers::new_in` 保留；新增
+  `U16OrStr::realloc_in` / `HeaderVal::realloc_in` / `Headers::realloc_in`（跨 arena 复制）、
+  `Headers::try_get_str`（按文本键名查询，不构造带 allocator 的键）、
+  `Headers::set_text_named`（键和值都由头表自身 arena 分配）。
+- `mptp_smux`：两份 `TrConfig` 去掉 `Alloc`；`MptpClient` / `MptpSession` /
+  `MptpServlet` / `ServingSession` / `MptpConnection` 按 §8.1 调整；`RequestBuilder` /
+  `ResponseBuilder` 增加 `header_text` / `header_text_named`，让调用者不必接触 allocator。
+- `mptp_serving`：`MptpContext` 持有 `SessionAlloc`；`ArenaFuture` 按值持有 allocator 并
+  带 `Global` 兜底；`HandlerFuture` / `MiddlewareFuture` 去掉 allocator 参数；恢复
+  `rpc_core_v1` dev-dependency、元数据测试与 `im_session` 示例。
+- `rpc_core_v1`：配置的前缀 / 头表类型固定为 `SessionAlloc`；请求前缀用
+  `client.new_session_alloc()` 创建 arena；代理级额外头用 `Global` 构造，合并时
+  `realloc_in` 到请求 arena；头表 helper 泛型化到 `A: AllocatorClone`；
+  `DataTypeId::from_str` 直接解析十进制 / `0x` 十六进制。
+- `mptp_smux_v1_demo`：配置改成 `...<SessionAlloc>`；头键常量改为裸 `u16`；读写头改用
+  `header_text_named` / `try_get_str` / `header_u64_`。
+- 验证：`cargo check --workspace --all-targets`、`cargo test --workspace`（300s 内）、
+  `cargo clippy --workspace --all-targets` 全部通过，`format_use_imports.py --check` 合规。

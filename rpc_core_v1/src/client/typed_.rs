@@ -10,7 +10,7 @@
 //! typed flux. They only use the public `mptp_smux` session API; the transport stays
 //! byte-only.
 
-use alloc::{format, string::ToString};
+use alloc::format;
 
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
@@ -77,14 +77,14 @@ where
     let accept = info
         .accept()
         .unwrap_or_else(|| AcceptType::new(info.body_codec(), info.response_suffix()));
-    let mut headers = Headers::new_in();
+    let alloc = client.new_session_alloc();
+    let mut headers = Headers::new_in(alloc.clone());
     apply_request_type_headers(&mut headers, AccessMethod::Pull, &info);
     write_accept(&mut headers, accept);
-    let mut builder = client.request(AccessMethod::Pull, path);
-    for (key, val) in headers.iter() {
-        builder = builder.header(key.clone(), val.clone());
-    }
-    let mut response = builder
+    let prefix =
+        RequestPrefix::with_headers(AccessMethod::Pull, path, Option::Some(headers), alloc);
+    let mut response = client
+        .request_prefix(prefix)
         .send_async()
         .may_cancel_with(cancel.child_token())
         .await
@@ -97,7 +97,7 @@ where
             .prefix()
             .headers()
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| Headers::new_in(client.new_session_alloc()));
         if let Result::Err(rejection) =
             validate_response_types(AccessMethod::Pull, &resp_headers, &info)
         {
@@ -161,10 +161,11 @@ where
             "Push {path} 的端点元信息没有声明 request_suffix 类型 ID"
         )));
     };
-    let mut headers = Headers::new_in();
+    let alloc = client.new_session_alloc();
+    let mut headers = Headers::new_in(alloc.clone());
     apply_request_type_headers(&mut headers, AccessMethod::Push, &info);
     let prefix =
-        RequestPrefix::with_headers(AccessMethod::Push, path.to_string(), Option::Some(headers));
+        RequestPrefix::with_headers(AccessMethod::Push, path, Option::Some(headers), alloc);
 
     let session = client
         .request_async(prefix)
@@ -193,7 +194,7 @@ where
     let status = response.status();
     let size = response
         .headers()
-        .and_then(Headers::body_size)
+        .and_then(|headers| headers.body_size())
         .unwrap_or(0usize);
     let mut body = response
         .body_async()
