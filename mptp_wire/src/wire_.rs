@@ -8,32 +8,39 @@
 //! | 客户端收回复 | 同上 | [`read_response_prefix_async`] |
 //!
 //! 每个值都是一个**连续的 MessagePack 值**，不额外包一层数组或结构体：把三个值装进元组会
-//! 多写一个数组头，直接改变线上字节。头表本身是「数字键 → 值」的映射，没有头时写 `nil`。
+//! 多写一个数组头，直接改变线上字节。头表本身是「数字或字符串键 → 数字或 `[type_id, bin]`
+//! 值」的映射，没有头时写 `nil`。
+//!
+//! # 两个解码入口族
+//!
+//! - [`read_request_prefix_async`] / [`read_response_prefix_async`] 用 [`NoArena`] 解码，
+//!   返回 allocator 为 [`Global`] 的前缀；
+//! - [`read_request_prefix_in_async`] / [`read_response_prefix_in_async`] 接收一个
+//!   `&Alloc` arena，把 `location`、头键与头值都分配在同一个 arena 里，返回 allocator 为
+//!   `&'alloc Alloc` 的前缀。后者要求 `Alloc: TrArena<'alloc> + Allocator`。
 //!
 //! # 只读前缀，不碰体
 //!
-//! 读入口把 `MpDecoder` 直接架在接收半边上，要多少借多少；解完最后一个头就返回，报文体的
-//! 第一个字节仍在环里。分块体尤其依赖这一点——多读一个字节就会被当成块长。
-//!
-//! # 编码不预攒整体
-//!
-//! 写入口把 `MpEncoder` 直接架在发送半边上：标签、长度与标量在栈上编好后按段写入，字符串
-//! 直接引用调用方数据。因此不需要「先编到 `Vec`、再整块写出去」的中转缓冲，也没有固定
-//! 暂存区上限。
+//! 读入口把 [`MpDecoder`] 直接架在接收半边上，要多少借多少；解完最后一个头就返回，报文体的
+//! 第一个字节仍在环里。
 //!
 //! # `wire_`: the prefix wire format
 //!
 //! Four entry points, one format. Requests are `method → location → headers`; responses are
-//! `status → headers`, each as a **separate** MessagePack value. Decoding reads exactly the
-//! prefix and leaves the first body byte in the ring; encoding writes through the ring
-//! directly, with no gather buffer and no fixed scratch cap.
+//! `status → headers`, each as a **separate** MessagePack value. The `_in_` variants decode
+//! into a caller-supplied arena; the plain variants decode into `Global`.
 
-use alloc::string::String;
+use alloc::alloc::Global;
+use core::alloc::Allocator;
 
 use abs_buff::{TrBuffRead, TrBuffWrite};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
-use abs_denco::{de::TrDecodable, ser::TrEncodable};
+use abs_denco::{
+    de::{TrArena, TrDecodable},
+    ser::TrEncodable,
+};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
+use abs_str::str_alloc::String as AllocString;
 use gen_mcf2::gen_may_cancel_future;
 use mp_denco::{MpDecoder, MpEncoder};
 
@@ -48,10 +55,6 @@ use super::{
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 把线上的方法位还原成本端的方法值。
-///
-/// [`AccessMethod`] 是 `#[repr(u8)]`，但没有「从数值构造」的公开入口，因此这里列一遍位值
-/// ——它本来就是**线上契约**的一部分。未知位返回 `None`，由调用者报成
-/// [`MessagingError::UnknownMethod`]。
 const fn method_from_u8_(code: u8) -> Option<AccessMethod> {
     let method = match code {
         0 => AccessMethod::Head,
@@ -72,30 +75,17 @@ const fn method_from_u8_(code: u8) -> Option<AccessMethod> {
 
 /// 把请求前缀按 `access_method → location → headers` 写出去。
 ///
-/// 返回的 future 在 `.may_cancel_with(token)` 之后才携带取消令牌；等待写段期间收到取消
-/// 信号时返回 [`MessagingError::Encode`]。
+/// 返回的 future 在 `.may_cancel_with(token)` 之后才携带取消令牌。
 ///
 /// # Errors
 ///
 /// 编码失败、写子流失败，或等待期间被取消时返回 [`MessagingError::Encode`]。
-///
-/// # Examples
-///
-/// ```ignore
-/// use abs_cancel::NonCancellableToken;
-/// use abs_mptp::spec::access_method::AccessMethod;
-/// use mptp_wire::{write_request_prefix_async, RequestPrefix};
-///
-/// let prefix = RequestPrefix::new(AccessMethod::Call, "/rpc/echo");
-/// write_request_prefix_async(&prefix, &mut tx)
-///     .may_cancel_with(NonCancellableToken::new())
-///     .await?;
-/// ```
-pub fn write_request_prefix_async<'f, W>(
-    prefix: &'f RequestPrefix,
+pub fn write_request_prefix_async<'f, A, W>(
+    prefix: &'f RequestPrefix<A>,
     tx: &'f mut W,
-) -> WriteRequestPrefixAsync<'f, 'f, W>
+) -> WriteRequestPrefixAsync<'f, 'f, A, W>
 where
+    A: Allocator,
     W: 'f + TrBuffWrite<u8>,
 {
     WriteRequestPrefixAsync::new(prefix, tx)
@@ -104,12 +94,13 @@ where
 /// [`write_request_prefix_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(WriteRequestPrefix, pub, new(pub(crate)))]
-async fn write_request_prefix_async_<'f, W, TyTok>(
-    prefix: &'f RequestPrefix,
+async fn write_request_prefix_async_<'f, A, W, TyTok>(
+    prefix: &'f RequestPrefix<A>,
     tx: &'f mut W,
     cancel: TyTok,
 ) -> Result<(), MessagingError>
 where
+    A: Allocator,
     W: TrBuffWrite<u8>,
     TyTok: TrCancellationToken,
 {
@@ -120,8 +111,7 @@ where
         .await
         .map_err(MessagingError::Encode)?;
     prefix
-        .location_
-        .as_str()
+        .location()
         .encode_async(MpEncoder::new(&mut *tx))
         .may_cancel_with(cancel.child_token())
         .await
@@ -135,7 +125,7 @@ where
     Result::Ok(())
 }
 
-/// 从接收半边解出一个请求前缀。
+/// 从接收半边解出一个请求前缀，allocator 为 [`Global`]。
 ///
 /// 只读前缀所需的字节：报文体的第一个字节仍在环里。未知方法位报
 /// [`MessagingError::UnknownMethod`]，不猜一个近似值。
@@ -143,17 +133,6 @@ where
 /// # Errors
 ///
 /// 报文不是合法编码、方法位不可识别、对端提前关闭，或读子流失败时返回错误。
-///
-/// # Examples
-///
-/// ```ignore
-/// use abs_cancel::NonCancellableToken;
-/// use mptp_wire::read_request_prefix_async;
-///
-/// let prefix = read_request_prefix_async(&mut rx)
-///     .may_cancel_with(NonCancellableToken::new())
-///     .await?;
-/// ```
 pub fn read_request_prefix_async<'f, R>(rx: &'f mut R) -> ReadRequestPrefixAsync<'f, 'f, R>
 where
     R: 'f + TrBuffRead<u8>,
@@ -167,7 +146,7 @@ where
 async fn read_request_prefix_async_<'f, R, TyTok>(
     rx: &'f mut R,
     cancel: TyTok,
-) -> Result<RequestPrefix, MessagingError>
+) -> Result<RequestPrefix<Global>, MessagingError>
 where
     R: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
@@ -177,19 +156,68 @@ where
         .await
         .map_err(MessagingError::Decode)?;
     let method_ = method_from_u8_(code).ok_or(MessagingError::UnknownMethod { code })?;
-    let location_ = String::decode_async(MpDecoder::new(&mut *rx))
+    let location_ = AllocString::<Global>::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(MessagingError::Decode)?;
-    let headers_ = Option::<Headers>::decode_async(MpDecoder::new(&mut *rx))
+    let headers_ = Option::<Headers<Global>>::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await
         .map_err(MessagingError::Decode)?;
-    Result::Ok(RequestPrefix {
-        method_,
-        location_,
-        headers_,
-    })
+    Result::Ok(RequestPrefix::from_parts_(
+        method_, location_, headers_, Global,
+    ))
+}
+
+/// 从接收半边解出一个请求前缀，所有堆内存都由 `arena` 分配。
+///
+/// 返回的前缀 allocator 是 `&'alloc Alloc`，因此它不能活过 `arena`。
+///
+/// # Errors
+///
+/// 同 [`read_request_prefix_async`]。
+pub fn read_request_prefix_in_async<'f, 'alloc, R, Alloc>(
+    rx: &'f mut R,
+    arena: &'alloc Alloc,
+) -> ReadRequestPrefixInAsync<'f, 'alloc, 'f, R, Alloc>
+where
+    R: 'f + TrBuffRead<u8>,
+    Alloc: TrArena<'alloc> + Allocator + 'alloc,
+    'alloc: 'f,
+{
+    ReadRequestPrefixInAsync::new(rx, arena)
+}
+
+/// [`read_request_prefix_in_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(ReadRequestPrefixIn, pub, new(pub(crate)))]
+async fn read_request_prefix_in_async_<'f, 'alloc, R, Alloc, TyTok>(
+    rx: &'f mut R,
+    arena: &'alloc Alloc,
+    cancel: TyTok,
+) -> Result<RequestPrefix<&'alloc Alloc>, MessagingError>
+where
+    R: TrBuffRead<u8>,
+    Alloc: TrArena<'alloc> + Allocator + 'alloc,
+    TyTok: TrCancellationToken,
+{
+    let code = u8::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(MessagingError::Decode)?;
+    let method_ = method_from_u8_(code).ok_or(MessagingError::UnknownMethod { code })?;
+    let location_ = AllocString::<&'alloc Alloc>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(MessagingError::Decode)?;
+    let headers_ =
+        Option::<Headers<&'alloc Alloc>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+            .may_cancel_with(cancel)
+            .await
+            .map_err(MessagingError::Decode)?;
+    Result::Ok(RequestPrefix::from_parts_(
+        method_, location_, headers_, arena,
+    ))
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -198,29 +226,15 @@ where
 
 /// 把回复前缀按 `status → headers` 写出去。
 ///
-/// 返回的 future 在 `.may_cancel_with(token)` 之后才携带取消令牌。
-///
 /// # Errors
 ///
 /// 编码失败、写子流失败，或等待期间被取消时返回 [`MessagingError::Encode`]。
-///
-/// # Examples
-///
-/// ```ignore
-/// use abs_cancel::NonCancellableToken;
-/// use abs_mptp::spec::Status;
-/// use mptp_wire::{write_response_prefix_async, ResponsePrefix};
-///
-/// let prefix = ResponsePrefix::new(Status::Ok);
-/// write_response_prefix_async(&prefix, &mut tx)
-///     .may_cancel_with(NonCancellableToken::new())
-///     .await?;
-/// ```
-pub fn write_response_prefix_async<'f, W>(
-    prefix: &'f ResponsePrefix,
+pub fn write_response_prefix_async<'f, A, W>(
+    prefix: &'f ResponsePrefix<A>,
     tx: &'f mut W,
-) -> WriteResponsePrefixAsync<'f, 'f, W>
+) -> WriteResponsePrefixAsync<'f, 'f, A, W>
 where
+    A: Allocator,
     W: 'f + TrBuffWrite<u8>,
 {
     WriteResponsePrefixAsync::new(prefix, tx)
@@ -229,12 +243,13 @@ where
 /// [`write_response_prefix_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(WriteResponsePrefix, pub, new(pub(crate)))]
-async fn write_response_prefix_async_<'f, W, TyTok>(
-    prefix: &'f ResponsePrefix,
+async fn write_response_prefix_async_<'f, A, W, TyTok>(
+    prefix: &'f ResponsePrefix<A>,
     tx: &'f mut W,
     cancel: TyTok,
 ) -> Result<(), MessagingError>
 where
+    A: Allocator,
     W: TrBuffWrite<u8>,
     TyTok: TrCancellationToken,
 {
@@ -254,25 +269,11 @@ where
     Result::Ok(())
 }
 
-/// 从接收半边解出一个回复前缀。
-///
-/// 只读前缀所需的字节；状态码是开放数值（任意 `u16` 都由 [`Status::new`] 表示），因此未知
-/// 状态不会失败。
+/// 从接收半边解出一个回复前缀，allocator 为 [`Global`]。
 ///
 /// # Errors
 ///
-/// 报文不是合法编码、对端提前关闭，或读子流失败时返回 [`MessagingError::Decode`]。
-///
-/// # Examples
-///
-/// ```ignore
-/// use abs_cancel::NonCancellableToken;
-/// use mptp_wire::read_response_prefix_async;
-///
-/// let prefix = read_response_prefix_async(&mut rx)
-///     .may_cancel_with(NonCancellableToken::new())
-///     .await?;
-/// ```
+/// 报文不是合法编码、对端提前关闭，或读子流失败时返回错误。
 pub fn read_response_prefix_async<'f, R>(rx: &'f mut R) -> ReadResponsePrefixAsync<'f, 'f, R>
 where
     R: 'f + TrBuffRead<u8>,
@@ -286,7 +287,7 @@ where
 async fn read_response_prefix_async_<'f, R, TyTok>(
     rx: &'f mut R,
     cancel: TyTok,
-) -> Result<ResponsePrefix, MessagingError>
+) -> Result<ResponsePrefix<Global>, MessagingError>
 where
     R: TrBuffRead<u8>,
     TyTok: TrCancellationToken,
@@ -296,24 +297,64 @@ where
         .await
         .map_err(MessagingError::Decode)?;
     let status_ = Status::new(code);
-    let headers_ = Option::<Headers>::decode_async(MpDecoder::new(&mut *rx))
+    let headers_ = Option::<Headers<Global>>::decode_async(MpDecoder::new(&mut *rx))
         .may_cancel_with(cancel)
         .await
         .map_err(MessagingError::Decode)?;
-    Result::Ok(ResponsePrefix { status_, headers_ })
+    Result::Ok(ResponsePrefix::from_parts_(status_, headers_, Global))
+}
+
+/// 从接收半边解出一个回复前缀，所有堆内存都由 `arena` 分配。
+///
+/// # Errors
+///
+/// 同 [`read_response_prefix_async`]。
+pub fn read_response_prefix_in_async<'f, 'alloc, R, Alloc>(
+    rx: &'f mut R,
+    arena: &'alloc Alloc,
+) -> ReadResponsePrefixInAsync<'f, 'alloc, 'f, R, Alloc>
+where
+    R: 'f + TrBuffRead<u8>,
+    Alloc: TrArena<'alloc> + Allocator + 'alloc,
+    'alloc: 'f,
+{
+    ReadResponsePrefixInAsync::new(rx, arena)
+}
+
+/// [`read_response_prefix_in_async`] 的 step 函数。
+#[allow(clippy::needless_lifetimes)]
+#[gen_may_cancel_future(ReadResponsePrefixIn, pub, new(pub(crate)))]
+async fn read_response_prefix_in_async_<'f, 'alloc, R, Alloc, TyTok>(
+    rx: &'f mut R,
+    arena: &'alloc Alloc,
+    cancel: TyTok,
+) -> Result<ResponsePrefix<&'alloc Alloc>, MessagingError>
+where
+    R: TrBuffRead<u8>,
+    Alloc: TrArena<'alloc> + Allocator + 'alloc,
+    TyTok: TrCancellationToken,
+{
+    let code = u16::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel.child_token())
+        .await
+        .map_err(MessagingError::Decode)?;
+    let status_ = Status::new(code);
+    let headers_ =
+        Option::<Headers<&'alloc Alloc>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+            .may_cancel_with(cancel)
+            .await
+            .map_err(MessagingError::Decode)?;
+    Result::Ok(ResponsePrefix::from_parts_(status_, headers_, arena))
 }
 
 #[cfg(test)]
 mod tests_ {
     //! 四个线格式入口的往返、字节顺序与「不碰体」性质。
     //!
-    //! 这里用 `&mut [u8]` / `&[u8]` 当段接口的实现：编码与解码都是纯内存操作，不需要连接、
-    //! 也不需要运行时。真实 socket 往返由 demo 的 e2e 脚本覆盖。
-    //!
     //! Round-trip, wire order and the "never touch the body" property of the four entry
-    //! points. `&mut [u8]` / `&[u8]` stand in for the segment interface: everything is pure
-    //! in-memory work, so neither a connection nor a runtime is needed.
+    //! points.
 
+    use alloc::alloc::Global;
     use core::{
         future::Future,
         pin::pin,
@@ -341,19 +382,123 @@ mod tests_ {
         }
     }
 
+    /// 测试用的 arena：分配走 `Global`，`TrArena` 的 `Ref<T>` 是泄漏出来的 `&mut T`。
+    ///
+    /// 只在测试里使用；它模拟 `BumpListAlloc` 那种「只借出、不回收」的 arena，用来验证
+    /// `_in_` 解码路径确实把字符串与头表分配进调用方给的 arena。
+    struct TestArena;
+
+    // SAFETY: 直接转发给 `Global`；deallocate 的契约由 `Global` 保证。
+    unsafe impl Allocator for TestArena {
+        fn allocate(
+            &self,
+            layout: core::alloc::Layout,
+        ) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
+            Global.allocate(layout)
+        }
+
+        unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
+            // SAFETY: 调用方保证 ptr/layout 来自本分配器，而本分配器转发给 `Global`。
+            unsafe { Global.deallocate(ptr, layout) }
+        }
+    }
+
+    impl<'alloc> TrArena<'alloc> for TestArena {
+        type Error = core::convert::Infallible;
+
+        type Ref<T: 'alloc>
+            = &'alloc mut T
+        where
+            Self: 'alloc;
+
+        type AllocValueAsync<'a, T>
+            = core::future::Ready<Result<&'alloc mut T, core::convert::Infallible>>
+        where
+            'alloc: 'a,
+            T: 'alloc + 'a,
+            Self: 'alloc + 'a;
+
+        fn alloc_value_async<'a, T>(&'alloc self, value: T) -> Self::AllocValueAsync<'a, T>
+        where
+            'alloc: 'a,
+            T: 'alloc + 'a,
+            Self: 'alloc + 'a,
+        {
+            core::future::ready(Result::Ok(alloc::boxed::Box::leak(alloc::boxed::Box::new(
+                value,
+            ))))
+        }
+    }
+
+    /// 测试 `_in_` 解码把字符串与头表分配进调用方给的 arena。
+    /// Test that `_in_` decoding allocates strings and the header map in the supplied arena.
+    ///
+    /// - 手段：编码一个带数字头与对象头的请求前缀，再用 `TestArena` 作为 arena 调
+    ///   `read_request_prefix_in_async`。
+    /// - 判断：解出的方法 / 位置 / 头值与原值一致；返回类型的前缀 allocator 是
+    ///   `&TestArena`，证明所有堆内存都来自该 arena 而不是 `Global`。
+    ///
+    /// - Means: encode a request prefix with numeric and object headers, then decode it with
+    ///   `read_request_prefix_in_async` using `TestArena`.
+    /// - Verdict: method / location / header values match, and the returned prefix's
+    ///   allocator is `&TestArena`, proving the heap memory came from that arena.
+    #[test]
+    fn request_prefix_decodes_into_supplied_arena_() {
+        let mut headers = Headers::new(Global);
+        headers.set_num(StdHeaderKey::Body_Size, 12);
+        headers.set(
+            HeaderKey::from(StdHeaderKey::Cookie),
+            HeaderVal::from_bytes(0x1234, b"v", Global),
+        );
+        let prefix = RequestPrefix::with_headers(
+            AccessMethod::Call,
+            "/arena",
+            Option::Some(headers),
+            Global,
+        );
+
+        let mut storage = [0u8; 128usize];
+        let cap = storage.len();
+        let mut sink: &mut [u8] = storage.as_mut_slice();
+        block_on_(
+            write_request_prefix_async(&prefix, &mut sink)
+                .may_cancel_with(NonCancellableToken::new()),
+        )
+        .expect("请求前缀编码应当成功");
+        let written = cap - sink.len();
+
+        let arena = TestArena;
+        let mut input: &[u8] = &storage[..written];
+        let decoded: RequestPrefix<&TestArena> = block_on_(
+            read_request_prefix_in_async(&mut input, &arena)
+                .may_cancel_with(NonCancellableToken::new()),
+        )
+        .expect("arena 解码应当成功");
+
+        assert_eq!(decoded.method(), AccessMethod::Call);
+        assert_eq!(decoded.location(), "/arena");
+        assert!(input.is_empty());
+        let headers = decoded.headers().expect("应该有头表");
+        assert_eq!(headers.body_size(), Option::Some(12usize));
+        assert_eq!(
+            headers
+                .try_get_val(StdHeaderKey::Cookie)
+                .and_then(HeaderVal::data),
+            Option::Some(&b"v"[..])
+        );
+    }
+
     /// 测试请求前缀的线上字节就是「方法 → 位置 → 头」三个连续值。
     /// Test that a request prefix is exactly three consecutive values in wire order.
     ///
     /// - 手段：以 `View` + `"/x"` + 无头编码，随后读出被写走的字节。
-    /// - 判断：字节为 `01 a2 2f 78 c0`——方法位、fixstr 位置、`nil` 头，没有任何额外数组头。
-    ///   若实现把三个值包成元组，第二条断言会看到数组标记而失败。
+    /// - 判断：字节为 `01 a2 2f 78 c0`。
     ///
     /// - Means: encode `View` + `"/x"` + no headers and read back the bytes written.
-    /// - Verdict: `01 a2 2f 78 c0` — method bit, fixstr location, nil headers, with no extra
-    ///   array header. Wrapping the three values in a tuple would leave an array marker here.
+    /// - Verdict: `01 a2 2f 78 c0`.
     #[test]
     fn request_prefix_wire_order_() {
-        let prefix = RequestPrefix::new(AccessMethod::View, "/x");
+        let prefix = RequestPrefix::new(AccessMethod::View, "/x", Global);
         let mut storage = [0u8; 32usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -372,17 +517,13 @@ mod tests_ {
     /// Test that a response prefix is exactly two consecutive values in wire order.
     ///
     /// - 手段：以 `Status::Ok` + 无头编码，读出字节。
-    /// - 判断：字节为 `cc c8 c0`——`mp_denco` 把 200 写成最短的 `u8` 形态，随后是 `nil` 头；
-    ///   没有数组头，也没有把状态换成另一种容器。MessagePack 的整数宽度不进入语义，解码侧
-    ///   只要按 `u16` 读就能接受任意宽度。
+    /// - 判断：字节为 `cc c8 c0`。
     ///
     /// - Means: encode `Status::Ok` + no headers and read back the bytes.
-    /// - Verdict: `cc c8 c0` — `mp_denco` writes 200 in the shortest `u8` form followed by nil
-    ///   headers, with neither an array header nor another container. Integer width carries no
-    ///   semantics in MessagePack, and decoding as `u16` accepts every width.
+    /// - Verdict: `cc c8 c0`.
     #[test]
     fn response_prefix_wire_order_() {
-        let prefix = ResponsePrefix::new(Status::Ok);
+        let prefix = ResponsePrefix::new(Status::Ok, Global);
         let mut storage = [0u8; 16usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -400,22 +541,20 @@ mod tests_ {
     /// 测试读请求前缀时**不会**读走报文体的第一个字节。
     /// Test that reading a request prefix never consumes the first body byte.
     ///
-    /// - 手段：把一段合法的请求前缀与两个体字节写在同一个切片里，只调用前缀解码，再检查
-    ///   剩下的输入。
-    /// - 判断：解出的前缀与原值相等，且输入恰好剩下 `[0xAA, 0xBB]`；多读一个字节就会让这条
-    ///   断言失败（分块体会因此把数据字节当成块长）。
+    /// - 手段：把一段合法的请求前缀与两个体字节写在同一个切片里，只调用前缀解码。
+    /// - 判断：解出的前缀与原值相等，且输入恰好剩下 `[0xAA, 0xBB]`。
     ///
     /// - Means: put a valid request prefix and two body bytes in one slice, decode only the
-    ///   prefix, then inspect what is left.
+    ///   prefix.
     /// - Verdict: the decoded prefix equals the original and the input is exactly
-    ///   `[0xAA, 0xBB]`; reading one byte too many would fail this and desynchronise a chunked
-    ///   body.
+    ///   `[0xAA, 0xBB]`.
     #[test]
     fn request_prefix_leaves_body_untouched_() {
         let prefix = RequestPrefix::with_headers(
             AccessMethod::Call,
             "/rpc/echo",
-            Option::Some(Headers::new()),
+            Option::Some(Headers::new(Global)),
+            Global,
         );
         let mut storage = [0u8; 128usize];
         let cap = storage.len();
@@ -440,28 +579,31 @@ mod tests_ {
         assert_eq!(input, &body);
     }
 
-    /// 测试头值直接写成 MessagePack 整数 / 字符串，不带 `"Num"` / `"Text"` 变体标签。
-    /// Test that header values are bare MessagePack integers / strings, without variant tags.
+    /// 测试头值是「裸整数」或「`[type_id, bin]` 数组」，不带变体标签。
+    /// Test that header values are bare integers or `[type_id, bin]` arrays.
     ///
-    /// - 手段：构造 `{0xA1: Text("12"), 0xA2: Num(1)}` 的回复前缀并编码。
-    /// - 判断：字节为
-    ///   `cc c8 82 cc a1 a2 31 32 cc a2 01`——状态 200、头表两项，两个值分别是裸字符串与
-    ///   裸整数。若仍走外部标签，会看到 `"Text"` / `"Num"` 的字符串片段。
+    /// - 手段：构造带 `Body_Size: 12`、`Body_Type: 1` 与 `Cookie: [0x1234, bin("v")]`
+    ///   的回复前缀并编码。
+    /// - 判断：字节里没有 `"Num"` / `"Obj"` 之类的变体标签；数字直接写整数，对象写两元素
+    ///   数组。
     ///
-    /// - Means: build a response prefix carrying `{0xA1: Text("12"), 0xA2: Num(1)}` and
-    ///   encode it.
-    /// - Verdict: the bytes are `cc c8 82 cc a1 a2 31 32 cc a2 01` — status 200, two header
-    ///   entries, one bare string and one bare integer. An externally tagged representation
-    ///   would contain the literal `"Text"` / `"Num"` strings.
+    /// - Means: encode a response prefix carrying `Body_Size: 12`, `Body_Type: 1` and
+    ///   `Cookie: [0x1234, bin("v")]`.
+    /// - Verdict: the bytes contain no `"Num"` / `"Obj"` variant tags; numbers are bare
+    ///   integers and objects are two-element arrays.
     #[test]
-    fn response_prefix_headers_are_bare_values_() {
-        let mut headers = Headers::new();
-        headers.set_text(StdHeaderKey::Body_Size, "12");
+    fn response_prefix_obj_value_wire_form_() {
+        let mut headers = Headers::new(Global);
+        headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set_num(
             StdHeaderKey::Body_Type,
             StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
         );
-        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers));
+        headers.set(
+            HeaderKey::from(StdHeaderKey::Cookie),
+            HeaderVal::from_bytes(0x1234, b"v", Global),
+        );
+        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers), Global);
 
         let mut storage = [0u8; 64usize];
         let cap = storage.len();
@@ -477,9 +619,12 @@ mod tests_ {
             &storage[..written],
             &[
                 0xcc, 0xc8, // status 200
-                0x82, // headers: 2 entries
-                0xcc, 0xa1, 0xa2, b'1', b'2', // Body_Size: "12"
+                0x83, // headers: 3 entries
+                0xcc, 0xa1, 0x0c, // Body_Size: 12
                 0xcc, 0xa2, 0x01, // Body_Type: 1
+                0xcc, 0xb3, // Cookie key
+                0x92, 0xcd, 0x12, 0x34, // [type_id = 0x1234,
+                0xc4, 0x01, b'v', // bin("v")]
             ]
         );
     }
@@ -487,14 +632,11 @@ mod tests_ {
     /// 测试头值解码接受「正数用有符号整数编码」的等价表示。
     /// Test that header-value decoding accepts positive values encoded as signed integers.
     ///
-    /// - 手段：直接喂入 `cc c8 81 cc a1 d1 00 01`——状态 200，头表一项，值用 `int16` 表示 1。
-    /// - 判断：解出的 `Body_Size` 是 `Num(1)`。MessagePack 的整数宽度与符号类型不进入语义，
-    ///   只要数值落在 `u16` 范围内就应当接受。
+    /// - 手段：直接喂入 `cc c8 81 cc a1 d1 00 01`。
+    /// - 判断：解出的 `Body_Size` 是 `Num(1)`。
     ///
-    /// - Means: feed `cc c8 81 cc a1 d1 00 01` — status 200, one header entry whose value is
-    ///   the `int16` form of 1.
-    /// - Verdict: the decoded `Body_Size` is `Num(1)`. MessagePack integer width and
-    ///   signedness carry no semantics; any value within `u16` must be accepted.
+    /// - Means: feed `cc c8 81 cc a1 d1 00 01`.
+    /// - Verdict: the decoded `Body_Size` is `Num(1)`.
     #[test]
     fn header_value_accepts_signed_positive_() {
         let bytes = [
@@ -516,28 +658,30 @@ mod tests_ {
         assert!(input.is_empty());
     }
 
-    /// 测试带头表的回复前缀能完整往返，且头值形态不变。
-    /// Test that a response prefix with headers round-trips with header forms intact.
+    /// 测试带头表的回复前缀能完整往返。
+    /// Test that a response prefix with headers round-trips.
     ///
-    /// - 手段：构造带 `Body_Size` 文本头、`Body_Type` 数字头与自定义数字键的表，编码后解码。
-    /// - 判断：状态、整张头表与自定义键都相等；文本仍是文本、数字仍是数字，没有被归一成
-    ///   同一种形态。
+    /// - 手段：构造带数字头、对象头与自定义数字键的表，编码后解码。
+    /// - 判断：状态、整张头表与自定义键都相等。
     ///
-    /// - Means: build a map with a textual `Body_Size`, a numeric `Body_Type` and a custom
-    ///   numeric key, encode it, then decode it back.
-    /// - Verdict: status, the whole map and the custom key all compare equal; text stays text
-    ///   and numbers stay numbers.
+    /// - Means: build a map with numeric headers, an object header and a custom numeric key,
+    ///   encode it, then decode it back.
+    /// - Verdict: status, the whole map and the custom key all compare equal.
     #[test]
     fn response_prefix_headers_roundtrip_() {
-        let mut headers = Headers::new();
-        headers.set_text(StdHeaderKey::Body_Size, "12");
+        let mut headers = Headers::new(Global);
+        headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set_num(
             StdHeaderKey::Body_Type,
             StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
         );
+        headers.set(
+            HeaderKey::from(StdHeaderKey::Cookie),
+            HeaderVal::from_bytes(0xabc, b"payload", Global),
+        );
         headers.set_num(StdHeaderKey::new(0x01), 7u16);
 
-        let prefix = ResponsePrefix::with_headers(Status::Created, Option::Some(headers));
+        let prefix = ResponsePrefix::with_headers(Status::Created, Option::Some(headers), Global);
         let mut storage = [0u8; 128usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -568,24 +712,20 @@ mod tests_ {
     /// 测试字符串头键能随回复前缀完整往返。
     /// Test that a string header key round-trips through a response prefix.
     ///
-    /// - 手段：构造一张同时带标准数字头与 `HeaderKey::from_text("x-custom")` 的表，编码后
-    ///   解码。
-    /// - 判断：整张头表相等，且字符串键能按原键取回；说明新键类型在线上确实写成
-    ///   MessagePack 字符串，而不是被折叠成数字或被丢弃。
+    /// - 手段：构造一张同时带标准数字头与 `HeaderKey::from_text("x-custom")` 的表。
+    /// - 判断：整张头表相等，且字符串键能按原键取回。
     ///
     /// - Means: build a map with a standard numeric header and
-    ///   `HeaderKey::from_text("x-custom")`, encode it, then decode it back.
-    /// - Verdict: the whole map compares equal and the string key resolves again, showing that
-    ///   the new key is written as a MessagePack string rather than folded into a number or
-    ///   dropped.
+    ///   `HeaderKey::from_text("x-custom")`.
+    /// - Verdict: the whole map compares equal and the string key resolves again.
     #[test]
     fn string_header_key_roundtrips_() {
-        let key = HeaderKey::<String>::from_text("x-custom");
-        let mut headers = Headers::new();
-        headers.set_text(StdHeaderKey::Body_Size, "12");
-        headers.set(key.clone(), HeaderVal::from_text("v"));
+        let key = HeaderKey::from_text("x-custom", Global);
+        let mut headers = Headers::new(Global);
+        headers.set_num(StdHeaderKey::Body_Size, 12);
+        headers.set(key.clone(), HeaderVal::from_bytes(0x1234, b"v", Global));
 
-        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers));
+        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers), Global);
         let mut storage = [0u8; 128usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -605,25 +745,22 @@ mod tests_ {
         assert_eq!(decoded, prefix);
         assert_eq!(
             decoded.headers().expect("应该有头表").try_get(key),
-            Option::Some(&HeaderVal::from_text("v"))
+            Option::Some(&HeaderVal::from_bytes(0x1234, b"v", Global))
         );
     }
 
-    /// 测试任意 `u16` 状态码都能往返（状态是开放数值，不是封闭枚举）。
-    /// Test that every `u16` status round-trips: status is an open numeric value.
+    /// 测试任意 `u16` 状态码都能往返。
+    /// Test that every `u16` status round-trips.
     ///
     /// - 手段：取 `0`、`599`、`65535` 三个不在常用集合里的状态编码再解码。
-    /// - 判断：解出的状态数值与原值完全相等。若实现把未知状态折叠成某个近似值，这条断言
-    ///   会立刻失败。
+    /// - 判断：解出的状态数值与原值完全相等。
     ///
-    /// - Means: encode and decode the statuses `0`, `599` and `65535`, none of which belongs
-    ///   to the common set.
-    /// - Verdict: each decoded status equals the original number; folding an unknown status
-    ///   into a nearby value would fail here.
+    /// - Means: encode and decode the statuses `0`, `599` and `65535`.
+    /// - Verdict: each decoded status equals the original number.
     #[test]
     fn response_status_is_open_() {
         for code in [0u16, 599u16, u16::MAX] {
-            let prefix = ResponsePrefix::new(Status::new(code));
+            let prefix = ResponsePrefix::new(Status::new(code), Global);
             let mut storage = [0u8; 16usize];
             let cap = storage.len();
             let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -643,18 +780,14 @@ mod tests_ {
         }
     }
 
-    /// 测试解码器接受「固定 u16 宽度」的状态码，与旧 `rmp-serde` 写出的字节互通。
-    /// Test that the decoder accepts a fixed-width `u16` status, interoperating with old
-    /// `rmp-serde` bytes.
+    /// 测试解码器接受「固定 u16 宽度」的状态码。
+    /// Test that the decoder accepts a fixed-width `u16` status.
     ///
-    /// - 手段：直接喂入 `cd 00 c8 c0`——`rmp-serde` 对 `u16` 200 的固定宽度表示加上 `nil` 头。
-    /// - 判断：解出 `Status::Ok` 且没有头表。`mp_denco` 自己写的是最短形态 `cc c8`，但
-    ///   MessagePack 的整数宽度不进入语义；这条用例保证新旧实现仍能对话。
+    /// - 手段：直接喂入 `cd 00 c8 c0`。
+    /// - 判断：解出 `Status::Ok` 且没有头表。
     ///
-    /// - Means: feed `cd 00 c8 c0` — `rmp-serde`'s fixed-width form of `u16` 200 followed by
-    ///   nil headers.
-    /// - Verdict: `Status::Ok` with no header map. `mp_denco` itself writes the shortest form
-    ///   `cc c8`, but integer width carries no semantics; this pins old/new interoperability.
+    /// - Means: feed `cd 00 c8 c0`.
+    /// - Verdict: `Status::Ok` with no header map.
     #[test]
     fn response_prefix_accepts_fixed_width_status_() {
         let bytes = [0xcdu8, 0x00u8, 0xc8u8, 0xc0u8];
@@ -673,13 +806,11 @@ mod tests_ {
     /// Test that an unknown method bit fails loudly instead of folding into a known method.
     ///
     /// - 手段：把 `0x7f` 作为方法位（后面跟一个空位置与 `nil` 头）喂给请求前缀解码。
-    /// - 判断：返回 `Err(MessagingError::UnknownMethod)`。线上契约不认识就不能猜——把 `0x7f`
-    ///   折成 `Head` 会让服务端把一次未知访问当成元信息查询。
+    /// - 判断：返回 `Err(MessagingError::UnknownMethod)`。
     ///
-    /// - Means: feed `0x7f` as the method bit (followed by an empty location and nil headers)
-    ///   to the request-prefix decoder.
-    /// - Verdict: `Err(MessagingError::UnknownMethod)`. An unrecognised wire contract is never
-    ///   guessed: folding `0x7f` into `Head` would turn an unknown access into a metadata read.
+    /// - Means: feed `0x7f` as the method bit (followed by an empty location and nil
+    ///   headers).
+    /// - Verdict: `Err(MessagingError::UnknownMethod)`.
     #[test]
     fn unknown_method_fails_loudly_() {
         let bytes = [0x7fu8, 0xa0u8, 0xc0u8];
@@ -695,23 +826,26 @@ mod tests_ {
     }
 
     /// 测试「没有头」与「空头表」在线上是两种不同表示，解码后仍可区分。
-    /// Test that "no headers" and "an empty map" are distinct on the wire and after decoding.
+    /// Test that "no headers" and "an empty map" stay distinct on the wire and after
+    /// decoding.
     ///
     /// - 手段：分别编码无头的请求与带头表（空表）的请求，再解码。
-    /// - 判断：前者 `headers()` 为 `None`，后者为 `Some` 且 `is_empty` 为真。把空表折成
-    ///   `nil` 会让「有没有头表」这条协议区分消失。
+    /// - 判断：前者 `headers()` 为 `None`，后者为 `Some` 且 `is_empty` 为真。
     ///
-    /// - Means: encode one request without headers and one carrying an empty map, then decode
-    ///   both.
-    /// - Verdict: the first reports `None`, the second `Some` with `is_empty()` true; folding
-    ///   an empty map into nil would erase the protocol-level distinction.
+    /// - Means: encode one request without headers and one carrying an empty map, then
+    ///   decode both.
+    /// - Verdict: the first reports `None`, the second `Some` with `is_empty()` true.
     #[test]
     fn absent_and_empty_headers_stay_distinct_() {
-        let absent = RequestPrefix::new(AccessMethod::Head, "/x");
-        let empty =
-            RequestPrefix::with_headers(AccessMethod::Head, "/x", Option::Some(Headers::new()));
+        let absent = RequestPrefix::new(AccessMethod::Head, "/x", Global);
+        let empty = RequestPrefix::with_headers(
+            AccessMethod::Head,
+            "/x",
+            Option::Some(Headers::new(Global)),
+            Global,
+        );
 
-        let decode = |prefix: &RequestPrefix| {
+        let decode = |prefix: &RequestPrefix<Global>| {
             let mut storage = [0u8; 64usize];
             let cap = storage.len();
             let mut sink: &mut [u8] = storage.as_mut_slice();

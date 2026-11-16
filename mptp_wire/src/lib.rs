@@ -30,6 +30,9 @@
 //! future `mptp_quic` can share exactly one wire implementation.
 
 #![no_std]
+// 头表内部的 `BTreeMap` / `Arc` 都带 allocator 参数；两者的 allocator 构造器目前仍受
+// `allocator_ext` / `btreemap_alloc` 控制。
+#![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
 
 extern crate alloc;
@@ -51,9 +54,10 @@ pub use io_::ReadExactError;
 pub use num_or_str_::U16OrStr;
 pub use prefix_::{RequestPrefix, ResponsePrefix};
 pub use wire_::{
-    ReadRequestPrefixAsync, ReadResponsePrefixAsync, WriteRequestPrefixAsync,
-    WriteResponsePrefixAsync, read_request_prefix_async, read_response_prefix_async,
-    write_request_prefix_async, write_response_prefix_async,
+    ReadRequestPrefixAsync, ReadRequestPrefixInAsync, ReadResponsePrefixAsync,
+    ReadResponsePrefixInAsync, WriteRequestPrefixAsync, WriteResponsePrefixAsync,
+    read_request_prefix_async, read_request_prefix_in_async, read_response_prefix_async,
+    read_response_prefix_in_async, write_request_prefix_async, write_response_prefix_async,
 };
 
 /// 本 crate 依赖的外部 crate 转出，供下游与宏生成代码不必逐条声明版本。
@@ -64,7 +68,7 @@ pub mod x_deps {
     pub use abs_cancel;
     pub use abs_denco;
     pub use abs_mptp;
-    pub use denco_macro;
+    pub use abs_str;
     pub use gen_mcf2;
     pub use mp_denco;
 }
