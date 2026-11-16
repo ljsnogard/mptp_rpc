@@ -168,3 +168,12 @@ type Alloc: AllocatorClone + 'static + for<'a> TrArena<'a> + for<'a> TrAllocSour
   用 `im-session-example` feature 关闭；下游迁移完成后恢复。
 - 验证：`cargo test -p mptp_serving`（14 passed）与
   `cargo clippy -p mptp_serving --all-targets` 通过。
+
+## 6. 大体的两个边界处理
+
+`TrNumOrObj` 的 `Num` 对标准头是 `u16`，因此定长体的 `Body_Size` 不能超过 `u16::MAX`：
+
+- 客户端：`body_bytes` / `body_sized` 在超过上限时改写为分块声明；`SizedBody` 内部用
+  `LimitedReader::new(src, size)` 包住源，分块搬运不会读到声明长度之后。
+- 服务端：`sized_async` 超过上限时返回
+  `ProtocolError::InvalidBodySize`，提示改用分块体，而不是静默写成 `u16::MAX`。

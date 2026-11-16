@@ -24,7 +24,7 @@ use abs_mptp::{
     spec::StdHeaderKey,
 };
 use gen_mcf2::gen_may_cancel_future;
-use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix};
+use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix, limited::LimitedReader};
 
 use super::{
     client_::MptpClient,
@@ -49,9 +49,12 @@ pub struct BytesBody<'a> {
 }
 
 /// 定长请求体源。
-pub struct SizedBody<'a, R> {
-    /// 体源。
-    src_: &'a mut R,
+pub struct SizedBody<'a, R>
+where
+    R: TrBuffRead<u8> + TrConsumerState,
+{
+    /// 体源；用限长视图包住，超过声明长度的部分不会被读走。
+    limited_: LimitedReader<'a, R>,
 
     /// 声明长度。
     size_: usize,
@@ -173,20 +176,20 @@ where
     }
 }
 
-impl<C, R> TrBodySend<C> for SizedBody<'_, R>
+impl<'a, C, R> TrBodySend<C> for SizedBody<'a, R>
 where
     C: TrConfig,
     R: TrBuffRead<u8> + TrConsumerState,
 {
     type SendAsync<'f>
-        = SendRequestBodyAsync<'f, 'f, C, R>
+        = SendRequestBodyAsync<'f, 'f, C, LimitedReader<'a, R>>
     where
         Self: 'f,
         C: 'f;
 
     fn send_body_async<'f>(&'f mut self, session: &'f mut MptpSession<C>) -> Self::SendAsync<'f> {
         let _ = self.size_;
-        session.send_req_body_async(&mut *self.src_)
+        session.send_req_body_async(&mut self.limited_)
     }
 }
 
@@ -348,7 +351,7 @@ where
             prefix_: self.prefix_,
             dock_: self.dock_,
             body_: SizedBody {
-                src_: src,
+                limited_: LimitedReader::new(src, size),
                 size_: size,
             },
             suffix_: self.suffix_,

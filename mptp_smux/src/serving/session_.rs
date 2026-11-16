@@ -562,17 +562,19 @@ where
 
     ensure_body_allowed_(session_.method_)?;
 
-    prefix_.headers_mut().set_num(
-        StdHeaderKey::Body_Size,
-        u16::try_from(size).unwrap_or(u16::MAX),
-    );
+    let Option::Some(size) = u16::try_from(size).ok() else {
+        return Result::Err(ServeError::Protocol(ProtocolError::InvalidBodySize {
+            text: StdString::from("定长回复体超过 u16::MAX；请改用分块体"),
+        }));
+    };
+    prefix_.headers_mut().set_num(StdHeaderKey::Body_Size, size);
     prefix_.headers_mut().remove(StdHeaderKey::Body_Transfer);
 
     write_response_prefix_inner_(session_, prefix_, cancel.child_token()).await?;
 
     {
         let tx = session_.core_.tx_mut_()?;
-        copy_sized_async_(body, tx, size, cancel.child_token())
+        copy_sized_async_(body, tx, usize::from(size), cancel.child_token())
             .await
             .map_err(resp_copy_error_)?;
     }
