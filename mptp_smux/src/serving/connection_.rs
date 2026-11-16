@@ -19,13 +19,12 @@ use alloc::sync::Arc;
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_smux::chan::TrChannelHalf;
 
-use crate::x_deps::{abs_buff, abs_smux};
-
 use super::{
     config::{ChannelHandle, ChannelRx, DockBinding, MuxCfg, TrConfig},
     handler_::TrServeHandler,
     servlet_::{MptpServlet, ServeListenerAsync},
 };
+use crate::x_deps::{abs_buff, abs_smux};
 
 /// 一条 MPTP 连接的 owner。
 ///
@@ -56,10 +55,10 @@ where
     /// 调用方负责先把连接绑定到默认 serving dock（`bind_async`），再把 binding 交进来；
     /// `state` 是共享状态，通常 `Arc::clone` 一份给 handler（如 `mptp_serving::RadixRouter`
     /// 的 `new_with_state`）。
-    pub fn new(binding: DockBinding<C>, handler: H, state: Arc<S>) -> Self {
+    pub fn new(binding: DockBinding<C>, handler: H, state: Arc<S>, alloc: C::Alloc) -> Self {
         MptpConnection {
             binding_: binding,
-            servlet_: MptpServlet::new(handler),
+            servlet_: MptpServlet::new(handler, alloc),
             state_: state,
         }
     }
@@ -77,16 +76,14 @@ where
     /// 在当前 binding 上循环 accept 并 inline 处理（单线程路径）。
     ///
     /// 需要并发时用 [`MptpConnection::servlet`] 的 `accept_async` + 调用者自己的 spawner。
-    pub fn serve_async<'f>(
-        &'f mut self,
-        reserve: usize,
-    ) -> ServeListenerAsync<'f, 'f, C, H>
+    pub fn serve_async<'f>(&'f mut self, reserve: usize) -> ServeListenerAsync<'f, 'f, C, H>
     where
         C: 'f,
         H: 'f,
         ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
-        self.servlet_.serve_listener_async(&mut self.binding_, reserve)
+        self.servlet_
+            .serve_listener_async(&mut self.binding_, reserve)
     }
 }

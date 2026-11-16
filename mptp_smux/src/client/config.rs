@@ -17,17 +17,19 @@
 //
 // `MuxCfg` 也在其中：工厂实现者要写 `type Ctx<'a> = ClientPrepCtx<'a, MuxCfg<MyCfg>>`，
 // 拿不到它就写不出那个 GAT。
+use core::alloc::AllocatorClone;
+
+use abs_denco::de::{TrAllocSource, TrArena};
 pub use abs_mptp::client::config::{
     ChannelHandle, ChannelListener, ChannelRx, ChannelTx, Dock, DockBinding, MuxCfg, MuxConn,
-    ReqPrefix, RespPrefix,
-    TrConfig as TrMptpClientConfig,
+    ReqPrefix, RespPrefix, TrConfig as TrMptpClientConfig,
 };
 
+use super::prep_ctx_::ClientPrepCtx;
 use crate::{
     messaging::{RequestPrefix, ResponsePrefix},
     ring_prepare_::TrPrepFactory,
 };
-use super::prep_ctx_::ClientPrepCtx;
 
 /// 一个 MPTP 客户端实现所需的**全部**配置。
 ///
@@ -40,10 +42,19 @@ pub trait TrConfig
 where
     Self: Sized
         + TrMptpClientConfig<
-            ReqPrefix = RequestPrefix,
-            RespPrefix = ResponsePrefix,
+            ReqPrefix = RequestPrefix<<Self as TrConfig>::Alloc>,
+            RespPrefix = ResponsePrefix<<Self as TrConfig>::Alloc>,
         >,
 {
+    /// 客户端 / 会话共享的分配器句柄。
+    ///
+    /// 它必须是 `Clone + 'static` 的：client 持有一份，每个 session 克隆一份；会话类型因此
+    /// 不需要生命周期参数。`SessionAlloc` 是本 crate 提供的实现。
+    type Alloc: AllocatorClone
+        + 'static
+        + for<'a> TrArena<'a>
+        + for<'a> TrAllocSource<'a, Self::Alloc>;
+
     /// 默认的 ring 准备**工厂类型**。
     ///
     /// 声明的是类型，不是实例：工厂由 `mptp_smux` 在每次最终裁决前用

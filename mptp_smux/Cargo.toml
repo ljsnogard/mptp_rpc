@@ -14,6 +14,11 @@ readme = "README.md"
 abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 # 协议层的形状全在这里：本 crate 只实现它规定的 trait，不重复定义协议。
 abs_mptp = { path = "../abs_mptp" }
+# `SessionAlloc` 直接实现 denco 的 `TrArena` / `TrArenaBytes` / `TrAllocSource`。
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git", features = ["type-id"] }
+abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git", default-features = false, features = [
+    "str_alloc",
+] }
 # MPTP 前缀的线上格式已抽到 `mptp_wire`；本 crate 只保留 smux 绑定与会话驱动。
 # 下游仍可通过 `mptp_smux::messaging`（指向 `mptp_wire` 的别名）使用原有路径。
 mptp_wire = { path = "../mptp_wire" }
@@ -29,8 +34,11 @@ mm_ptr = { git = "https://gitee.com/lino_snsalias/mm_ptr.git", branch = "dev/0.2
 # 因此不需要 `abs_art_facade::Runtime`。后端的点亮是全图并集的，由**应用**（下游 crate）
 # 自己声明 `abs_art-facade/rt-*` 即可，不需要经本 crate 逐层转发。
 
-# 会话级 arena：MptpSession 用它的 boxed::Box 分配（带 Drop 语义，内存随 arena 释放）。
-bumpalo = { version = "3.20.3", features = ["boxed"] }
+# 会话 / 客户端 / 服务端持有的 arena 分配器。`denco_arena` 让 `MpDecoder::new_in`
+# 能把位置字符串、头键与头值直接分配进同一个分配器。
+bumplist_alloc = { git = "https://gitee.com/lino_snsalias/bumplist_alloc.rs.git", features = [
+    "denco_arena",
+] }
 
 [features]
 # 两端对等：同时编译客户端与服务端。

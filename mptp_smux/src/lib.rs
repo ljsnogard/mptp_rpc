@@ -56,6 +56,7 @@ pub mod client;
 pub mod serving;
 
 #[cfg(any(feature = "client", feature = "server"))]
+mod alloc_;
 mod body_;
 #[cfg(any(feature = "client", feature = "server"))]
 mod copy_;
@@ -67,6 +68,7 @@ mod session_core_;
 mod session_state_;
 
 // 兼容旧路径：`mptp_smux::messaging::*` 仍然可用，但类型由 `mptp_wire` 拥有。
+pub use alloc_::SessionAlloc;
 pub use mptp_wire as messaging;
 pub use mptp_wire::{
     HeaderEntry, HeaderKey, HeaderVal, Headers, RequestPrefix, ResponsePrefix, U16OrStr,
@@ -93,15 +95,18 @@ pub mod x_deps {
     pub use abs_mptp;
     pub use abs_mptp::x_deps::abs_smux;
     pub use abs_smux::x_deps::abs_mm;
-    pub use mm_ptr;
+    pub use bumplist_alloc;
+pub use mm_ptr;
     pub use mptp_wire;
     // 兼容旧的 `mptp_smux::x_deps::{abs_denco, denco_macro, mp_denco}` 路径；
     // 实际依赖由 `mptp_wire` 持有，本 crate 不直接依赖 denco。
-    pub use mptp_wire::x_deps::{abs_denco, denco_macro, mp_denco};
+    pub use mptp_wire::x_deps::{abs_denco, mp_denco};
 }
 
 #[cfg(test)]
 mod tests_ {
+    use alloc::alloc::Global;
+
     use abs_mptp::spec::access_method::AccessMethod;
 
     /// 测试 `mptp_smux::messaging` 兼容别名仍导出 `mptp_wire` 的同一批类型。
@@ -118,14 +123,14 @@ mod tests_ {
     ///   checks construction.
     #[test]
     fn messaging_alias_exposes_wire_types_() {
-        fn assert_same(_: mptp_wire::RequestPrefix) {}
+        fn assert_same(_: mptp_wire::RequestPrefix<Global>) {}
 
-        let prefix: crate::messaging::RequestPrefix =
-            crate::messaging::RequestPrefix::new(AccessMethod::Call, "/alias");
+        let prefix: crate::messaging::RequestPrefix<Global> =
+            crate::messaging::RequestPrefix::new(AccessMethod::Call, "/alias", Global);
         assert_same(prefix);
 
-        let root_prefix: crate::RequestPrefix =
-            mptp_wire::RequestPrefix::new(AccessMethod::Call, "/root");
+        let root_prefix: crate::RequestPrefix<Global> =
+            mptp_wire::RequestPrefix::new(AccessMethod::Call, "/root", Global);
         assert_same(root_prefix);
     }
 }

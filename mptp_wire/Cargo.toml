@@ -12,7 +12,7 @@ readme = "README.md"
 [dependencies]
 abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 abs_cancel = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
-abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git" }
+abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git", features = ["type-id"] }
 abs_mptp = { path = "../abs_mptp" }
 # 头键 / location 的字符串一律由 `A: Allocator` 分配：`abs_str::String<A>`。
 abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git", default-features = false, features = [

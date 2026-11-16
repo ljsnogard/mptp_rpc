@@ -11,39 +11,32 @@
 //! still follows the `Body_Size` / `Body_Transfer` headers. `request_prefix` and the
 //! original `request_async` remain the escape hatches.
 
-use alloc::string::ToString;
-
 use core::{
     future::{Future, Ready, ready},
     pin::Pin,
     task::{Context, Poll},
 };
 
-use abs_buff::{
-    TrBuffRead,
-    buffer::TrConsumerState,
-};
+use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{
     client::{SessionState, TrMptpSession},
     spec::StdHeaderKey,
 };
 use gen_mcf2::gen_may_cancel_future;
-use mptp_wire::{
-    HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix,
-};
+use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix};
 
-use crate::{
-    error_::ClientError,
-    x_deps::{abs_buff, abs_cancel, gen_mcf2},
-};
 use super::{
     client_::MptpClient,
     config::{ChannelRx, Dock, TrConfig},
     session::{
-        IntoRespSuffixAsync, MptpSession, RespBodyRead, RespSuffixRead,
-        SendRequestBodyAsync, SendRequestSuffixAsync,
+        IntoRespSuffixAsync, MptpSession, RespBodyRead, RespSuffixRead, SendRequestBodyAsync,
+        SendRequestSuffixAsync,
     },
+};
+use crate::{
+    error_::ClientError,
+    x_deps::{abs_buff, abs_cancel, gen_mcf2},
 };
 
 /// 没有请求体。
@@ -117,7 +110,9 @@ pub struct ReadyMayCancel<T> {
 impl<T> ReadyMayCancel<T> {
     /// 用 `value` 造一个立即就绪的 future。
     pub fn new(value: T) -> Self {
-        ReadyMayCancel { inner_: ready(value) }
+        ReadyMayCancel {
+            inner_: ready(value),
+        }
     }
 }
 
@@ -221,10 +216,7 @@ where
         Self: 'f,
         C: 'f;
 
-    fn send_suffix_async<'f>(
-        &'f mut self,
-        session: &'f mut MptpSession<C>,
-    ) -> Self::SendAsync<'f> {
+    fn send_suffix_async<'f>(&'f mut self, session: &'f mut MptpSession<C>) -> Self::SendAsync<'f> {
         ReadyMayCancel::new(Result::Ok(session.state()))
     }
 }
@@ -240,10 +232,7 @@ where
         Self: 'f,
         C: 'f;
 
-    fn send_suffix_async<'f>(
-        &'f mut self,
-        session: &'f mut MptpSession<C>,
-    ) -> Self::SendAsync<'f> {
+    fn send_suffix_async<'f>(&'f mut self, session: &'f mut MptpSession<C>) -> Self::SendAsync<'f> {
         session.send_req_suffix_async(&mut *self.src_)
     }
 }
@@ -257,7 +246,7 @@ where
     client_: &'a MptpClient<C>,
 
     /// 请求前缀。
-    prefix_: RequestPrefix,
+    prefix_: RequestPrefix<C::Alloc>,
 
     /// 目标垛口；缺省取配置。
     dock_: Option<Dock<C>>,
@@ -270,19 +259,28 @@ where
 }
 
 /// 把前缀写成「定长体」声明；`size == 0` 时清掉两个体头（等价于没有体）。
-fn set_sized_header_(prefix: &mut RequestPrefix, size: usize) {
+///
+/// `Body_Size` 的 Num 形态是 `u16`；超过 `u16::MAX` 的体改用分块声明。这样大请求体仍然
+/// 发得出去，而不是被静默截断。
+fn set_sized_header_<A>(prefix: &mut RequestPrefix<A>, size: usize)
+where
+    A: core::alloc::AllocatorClone,
+{
     prefix.headers_mut().remove(StdHeaderKey::Body_Transfer);
     if size == 0usize {
         prefix.headers_mut().remove(StdHeaderKey::Body_Size);
+    } else if let Result::Ok(size) = u16::try_from(size) {
+        prefix.headers_mut().set_num(StdHeaderKey::Body_Size, size);
     } else {
-        prefix
-            .headers_mut()
-            .set_text(StdHeaderKey::Body_Size, size.to_string());
+        set_chunked_header_(prefix);
     }
 }
 
 /// 把前缀写成分块体声明。
-fn set_chunked_header_(prefix: &mut RequestPrefix) {
+fn set_chunked_header_<A>(prefix: &mut RequestPrefix<A>)
+where
+    A: core::alloc::AllocatorClone,
+{
     prefix.headers_mut().remove(StdHeaderKey::Body_Size);
     prefix.headers_mut().set_num(
         StdHeaderKey::Body_Transfer,
@@ -295,7 +293,7 @@ where
     C: TrConfig,
 {
     /// 由「客户端 + 前缀」构造。
-    pub(crate) fn new_(client: &'a MptpClient<C>, prefix: RequestPrefix) -> Self {
+    pub(crate) fn new_(client: &'a MptpClient<C>, prefix: RequestPrefix<C::Alloc>) -> Self {
         RequestBuilder {
             client_: client,
             prefix_: prefix,
@@ -317,7 +315,7 @@ where
     }
 
     /// 追加 / 覆盖一个请求头。
-    pub fn header(mut self, key: impl Into<HeaderKey>, val: HeaderVal) -> Self {
+    pub fn header(mut self, key: impl Into<HeaderKey<C::Alloc>>, val: HeaderVal<C::Alloc>) -> Self {
         self.prefix_.headers_mut().set(key, val);
         self
     }
@@ -349,7 +347,10 @@ where
             client_: self.client_,
             prefix_: self.prefix_,
             dock_: self.dock_,
-            body_: SizedBody { src_: src, size_: size },
+            body_: SizedBody {
+                src_: src,
+                size_: size,
+            },
             suffix_: self.suffix_,
         };
         set_sized_header_(&mut next.prefix_, size);
@@ -357,10 +358,7 @@ where
     }
 
     /// 分块请求体：自动写 `Body_Transfer: Chunked`。
-    pub fn body_chunked<R>(
-        self,
-        src: &'a mut R,
-    ) -> RequestBuilder<'a, C, ChunkedBody<'a, R>, S>
+    pub fn body_chunked<R>(self, src: &'a mut R) -> RequestBuilder<'a, C, ChunkedBody<'a, R>, S>
     where
         R: TrBuffRead<u8> + TrConsumerState,
     {
@@ -466,7 +464,7 @@ where
     session_: MptpSession<C>,
 
     /// 回复前缀。
-    prefix_: ResponsePrefix,
+    prefix_: ResponsePrefix<C::Alloc>,
 }
 
 impl<C> Response<C>
@@ -479,12 +477,12 @@ where
     }
 
     /// 回复头表。
-    pub fn headers(&self) -> Option<&mptp_wire::Headers> {
+    pub fn headers(&self) -> Option<&mptp_wire::Headers<C::Alloc>> {
         self.prefix_.headers()
     }
 
     /// 回复前缀。
-    pub fn prefix(&self) -> &ResponsePrefix {
+    pub fn prefix(&self) -> &ResponsePrefix<C::Alloc> {
         &self.prefix_
     }
 
@@ -523,7 +521,10 @@ where
     }
 
     /// 由两半构造回复；供 crate 内的后缀写端在 `finish` 后组装。
-    pub(crate) const fn from_parts_(session: MptpSession<C>, prefix: ResponsePrefix) -> Self {
+    pub(crate) const fn from_parts_(
+        session: MptpSession<C>,
+        prefix: ResponsePrefix<C::Alloc>,
+    ) -> Self {
         Response {
             session_: session,
             prefix_: prefix,
@@ -571,11 +572,14 @@ where
 
 #[cfg(test)]
 mod tests_ {
-    use super::*;
+    use alloc::alloc::Global;
+
     use abs_mptp::{
         messaging::{BodySize, TrMsgPrefix},
         spec::{NumOrStr, access_method::AccessMethod},
     };
+
+    use super::*;
 
     /// 测试七种方法默认都不声明请求体。
     /// Test that all seven methods start with no declared request body.
@@ -596,7 +600,7 @@ mod tests_ {
             AccessMethod::Pull,
             AccessMethod::Call,
         ] {
-            let prefix = RequestPrefix::new(method, "/x");
+            let prefix = RequestPrefix::new(method, "/x", Global);
             assert_eq!(prefix.body_info(), BodySize::NilBody, "{method:?}");
         }
     }
@@ -611,7 +615,7 @@ mod tests_ {
     /// - Verdict: `body_info` is `FixedLength(Num(12))`, not chunked.
     #[test]
     fn sized_body_helper_overrides_chunked_() {
-        let mut prefix = RequestPrefix::new(AccessMethod::Post, "/x");
+        let mut prefix = RequestPrefix::new(AccessMethod::Post, "/x", Global);
         set_chunked_header_(&mut prefix);
         set_sized_header_(&mut prefix, 12usize);
         assert_eq!(
@@ -630,7 +634,7 @@ mod tests_ {
     /// - Verdict: `body_info` is `ChunkedData`.
     #[test]
     fn chunked_body_helper_overrides_sized_() {
-        let mut prefix = RequestPrefix::new(AccessMethod::Call, "/x");
+        let mut prefix = RequestPrefix::new(AccessMethod::Call, "/x", Global);
         set_sized_header_(&mut prefix, 8usize);
         set_chunked_header_(&mut prefix);
         assert_eq!(prefix.body_info(), BodySize::ChunkedData);
@@ -646,7 +650,7 @@ mod tests_ {
     /// - Verdict: `body_info` is `NilBody`; neither body header is present.
     #[test]
     fn zero_sized_body_is_no_body_() {
-        let mut prefix = RequestPrefix::new(AccessMethod::Post, "/x");
+        let mut prefix = RequestPrefix::new(AccessMethod::Post, "/x", Global);
         set_sized_header_(&mut prefix, 0usize);
         assert_eq!(prefix.body_info(), BodySize::NilBody);
     }

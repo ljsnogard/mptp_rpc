@@ -11,13 +11,9 @@
 //! decides how to run many of them concurrently. The crate never spawns.
 
 use alloc::string::ToString;
-
 use core::marker::PhantomData;
 
-use abs_buff::{
-    TrBuffRead,
-    buffer::TrConsumerState,
-};
+use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
 use abs_mptp::spec::Status;
 use abs_smux::{
@@ -25,27 +21,25 @@ use abs_smux::{
     conn::{TrChannelListener, TrDockBinding},
 };
 use gen_mcf2::gen_may_cancel_future;
-use mptp_wire::{HeaderKey, HeaderVal, ResponsePrefix, read_request_prefix_async};
+use mptp_wire::{HeaderKey, HeaderVal, ResponsePrefix, read_request_prefix_with_async};
 
-use crate::{
-    copy_::drain_to_eof_async_,
-    ring_prepare_::TrPrepFactory,
-    error_::{ProtocolError, ServeError, TransportError},
-    x_deps::{abs_buff, abs_cancel, abs_mptp, abs_smux, gen_mcf2},
-};
 use super::{
-    config::{
-        ChannelHandle, ChannelRx, DockBinding, Listener, MuxCfg, TrConfig,
-    },
+    config::{ChannelHandle, ChannelRx, DockBinding, Listener, MuxCfg, TrConfig},
     handler_::TrServeHandler,
     prep_ctx_::ServingPrepCtx,
     session_::ServingSession,
+};
+use crate::{
+    copy_::drain_to_eof_async_,
+    error_::{ProtocolError, ServeError, TransportError},
+    ring_prepare_::TrPrepFactory,
+    x_deps::{abs_buff, abs_cancel, abs_mptp, abs_smux, gen_mcf2},
 };
 
 /// 临时 `Allow` 头键：用户自定义区最高位。
 ///
 /// 协议尚未给 `Allow` 分配标准头键；协议分配后替换本常量即可，上层 API 不变。
-pub const K_TMP_ALLOW_HEADER_KEY: HeaderKey = HeaderKey::from_num(0x009E);
+pub const K_TMP_ALLOW_HEADER_KEY: u16 = 0x009E;
 
 /// 临时 `Allow` 头的文本名。
 pub const K_TMP_ALLOW_HEADER_NAME: &str = "allow";
@@ -66,6 +60,9 @@ where
     /// 单一 handler。
     handler_: H,
 
+    /// 连接级分配器句柄；每条 session 克隆一份。
+    alloc_: C::Alloc,
+
     /// `C` 只出现在通道类型与 handler 约束里。
     _use_c_: PhantomData<fn() -> C>,
 }
@@ -78,9 +75,10 @@ where
     /// 用单一 handler 构造 servlet。
     ///
     /// 一个 servlet 只服务一条连接；连接由调用者通过 listener 交给它。
-    pub const fn new(handler: H) -> Self {
+    pub const fn new(handler: H, alloc: C::Alloc) -> Self {
         MptpServlet {
             handler_: handler,
+            alloc_: alloc,
             _use_c_: PhantomData,
         }
     }
@@ -103,16 +101,14 @@ where
     }
 
     /// 接受一条入向子流：income → ring → accept → 读请求前缀。
-    pub fn accept_async<'f>(
-        &'f self,
-        listener: &'f mut Listener<C>,
-    ) -> AcceptAsync<'f, 'f, C>
+    pub fn accept_async<'f>(&'f self, listener: &'f mut Listener<C>) -> AcceptAsync<'f, 'f, C, H>
     where
         C: 'f,
+        H: 'f,
         ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
-        AcceptAsync::new(listener)
+        AcceptAsync::new(self, listener)
     }
 
     /// 用单一 handler 处理一条 session。
@@ -150,11 +146,14 @@ where
 /// [`MptpServlet::accept_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(Accept, pub, new(pub(crate)))]
-async fn servlet_accept_async_<'f, C, K>(
+async fn servlet_accept_async_<'f, C, H, K>(
+    servlet: &'f MptpServlet<C, H>,
     listener: &'f mut Listener<C>,
     cancel: K,
 ) -> Result<ServingSession<C>, ServeError>
 where
+    C: TrConfig,
+    H: TrServeHandler<C>,
     C: TrConfig + 'f,
     ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
@@ -196,12 +195,12 @@ where
             })
         })?;
 
-    let prefix = read_request_prefix_async(&mut rx)
+    let prefix = read_request_prefix_with_async(&mut rx, &servlet.alloc_)
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(|err| ServeError::Protocol(ProtocolError::RequestPrefixDecode(err)))?;
 
-    ServingSession::new_(prefix, tx, rx)
+    ServingSession::new_(prefix, tx, rx, servlet.alloc_.clone())
 }
 
 /// [`MptpServlet::serve_session_async`] 的 step 函数。
@@ -223,10 +222,10 @@ where
 
     // 405：方法不在 handler 声明的集合内。先写回复，再收尾，不进入 handler。
     if !allow.contains(method) {
-        let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
+        let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed, session.allocator().clone());
         prefix.headers_mut().set(
-            K_TMP_ALLOW_HEADER_KEY,
-            HeaderVal::from_text(allow.to_allow_value()),
+            HeaderKey::from_num(K_TMP_ALLOW_HEADER_KEY),
+            HeaderVal::from_text(allow.to_allow_value(), session.allocator().clone()),
         );
         session
             .response_prefix(prefix)
@@ -349,6 +348,8 @@ where
 
 #[cfg(test)]
 mod tests_ {
+    use alloc::alloc::Global;
+
     use super::*;
     use crate::MethodSet;
 
@@ -365,15 +366,15 @@ mod tests_ {
     #[test]
     fn method_not_allowed_allow_header_round_trips_() {
         let allow = MethodSet::POST.union(MethodSet::CALL);
-        let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
+        let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed, Global);
         prefix.headers_mut().set(
-            K_TMP_ALLOW_HEADER_KEY,
-            HeaderVal::from_text(allow.to_allow_value()),
+            HeaderKey::from_num(K_TMP_ALLOW_HEADER_KEY),
+            HeaderVal::from_text(allow.to_allow_value(), Global),
         );
 
         let headers = prefix.headers().expect("刚刚写过头表");
         let value = headers
-            .try_get(K_TMP_ALLOW_HEADER_KEY)
+            .try_get(HeaderKey::from_num(K_TMP_ALLOW_HEADER_KEY))
             .expect("Allow 头应当在场");
         let text = value.as_text().expect("Allow 头应当是文本");
         assert_eq!(text, "POST,CALL");
@@ -390,7 +391,7 @@ mod tests_ {
     /// - Verdict: the status is preserved and the prefix constructs normally.
     #[test]
     fn not_found_is_ordinary_status_() {
-        let prefix = ResponsePrefix::new(Status::NotFound);
+        let prefix = ResponsePrefix::new(Status::NotFound, Global);
         assert_eq!(prefix.status(), Status::NotFound);
     }
 }
