@@ -43,7 +43,6 @@
 //!   （[`RadixRouter::with_group_metadata`]，端点自己的标记优先）。
 
 #![no_std]
-
 #![feature(allocator_ext)]
 #![feature(impl_trait_in_assoc_type)]
 
@@ -61,13 +60,13 @@ mod route_params_;
 mod router_;
 mod serve_handler_;
 
+pub use arena_::{ArenaFuture, arena_future_};
 /// 请求级取消句柄：直接复用 [`cantok_rs`] 的 `Copy` 令牌，其 `cancellation()` 返回具体
 /// future 而非 `Box<dyn Future>`，因此不带 `Send` / `'static` 擦除负担。
 pub use cantok_rs::CancellationToken as RequestCancel;
 pub use cantok_rs::{CancellationFuture, CancellationSource};
 pub use context_::MptpContext;
 pub use endpoint_::Endpoint;
-pub use arena_::{ArenaFuture, arena_future_};
 pub use handler_::{HandlerFuture, TrEndpointHandler, box_future_};
 pub use metadata_::EndpointMetadata;
 pub use middleware_::{MiddlewareFuture, NextFn, Pipeline, TrMiddleware};

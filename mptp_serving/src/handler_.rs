@@ -12,8 +12,10 @@ use core::future::Future;
 
 use mptp_smux::{ServeError, serving::config::TrConfig};
 
-use super::arena_::{ArenaFuture, arena_future_};
-use super::context_::MptpContext;
+use super::{
+    arena_::{ArenaFuture, arena_future_},
+    context_::MptpContext,
+};
 
 /// handler 返回的 future：分配在会话 allocator 里、类型擦除的 arena box。
 ///
