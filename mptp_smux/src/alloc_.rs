@@ -24,7 +24,9 @@ use core::{
 };
 
 use abs_denco::de::{TrAllocSource, TrArena, TrArenaBytes};
-use bumplist_alloc::{BumpListAlloc, BumpListAllocError, BumpListArenaError, PageSize};
+use bumplist_alloc::{
+    BumpListAlloc, BumpListAllocError, BumpListArenaError, BumpListBox, PageSize,
+};
 
 /// 客户端 / 会话 / 服务端共享的分配器句柄。
 ///
@@ -99,12 +101,12 @@ impl<'alloc> TrArena<'alloc> for SessionAlloc {
     type Error = BumpListArenaError;
 
     type Ref<T: 'alloc>
-        = &'alloc mut T
+        = BumpListBox<'alloc, T>
     where
         Self: 'alloc;
 
     type AllocValueAsync<'a, T>
-        = future::Ready<Result<&'alloc mut T, BumpListArenaError>>
+        = future::Ready<Result<BumpListBox<'alloc, T>, BumpListArenaError>>
     where
         'alloc: 'a,
         T: 'alloc + 'a,
