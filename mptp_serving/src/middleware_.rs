@@ -16,20 +16,15 @@
 //! (the pipeline writes a no-body rejection) or writes the reply itself and returns
 //! `Ok(None)` without calling `next`.
 
-use alloc::alloc::Global;
-use alloc::boxed::Box;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use alloc::{alloc::Global, boxed::Box, sync::Arc, vec::Vec};
 use core::alloc::Allocator;
 
 use abs_mptp::spec::Status;
-use mptp_smux::ServeError;
-use mptp_smux::serving::config::TrConfig;
+use mptp_smux::{ServeError, serving::config::TrConfig};
 
-use super::arena_::ArenaFuture;
-use super::context_::MptpContext;
-use super::endpoint_::Endpoint;
-use super::handler_::box_future_;
+use super::{
+    arena_::ArenaFuture, context_::MptpContext, endpoint_::Endpoint, handler_::box_future_,
+};
 
 /// 中间件 `call` 返回的 future：分配在请求级 arena 里、类型擦除的 [`ArenaFuture`]。
 ///
