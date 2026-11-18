@@ -38,7 +38,7 @@ where
         &'f self,
         method: AccessMethod,
         location: &'f str,
-        headers: &'f mut srv_config::ReqHeaders<C>,
+        headers: &'f mut srv_config::ReqHeaders<'f, C>,
         chan_tx: srv_config::ChannelTx<C>,
         chan_rx: srv_config::ChannelRx<C>,
     ) -> Self::HandleAsync<'f>;

@@ -19,15 +19,21 @@
 // 拿不到它就写不出那个 GAT。
 pub use abs_mptp::client::config::{
     ChannelHandle, ChannelListener, ChannelRx, ChannelTx, Dock, DockBinding, MuxCfg, MuxConn,
-    ReqPrefix, RespPrefix, TrConfig as TrMptpClientConfig,
+    TrConfig as TrMptpClientConfig,
 };
 
+use super::prep_ctx_::ClientPrepCtx;
 use crate::{
-    SessionAlloc,
+    RequestAlloc,
     messaging::{RequestPrefix, ResponsePrefix},
     ring_prepare_::TrPrepFactory,
 };
-use super::prep_ctx_::ClientPrepCtx;
+
+/// 本 crate 的请求前缀：location / 头表借用 per-request arena。
+pub type ReqPrefix<'a> = RequestPrefix<RequestAlloc<'a>>;
+
+/// 本 crate 的回复前缀：头表借用 per-request arena。
+pub type RespPrefix<'a> = ResponsePrefix<RequestAlloc<'a>>;
 
 /// 一个 MPTP 客户端实现所需的**全部**配置。
 ///
@@ -38,10 +44,11 @@ use super::prep_ctx_::ClientPrepCtx;
 /// 负责把前缀按协议写出去、把对端的前缀读回来。
 pub trait TrConfig
 where
-    Self: Sized
-        + TrMptpClientConfig<
-            ReqPrefix = RequestPrefix<SessionAlloc>,
-            RespPrefix = ResponsePrefix<SessionAlloc>,
+    Self: 'static
+        + Sized
+        + for<'a> TrMptpClientConfig<
+            ReqPrefix<'a> = RequestPrefix<RequestAlloc<'a>>,
+            RespPrefix<'a> = ResponsePrefix<RequestAlloc<'a>>,
         >,
 {
     /// 默认的 ring 准备**工厂类型**。

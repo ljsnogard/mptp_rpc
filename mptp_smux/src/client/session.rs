@@ -51,7 +51,7 @@ use super::{
     method_::Response,
 };
 use crate::{
-    SessionAlloc,
+    RequestAlloc,
     body_::{BodyError, BodyPlan, BodyRead, BodyState, SuffixRead},
     copy_::{CopyError, copy_all_async_, copy_sized_async_},
     error_::{ClientError, ProtocolError, StateError},
@@ -71,21 +71,21 @@ pub type RespBodyError<TyErr> = BodyError<TyErr>;
 /// 一次请求 / 回复过程的会话。
 ///
 /// 字段不对外公开：调用者只能通过 [`TrMptpSession`] 的契约驱动它。
-pub struct MptpSession<C>
+pub struct MptpSession<'a, C>
 where
     C: TrConfig,
 {
     /// 共享的会话核心：两个半边、请求前缀、体边界与体进度。
-    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, SessionAlloc>,
+    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, RequestAlloc<'a>>,
 
     /// 客户端侧的状态机。
     state_: SessionState,
 
     /// 本会话自己的 arena；请求前缀与回复前缀都由它分配。
-    alloc_: SessionAlloc,
+    alloc_: RequestAlloc<'a>,
 }
 
-impl<C> MptpSession<C>
+impl<'a, C> MptpSession<'a, C>
 where
     C: TrConfig,
 {
@@ -96,10 +96,10 @@ where
     /// 初始状态由**前缀里的体声明**决定：带体请求处于 `SendingBody`（体还没发，不能直接读
     /// 响应前缀），没有体的请求处于 `WaitingResp`（请求已经整体发出）。
     pub(crate) fn new_(
-        request: RequestPrefix<SessionAlloc>,
+        request: RequestPrefix<RequestAlloc<'a>>,
         tx: ChannelTx<C>,
         rx: ChannelRx<C>,
-        alloc: SessionAlloc,
+        alloc: RequestAlloc<'a>,
     ) -> Result<Self, ClientError> {
         let plan = BodyPlan::from_info_(request.body_info())?;
         let state_ = if matches!(plan, BodyPlan::Absent) {
@@ -118,7 +118,7 @@ where
     ///
     /// 它是调用者判断「下一步该发什么」的唯一依据：前缀里的 `body_info` 已经说明体是定长
     /// 还是分块、有没有体。本层不替调用者解释成业务语义。
-    pub fn req_prefix(&self) -> Option<&RequestPrefix<SessionAlloc>> {
+    pub fn req_prefix(&self) -> Option<&RequestPrefix<RequestAlloc<'a>>> {
         self.core_.request_()
     }
 
@@ -126,7 +126,7 @@ where
     ///
     /// 对应协议 §12.1 的「写完请求后关闭写方向」。在 `SendingBody` 状态下调用会失败——
     /// 体还没发完就关写端会把请求截断。
-    pub fn close_req_async<'f>(&'f mut self) -> CloseReqAsync<'f, 'f, C>
+    pub fn close_req_async<'f>(&'f mut self) -> CloseReqAsync<'a, 'f, 'f, C>
     where
         C: 'f,
     {
@@ -143,7 +143,7 @@ where
     ///
     /// 会话状态不是 `PrefixReady` / `BodyReady`（还没读回复前缀）时返回
     /// [`ClientError::State`]；排空回复体失败时返回协议 / 传输错误。
-    pub fn into_resp_suffix_async<'f>(self) -> IntoRespSuffixAsync<'f, 'f, C>
+    pub fn into_resp_suffix_async<'f>(self) -> IntoRespSuffixAsync<'a, 'f, 'f, C>
     where
         C: 'f,
     {
@@ -171,18 +171,18 @@ where
 /// 再读回复前缀，交出 [`Response`]。
 ///
 /// 本类型只做字节搬运，不依赖 denco / 类型头；typed Push 由 `rpc_core_v1` 在其上实现。
-pub struct RequestSuffixStream<C>
+pub struct RequestSuffixStream<'a, C>
 where
     C: TrConfig,
 {
     /// 拥有接收半边与会话状态的会话；发送半边已在本类型里。
-    session_: MptpSession<C>,
+    session_: MptpSession<'a, C>,
 
     /// 请求后缀发送半边；`finish` / drop 时丢弃即半关闭。
     tx_: ChannelTx<C>,
 }
 
-impl<C> RequestSuffixStream<C>
+impl<'a, C> RequestSuffixStream<'a, C>
 where
     C: TrConfig,
 {
@@ -191,7 +191,7 @@ where
     /// # Errors
     ///
     /// 会话不在 `WaitingResp`（例如请求还有 body 未发）时返回 [`ClientError::State`]。
-    pub fn new(session: MptpSession<C>) -> Result<Self, ClientError> {
+    pub fn new(session: MptpSession<'a, C>) -> Result<Self, ClientError> {
         let (session_, tx_) = session.take_tx_for_suffix_()?;
         Result::Ok(RequestSuffixStream { session_, tx_ })
     }
@@ -218,7 +218,7 @@ where
     pub fn write_chunk_async<'f>(
         &'f mut self,
         chunk: &'f [u8],
-    ) -> RequestSuffixWriteAsync<'f, 'f, C>
+    ) -> RequestSuffixWriteAsync<'a, 'f, 'f, C>
     where
         C: 'f,
     {
@@ -226,7 +226,7 @@ where
     }
 
     /// 半关闭请求后缀并读回复前缀，交出 [`Response`]。
-    pub fn finish_async<'f>(self) -> RequestSuffixFinishAsync<'f, 'f, C>
+    pub fn finish_async<'f>(self) -> RequestSuffixFinishAsync<'a, 'f, 'f, C>
     where
         C: 'f,
     {
@@ -252,7 +252,8 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffWrite<u8>,
 {
-    type SegmMut<'f> = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
+    type SegmMut<'f>
+        = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
     where
         Self: 'f;
 
@@ -271,14 +272,12 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffWrite<u8>,
 {
-    type WriteAsync<'f> = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
+    type WriteAsync<'f>
+        = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
     where
         Self: 'f;
 
-    fn write_async<'f>(
-        &'f mut self,
-        demand: &'f Demand<usize>,
-    ) -> Self::WriteAsync<'f> {
+    fn write_async<'f>(&'f mut self, demand: &'f Demand<usize>) -> Self::WriteAsync<'f> {
         <ChannelTx<C> as TrBuffWrite<u8>>::write_async(self.tx_, demand)
     }
 }
@@ -302,11 +301,13 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffFlush<u8>,
 {
-    type FlushAsync<'f> = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
+    type FlushAsync<'f>
+        = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
     where
         Self: 'f;
 
-    type CloseAsync<'f> = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
+    type CloseAsync<'f>
+        = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
     where
         Self: 'f;
 
@@ -322,8 +323,8 @@ where
 /// [`RequestSuffixStream::write_chunk_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(RequestSuffixWrite, pub, new(pub(crate)))]
-async fn request_suffix_write_async_<'f, C, K>(
-    stream: &'f mut RequestSuffixStream<C>,
+async fn request_suffix_write_async_<'a, 'f, C, K>(
+    stream: &'f mut RequestSuffixStream<'a, C>,
     chunk: &'f [u8],
     cancel: K,
 ) -> Result<(), ClientError>
@@ -341,10 +342,10 @@ where
 
 /// [`RequestSuffixStream::finish_async`] 的 step 函数。
 #[gen_may_cancel_future(RequestSuffixFinish, pub, new(pub(crate)))]
-async fn request_suffix_finish_async_<'f, C, K>(
-    stream: RequestSuffixStream<C>,
+async fn request_suffix_finish_async_<'a, 'f, C, K>(
+    stream: RequestSuffixStream<'a, C>,
     cancel: K,
-) -> Result<Response<C>, ClientError>
+) -> Result<Response<'a, C>, ClientError>
 where
     C: TrConfig + 'f,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
@@ -362,8 +363,8 @@ where
 
 /// [`MptpSession::into_resp_suffix_async`] 的 step 函数。
 #[gen_may_cancel_future(IntoRespSuffix, pub, new(pub(crate)))]
-async fn into_resp_suffix_async_<'f, C, K>(
-    mut session: MptpSession<C>,
+async fn into_resp_suffix_async_<'a, 'f, C, K>(
+    mut session: MptpSession<'a, C>,
     cancel: K,
 ) -> Result<ChannelRx<C>, ClientError>
 where
@@ -394,7 +395,7 @@ where
     Result::Ok(rx)
 }
 
-impl<C> TrMptpSession<C> for MptpSession<C>
+impl<'a, C> TrMptpSession<'a, C> for MptpSession<'a, C>
 where
     C: TrConfig,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
@@ -418,7 +419,7 @@ where
     }
 
     type SendReqBodyAsync<'f, R>
-        = SendRequestBodyAsync<'f, 'f, C, R>
+        = SendRequestBodyAsync<'a, 'f, 'f, C, R>
     where
         R: 'f + TrBuffRead<u8> + TrConsumerState,
         Self: 'f;
@@ -431,7 +432,7 @@ where
     }
 
     type SendReqSuffixAsync<'f, R>
-        = SendRequestSuffixAsync<'f, 'f, C, R>
+        = SendRequestSuffixAsync<'a, 'f, 'f, C, R>
     where
         R: 'f + TrBuffRead<u8> + TrConsumerState,
         Self: 'f;
@@ -447,16 +448,20 @@ where
     }
 
     type RecvRespPrefixAsync<'f>
-        = SessionRecvRespPrefixAsync<'f, 'f, C>
+        = SessionRecvRespPrefixAsync<'f, 'a, 'f, C>
     where
-        Self: 'f;
+        Self: 'f,
+        'a: 'f;
 
-    fn recv_resp_prefix_async<'f>(&'f mut self) -> Self::RecvRespPrefixAsync<'f> {
+    fn recv_resp_prefix_async<'f>(&'f mut self) -> Self::RecvRespPrefixAsync<'f>
+    where
+        'a: 'f,
+    {
         SessionRecvRespPrefixAsync::new(self)
     }
 
     type RecvRespBodyAsync<'f>
-        = SessionRecvRespBodyAsync<'f, 'f, C>
+        = SessionRecvRespBodyAsync<'a, 'f, 'f, C>
     where
         Self: 'f;
 
@@ -465,7 +470,7 @@ where
     }
 
     type RecvSuffixAsync<'f>
-        = SessionRecvSuffixAsync<'f, 'f, C>
+        = SessionRecvSuffixAsync<'a, 'f, 'f, C>
     where
         Self: 'f;
 
@@ -481,8 +486,8 @@ where
 /// 半关闭请求写端的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(CloseReq, pub, new(pub(crate)))]
-async fn session_close_req_async_<'f, C, K>(
-    session: &'f mut MptpSession<C>,
+async fn session_close_req_async_<'a, 'f, C, K>(
+    session: &'f mut MptpSession<'a, C>,
     cancel: K,
 ) -> Result<SessionState, ClientError>
 where
@@ -510,8 +515,8 @@ where
 /// 把请求体按**已写出去的前缀**里声明的传输方式搬进子流的发送半边。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SendRequestBody, pub, new(pub(crate)))]
-async fn session_send_req_body_async_<'f, C, R, TyTok>(
-    session: &'f mut MptpSession<C>,
+async fn session_send_req_body_async_<'a, 'f, C, R, TyTok>(
+    session: &'f mut MptpSession<'a, C>,
     body: &'f mut R,
     cancel: TyTok,
 ) -> Result<SessionState, ClientError>
@@ -599,8 +604,8 @@ fn suffix_copy_error_(err: CopyError) -> ClientError {
 /// 把请求后缀流原样搬进子流的发送半边。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SendRequestSuffix, pub, new(pub(crate)))]
-async fn session_send_req_suffix_async_<'f, C, R, TyTok>(
-    session: &'f mut MptpSession<C>,
+async fn session_send_req_suffix_async_<'a, 'f, C, R, TyTok>(
+    session: &'f mut MptpSession<'a, C>,
     suffix: &'f mut R,
     cancel: TyTok,
 ) -> Result<SessionState, ClientError>
@@ -632,10 +637,10 @@ where
 /// 读取响应前缀并**当场定下体边界**。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SessionRecvRespPrefix, pub, new(pub(crate)))]
-async fn session_recv_resp_prefix_async_<'f, C, K>(
-    session: &'f mut MptpSession<C>,
+async fn session_recv_resp_prefix_async_<'f, 'a, C, K>(
+    session: &'f mut MptpSession<'a, C>,
     cancel: K,
-) -> Result<RespPrefix<C>, ClientError>
+) -> Result<RespPrefix<'a>, ClientError>
 where
     C: TrConfig,
     K: TrCancellationToken,
@@ -668,8 +673,8 @@ where
 /// 取回复体的读视图。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SessionRecvRespBody, pub, new(pub(crate)))]
-async fn session_recv_resp_body_async_<'f, C, TyTok>(
-    session: &'f mut MptpSession<C>,
+async fn session_recv_resp_body_async_<'a, 'f, C, TyTok>(
+    session: &'f mut MptpSession<'a, C>,
     cancel: TyTok,
 ) -> Result<RespBodyRead<'f, C>, ClientError>
 where
@@ -695,8 +700,8 @@ where
 /// 进入续流阶段：先把**尚未读完的体**代读丢弃，再把接收半边当作裸字节续流交出去。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SessionRecvSuffix, pub, new(pub(crate)))]
-async fn session_recv_suffix_async_<'f, C, TyTok>(
-    session: &'f mut MptpSession<C>,
+async fn session_recv_suffix_async_<'a, 'f, C, TyTok>(
+    session: &'f mut MptpSession<'a, C>,
     cancel: TyTok,
 ) -> Result<RespSuffixRead<'f, C>, ClientError>
 where

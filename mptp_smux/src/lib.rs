@@ -71,7 +71,7 @@ mod session_core_;
 mod session_state_;
 
 // 兼容旧路径：`mptp_smux::messaging::*` 仍然可用，但类型由 `mptp_wire` 拥有。
-pub use alloc_::SessionAlloc;
+pub use alloc_::{RequestAlloc, new_request_alloc};
 pub use bumplist_alloc::PageSize;
 pub use error_::{ClientError, ProtocolError, ServeError, StateError, TransportError};
 pub use method_set_::MethodSet;

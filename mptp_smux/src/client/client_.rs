@@ -28,7 +28,7 @@
 //! [`MptpClient::request_to_dock_async`](super::MptpClient::request_to_dock_async)。`MptpClient`
 //! **自己不持有任何垛口**：本端每次由连接安排，远端每次由调用决定。
 
-use alloc::string::ToString;
+use alloc::{boxed::Box, string::ToString};
 use core::{alloc::AllocatorClone, mem::MaybeUninit, ops::Deref};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
@@ -39,7 +39,7 @@ use abs_smux::{
     conn::{TrConnection, TrDockBinding},
     dock::TrDock,
 };
-use bumplist_alloc::{BumpListAllocError, PageSize};
+use bumplist_alloc::{BumpListAlloc, BumpListAllocError, PageSize};
 use gen_mcf2::gen_may_cancel_future;
 
 use super::{
@@ -49,9 +49,9 @@ use super::{
     session::MptpSession,
 };
 use crate::{
-    SessionAlloc,
+    RequestAlloc,
     error_::{ClientError, ProtocolError, TransportError},
-    messaging,
+    messaging, new_request_alloc,
     ring_prepare_::TrPrepFactory,
     x_deps::{abs_cancel, abs_mm, abs_smux, gen_mcf2},
 };
@@ -75,6 +75,9 @@ where
 {
     /// 共享连接。
     conn_: SharedConn<C>,
+
+    /// 所有 per-request arena 的 root；它的地址由 `Box` 固定。
+    root_: Box<BumpListAlloc>,
 
     /// 新建 per-request arena 时使用的页大小。
     page_size_: PageSize,
@@ -108,10 +111,12 @@ where
         conn: SharedConn<C>,
         page_size: PageSize,
     ) -> Result<Self, BumpListAllocError> {
-        // 构造时不创建长期 arena；这里只校验页大小，让配置错误在构造期暴露。
-        let _ = SessionAlloc::new(page_size)?;
+        // root 在构造时不申请 Page；它的地址由 `Box` 固定，之后可以安全地
+        // 分配 per-request `BumpListAlloc` 和它们的 Arc 控制块。
+        let root_ = Box::new(BumpListAlloc::new(page_size)?);
         Result::Ok(MptpClient {
             conn_: conn,
+            root_,
             page_size_: page_size,
         })
     }
@@ -123,19 +128,20 @@ where
 
     /// 为一次请求创建新的 per-request arena 句柄。
     ///
-    /// 返回的句柄交给请求前缀；`MptpSession` 从前缀里接管同一个 arena，因此请求结束、
-    /// 会话 drop 时它的全部堆内存一起释放。
+    /// 内层 `BumpListAlloc` 由 Arc 拥有，Arc 控制块从本客户端的 root 分配；句柄带
+    /// `&self` 的生命周期，因此不会活过客户端。
     ///
     /// # Panics
     ///
     /// 只会在构造客户端时已经验证过的页大小上失败，因此正常路径不会 panic。
-    pub fn new_session_alloc(&self) -> SessionAlloc {
-        SessionAlloc::new(self.page_size_).expect("客户端构造时已经验证过该页大小受支持")
+    pub fn new_request_alloc<'a>(&'a self) -> RequestAlloc<'a> {
+        new_request_alloc(&self.root_, self.page_size_)
+            .expect("客户端构造时已经验证过该页大小受支持")
     }
 
     /// 统一入口：显式方法 + 位置。
-    pub fn request(&self, method: AccessMethod, location: &str) -> RequestBuilder<'_, C> {
-        let alloc_ = self.new_session_alloc();
+    pub fn request<'a>(&'a self, method: AccessMethod, location: &str) -> RequestBuilder<'a, C> {
+        let alloc_ = self.new_request_alloc();
         RequestBuilder::new_(
             self,
             messaging::RequestPrefix::new_in(method, location, alloc_.clone()),
@@ -144,32 +150,32 @@ where
     }
 
     /// `Head`：查看资源元信息；回复不应有体。
-    pub fn head(&self, location: &str) -> RequestBuilder<'_, C> {
+    pub fn head<'a>(&'a self, location: &str) -> RequestBuilder<'a, C> {
         self.request(AccessMethod::Head, location)
     }
 
     /// `View`：查看资源内容；请求通常无体，回复通常有体。
-    pub fn view(&self, location: &str) -> RequestBuilder<'_, C> {
+    pub fn view<'a>(&'a self, location: &str) -> RequestBuilder<'a, C> {
         self.request(AccessMethod::View, location)
     }
 
     /// `Post`：上传资源；请求通常有体。
-    pub fn post(&self, location: &str) -> RequestBuilder<'_, C> {
+    pub fn post<'a>(&'a self, location: &str) -> RequestBuilder<'a, C> {
         self.request(AccessMethod::Post, location)
     }
 
     /// `Drop`：删除资源；请求与回复都不应有体。
-    pub fn drop(&self, location: &str) -> RequestBuilder<'_, C> {
+    pub fn drop<'a>(&'a self, location: &str) -> RequestBuilder<'a, C> {
         self.request(AccessMethod::Drop, location)
     }
 
     /// `Push`：向资源端推送流式数据；请求后缀流必需。
-    pub fn push(&self, location: &str) -> RequestBuilder<'_, C> {
+    pub fn push<'a>(&'a self, location: &str) -> RequestBuilder<'a, C> {
         self.request(AccessMethod::Push, location)
     }
 
     /// `Pull`：从资源端拉取流式数据；回复后缀流由服务端写。
-    pub fn pull(&self, location: &str) -> RequestBuilder<'_, C> {
+    pub fn pull<'a>(&'a self, location: &str) -> RequestBuilder<'a, C> {
         self.request(AccessMethod::Pull, location)
     }
 
@@ -177,16 +183,16 @@ where
     ///
     /// 名字取 `invoke` 而不是 `call`，避免与 RPC 层 `TrRpcClientExt::call::<I>()` 的
     /// 固有方法同名——固有方法会遮蔽扩展 trait 方法，改名是唯一不破坏后者的办法。
-    pub fn invoke(&self, location: &str) -> RequestBuilder<'_, C> {
+    pub fn invoke<'a>(&'a self, location: &str) -> RequestBuilder<'a, C> {
         self.request(AccessMethod::Call, location)
     }
 
     /// escape hatch：完全自定义前缀（含头、方法、位置）。
-    pub fn request_prefix(
-        &self,
-        prefix: messaging::RequestPrefix<SessionAlloc>,
-    ) -> RequestBuilder<'_, C> {
-        let alloc_ = self.new_session_alloc();
+    pub fn request_prefix<'a>(
+        &'a self,
+        prefix: messaging::RequestPrefix<RequestAlloc<'a>>,
+    ) -> RequestBuilder<'a, C> {
+        let alloc_ = self.new_request_alloc();
         RequestBuilder::new_(self, prefix, alloc_)
     }
 
@@ -194,11 +200,11 @@ where
     ///
     /// 与 [`MptpClient::request_prefix`] 的差别是：这里不会另建 arena；前缀、后续头表与
     /// 会话共用一个 arena。调用者必须保证 `alloc` 与前缀里的 allocator 是同一个 arena。
-    pub fn request_prefix_with_alloc(
-        &self,
-        prefix: messaging::RequestPrefix<SessionAlloc>,
-        alloc: SessionAlloc,
-    ) -> RequestBuilder<'_, C> {
+    pub fn request_prefix_with_alloc<'a>(
+        &'a self,
+        prefix: messaging::RequestPrefix<RequestAlloc<'a>>,
+        alloc: RequestAlloc<'a>,
+    ) -> RequestBuilder<'a, C> {
         RequestBuilder::new_(self, prefix, alloc)
     }
 
@@ -208,7 +214,7 @@ where
     pub fn request_to_dock_async<'f>(
         &'f self,
         dock: Dock<C>,
-        request: ReqPrefix<C>,
+        request: ReqPrefix<'f>,
     ) -> ClientRequestToDockAsync<'f, 'f, C>
     where
         C: 'f,
@@ -224,7 +230,7 @@ where
     pub fn request_to_dock_with_prep_async<'f, B, P>(
         &'f self,
         dock: Dock<C>,
-        request: ReqPrefix<C>,
+        request: ReqPrefix<'f>,
         prepare: P,
     ) -> ClientRequestToDockWithPrepAsync<'f, 'f, C, B, P>
     where
@@ -245,7 +251,10 @@ where
     C: TrConfig,
 {
     type Config = C;
-    type Session = MptpSession<C>;
+    type Session<'f>
+        = MptpSession<'f, C>
+    where
+        Self: 'f;
     type ReqErr = ClientError;
     type RequestAsync<'f>
         = SendClientRequestAsync<'f, 'f, C>
@@ -253,7 +262,7 @@ where
         Self: 'f;
 
     /// 开一条通往**配置声明的缺省垛口**的子流并发出一条请求。
-    fn request_async<'f>(&'f self, request: ReqPrefix<C>) -> Self::RequestAsync<'f> {
+    fn request_async<'f>(&'f self, request: ReqPrefix<'f>) -> Self::RequestAsync<'f> {
         SendClientRequestAsync::new(self, request)
     }
 }
@@ -315,15 +324,15 @@ where
 /// 建流的后两步：最终裁决（交出准备器）→ 写出请求前缀 → 包成 [`Session`]。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(AcceptSend, pub(crate), new(pub(crate)))]
-async fn accept_send_async_<'f, C, B, P, K>(
-    handle: &'f mut ChannelHandle<C>,
-    request: ReqPrefix<C>,
-    alloc: SessionAlloc,
+async fn accept_send_async_<'a, 'h, C, B, P, K>(
+    handle: &'h mut ChannelHandle<C>,
+    request: ReqPrefix<'a>,
+    alloc: RequestAlloc<'a>,
     prepare: P,
     cancel: K,
-) -> Result<MptpSession<C>, ClientError>
+) -> Result<MptpSession<'a, C>, ClientError>
 where
-    C: 'f + TrConfig,
+    C: 'a + 'h + TrConfig,
     B: 'static
         + Send
         + Sync
@@ -365,9 +374,9 @@ where
 #[gen_may_cancel_future(SendClientRequest, pub, new(pub(crate)))]
 async fn client_request_async_<'f, C, K>(
     client: &'f MptpClient<C>,
-    request: ReqPrefix<C>,
+    request: ReqPrefix<'f>,
     cancel: K,
-) -> Result<MptpSession<C>, ClientError>
+) -> Result<MptpSession<'f, C>, ClientError>
 where
     C: TrConfig,
     K: TrCancellationToken,
@@ -382,9 +391,9 @@ where
 async fn client_request_to_dock_async_<'f, C, K>(
     client: &'f MptpClient<C>,
     dock: Dock<C>,
-    request: ReqPrefix<C>,
+    request: ReqPrefix<'f>,
     cancel: K,
-) -> Result<MptpSession<C>, ClientError>
+) -> Result<MptpSession<'f, C>, ClientError>
 where
     C: TrConfig,
     K: TrCancellationToken,
@@ -406,7 +415,7 @@ where
             })
         })?;
 
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     accept_send_async_(&mut handle, request, alloc, prepare, cancel.child_token()).await
 }
 
@@ -416,10 +425,10 @@ where
 async fn client_request_to_dock_with_prep_async_<'f, C, B, P, K>(
     client: &'f MptpClient<C>,
     dock: Dock<C>,
-    request: ReqPrefix<C>,
+    request: ReqPrefix<'f>,
     prepare: P,
     cancel: K,
-) -> Result<MptpSession<C>, ClientError>
+) -> Result<MptpSession<'f, C>, ClientError>
 where
     C: TrConfig,
     B: 'static
@@ -432,6 +441,6 @@ where
 {
     let (mut handle, _local_dock) =
         open_channel_dock_async_(client, dock, cancel.child_token()).await?;
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     accept_send_async_(&mut handle, request, alloc, prepare, cancel.child_token()).await
 }

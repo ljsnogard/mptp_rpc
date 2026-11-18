@@ -16,12 +16,14 @@ use super::{config as client_config};
 pub trait TrMptpClient {
     type Config: client_config::TrConfig;
 
-    type Session: TrMptpSession<Self::Config>;
+    type Session<'f>: TrMptpSession<'f, Self::Config>
+    where
+        Self: 'f;
 
     type ReqErr: core::error::Error;
 
     type RequestAsync<'f>: TrMayCancel<'f, MayCancelOutput =
-        Result<Self::Session, Self::ReqErr>>
+        Result<Self::Session<'f>, Self::ReqErr>>
     where
         Self: 'f;
 
@@ -29,7 +31,7 @@ pub trait TrMptpClient {
     /// 的会话对象。
     fn request_async<'f>(
         &'f self,
-        prefix: client_config::ReqPrefix<Self::Config>,
+        prefix: client_config::ReqPrefix<'f, Self::Config>,
     ) -> Self::RequestAsync<'f>;
 }
 
@@ -61,9 +63,10 @@ pub enum SessionState {
 /// channel 进行的通信过程。
 ///
 /// 简单的会话只包括一问一答。针对推送或者拉取类请求的会话，则会维持到推流结束。
-pub trait TrMptpSession<C>
+pub trait TrMptpSession<'a, C>
 where
     C: client_config::TrConfig,
+    Self: 'a,
 {
     type RespBodyRead<'f>: 'f + TrMptpBuffRead where Self: 'f;
     type RespSuffixRead<'f>: 'f + TrMptpBuffRead where Self: 'f;
@@ -115,9 +118,10 @@ where
     /// 注意返回的是**响应**前缀（`RespPrefix`）：它与本端发出的请求前缀是两个独立的类型
     /// ——对端可能由另一份代码编译、独立升级。
     type RecvRespPrefixAsync<'f>: TrMayCancel<'f, MayCancelOutput =
-        Result<client_config::RespPrefix<C>, Self::Err>>
+        Result<client_config::RespPrefix<'f, C>, Self::Err>>
     where
-        Self: 'f;
+        Self: 'f,
+        'a: 'f;
 
     /// 接收对端就本次请求给出的响应前缀（状态码 + 头）。
     fn recv_resp_prefix_async<'f>(&'f mut self) -> Self::RecvRespPrefixAsync<'f>;

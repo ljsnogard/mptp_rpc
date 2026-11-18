@@ -24,16 +24,28 @@
 // `MuxCfg` 也在其中：工厂实现者要写 `type Ctx<'a> = ServingPrepCtx<'a, MuxCfg<MyCfg>>`，
 // 拿不到它就写不出那个 GAT。
 pub use abs_mptp::serving::config::{
-    ChannelHandle, ChannelRx, ChannelTx, Dock, DockBinding, Listener, MuxCfg, MuxConn, ReqPrefix,
-    RespPrefix, TrConfig as TrMptpServConfig,
+    ChannelHandle, ChannelRx, ChannelTx, Dock, DockBinding, Listener, MuxCfg, MuxConn,
+    TrConfig as TrMptpServConfig,
 };
 
 use super::prep_ctx_::ServingPrepCtx;
 use crate::{
-    SessionAlloc,
+    RequestAlloc,
     messaging::{Headers, RequestPrefix, ResponsePrefix},
     ring_prepare_::TrPrepFactory,
 };
+
+/// 本 crate 的请求前缀。
+pub type ReqPrefix<'a> = RequestPrefix<RequestAlloc<'a>>;
+
+/// 本 crate 的回复前缀。
+pub type RespPrefix<'a> = ResponsePrefix<RequestAlloc<'a>>;
+
+/// 本 crate 的请求头表。
+pub type ReqHeaders<'a> = Headers<RequestAlloc<'a>>;
+
+/// 本 crate 的回复头表。
+pub type RespHeaders<'a> = Headers<RequestAlloc<'a>>;
 
 /// 一个 MPTP 服务端实现所需的**全部**配置。
 ///
@@ -49,12 +61,13 @@ use crate::{
 /// 这三条等式不是「填空」，而是「线上格式由本 crate 拥有」在类型层面的落地。
 pub trait TrConfig
 where
-    Self: Sized
-        + TrMptpServConfig<
-            ReqPrefix = RequestPrefix<SessionAlloc>,
-            RespPrefix = ResponsePrefix<SessionAlloc>,
-            ReqHeaders = Headers<SessionAlloc>,
-            RespHeaders = Headers<SessionAlloc>,
+    Self: 'static
+        + Sized
+        + for<'a> TrMptpServConfig<
+            ReqPrefix<'a> = RequestPrefix<RequestAlloc<'a>>,
+            RespPrefix<'a> = ResponsePrefix<RequestAlloc<'a>>,
+            ReqHeaders<'a> = Headers<RequestAlloc<'a>>,
+            RespHeaders<'a> = Headers<RequestAlloc<'a>>,
         >,
 {
     /// 默认的 ring 准备**工厂类型**。

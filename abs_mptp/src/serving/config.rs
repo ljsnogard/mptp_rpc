@@ -20,21 +20,29 @@ use abs_smux::{
 use crate::spec::{TrHeaders, TrHeadersMut};
 
 /// 一个服务端实现所需的全部配置。
-pub trait TrConfig {
+pub trait TrConfig: 'static {
     /// 复用连接类型（`abs_smux` 的连接根对象）。
     ///
     /// `Data` 收紧为 `u8`：MPTP 的报文前缀与报文体的线上编码都以字节为单位。
     type MuxConn: TrConnection<Config: TrMuxConfig<Data = u8>>;
 
-    type ReqHeaders: TrHeaders;
+    type ReqHeaders<'a>: TrHeaders
+    where
+        Self: 'a;
 
-    type RespHeaders: TrHeadersMut;
+    type RespHeaders<'a>: TrHeadersMut
+    where
+        Self: 'a;
 
     /// 本服务端**接收**的请求类型。
-    type ReqPrefix: crate::messaging::TrRequestPrefix;
+    type ReqPrefix<'a>: crate::messaging::TrRequestPrefix
+    where
+        Self: 'a;
 
     /// 本服务端**发出**的响应类型。
-    type RespPrefix: crate::messaging::TrResponsePrefix;
+    type RespPrefix<'a>: crate::messaging::TrResponsePrefix
+    where
+        Self: 'a;
 }
 
 
@@ -71,10 +79,10 @@ pub type ChannelTx<TySrvCfg> = <ChannelHandle<TySrvCfg> as TrChannelHandle<MuxCf
 /// 本端子流的接收半边，来源同 [`ChannelTx`]。
 pub type ChannelRx<TySrvCfg> = <ChannelHandle<TySrvCfg> as TrChannelHandle<MuxCfg<TySrvCfg>>>::Rx;
 
-pub type ReqHeaders<TySrvCfg> = <TySrvCfg as self::TrConfig>::ReqHeaders;
+pub type ReqHeaders<'a, TySrvCfg> = <TySrvCfg as self::TrConfig>::ReqHeaders<'a>;
 
-pub type RespHeaders<TySrvCfg> = <TySrvCfg as self::TrConfig>::RespHeaders;
+pub type RespHeaders<'a, TySrvCfg> = <TySrvCfg as self::TrConfig>::RespHeaders<'a>;
 
-pub type ReqPrefix<TySrvCfg> = <TySrvCfg as TrConfig>::ReqPrefix;
+pub type ReqPrefix<'a, TySrvCfg> = <TySrvCfg as TrConfig>::ReqPrefix<'a>;
 
-pub type RespPrefix<TySrvCfg> = <TySrvCfg as TrConfig>::RespPrefix;
+pub type RespPrefix<'a, TySrvCfg> = <TySrvCfg as TrConfig>::RespPrefix<'a>;

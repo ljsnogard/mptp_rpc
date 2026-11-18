@@ -9,7 +9,7 @@ use abs_mm::res_man::TrStrongShared;
 ///
 /// 复用连接的形状由 `abs_smux` 的 [`TrConnection`] 给出；本 trait 再补上客户端自己的
 /// 请求 / 响应类型、错误类型，以及「内存从哪来」的约定。
-pub trait TrConfig {
+pub trait TrConfig: 'static {
     /// 复用连接类型（`abs_smux` 的连接根对象）。
     ///
     /// `Data` 收紧为 `u8`：MPTP 的报文前缀与报文体的线上编码都以字节为单位，
@@ -19,9 +19,15 @@ pub trait TrConfig {
     type SharedConn: TrStrongShared<Item = Self::MuxConn>;
 
     /// 本客户端发送的请求类型。
-    type ReqPrefix: crate::messaging::TrRequestPrefix;
+    ///
+    /// 带生命周期：前缀里的 location / 头表可以借用 per-request arena。
+    type ReqPrefix<'a>: crate::messaging::TrRequestPrefix
+    where
+        Self: 'a;
 
-    type RespPrefix: crate::messaging::TrResponsePrefix;
+    type RespPrefix<'a>: crate::messaging::TrResponsePrefix
+    where
+        Self: 'a;
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -54,5 +60,5 @@ pub type ChannelRx<TyClientCfg> =
 pub type ChannelListener<TyClientCfg> =
     <DockBinding<TyClientCfg> as TrDockBinding<MuxCfg<TyClientCfg>>>::Listener;
 
-pub type ReqPrefix<C> = <C as self::TrConfig>::ReqPrefix;
-pub type RespPrefix<C> = <C as self::TrConfig>::RespPrefix;
+pub type ReqPrefix<'a, C> = <C as self::TrConfig>::ReqPrefix<'a>;
+pub type RespPrefix<'a, C> = <C as self::TrConfig>::RespPrefix<'a>;
