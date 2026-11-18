@@ -8,9 +8,12 @@
 //! # allocator
 //!
 //! `location` 是 `abs_str::String<A>`，头表是 [`Headers<A>`]；两者的堆内存都由 `A` 分配。
-//! 前缀自身保存一份 allocator 句柄，用来在 `headers_mut()` 现场创建头表、在
-//! `set_location()` 现场分配新位置。类型定义只要求 `A: Allocator`；构造与改写另需
-//! `A: Clone`。
+//! 前缀本身**不是分配点**，因此不保存额外的 allocator 句柄：构造时不分配（接收已经
+//! 分配好的 `String<A>` / `Headers<A>`），需要现场分配时由调用者把 allocator 作为参数
+//! 传进来（[`RequestPrefix::new_in`]、[`RequestPrefix::headers_mut`]）。
+//!
+//! 类型定义要求 `A: AllocatorClone`；这是 [`Headers`] 内部 allocator-aware `BTreeMap`
+//! / `Arc` 的要求，不是前缀在保存 allocator。
 //!
 //! # `prefix_`: the two concrete prefix types
 //!
@@ -39,9 +42,9 @@ use super::headers_::Headers;
 /// use mptp_wire::RequestPrefix;
 /// use std::alloc::Global;
 ///
-/// let mut prefix = RequestPrefix::new(AccessMethod::Call, "/api/v1/customer/goods", Global);
+/// let mut prefix = RequestPrefix::new_in(AccessMethod::Call, "/api/v1/customer/goods", Global);
 /// prefix
-///     .headers_mut()
+///     .headers_mut(Global)
 ///     .set_num(abs_mptp::spec::StdHeaderKey::Body_Size, 12);
 ///
 /// assert_eq!(prefix.method(), AccessMethod::Call);
@@ -102,7 +105,7 @@ impl<A> RequestPrefix<A>
 where
     A: AllocatorClone,
 {
-    /// 由已分配好的四部分构造；供本 crate 的线格式解码使用。
+    /// 由已分配好的三部分构造；供本 crate 的线格式解码使用。
     ///
     /// Build from already allocated parts; used by this crate's wire decoder.
     pub(crate) const fn from_parts_(
@@ -122,13 +125,13 @@ impl<A> RequestPrefix<A>
 where
     A: AllocatorClone,
 {
-    /// 由「方法 + 位置 + allocator」构造一条**没有头**的请求前缀。
+    /// 由「方法 + 已分配的位置」构造一条**没有头**的请求前缀。
     ///
-    /// Build a header-less request prefix; the location is allocated by `alloc`.
-    pub const fn new(
-        method: AccessMethod,
-        location: String<A>,
-    ) -> Self {
+    /// 本函数不分配；位置文本必须已经由调用者分配到某个 arena。
+    ///
+    /// Build a header-less request prefix from an already allocated location. This
+    /// constructor does not allocate.
+    pub const fn new(method: AccessMethod, location: String<A>) -> Self {
         RequestPrefix {
             method_: method,
             location_: location,
@@ -136,10 +139,23 @@ where
         }
     }
 
-    /// 由四部分构造；`headers` 为 `None` 表示这条报文没有头表。
+    /// 由「方法 + 位置 + allocator」构造一条**没有头**的请求前缀；位置由 `alloc` 分配。
     ///
-    /// Build from four parts; `None` means the message carries no header map.
-    pub fn with_headers(
+    /// 这是 [`RequestPrefix::new`] 的分配版本：分配动作发生在本次调用里，所以 allocator
+    /// 由调用者显式给出，而不是由前缀保存。
+    ///
+    /// Build a header-less request prefix, allocating the location with `alloc`.
+    pub fn new_in(method: AccessMethod, location: &str, alloc: A) -> Self {
+        Self::new(method, String::from_str_in(location, alloc))
+    }
+
+    /// 由「方法 + 已分配的位置 + 头表」构造；`headers` 为 `None` 表示没有头表。
+    ///
+    /// 本函数不分配。
+    ///
+    /// Build from an already allocated location and header map; `None` means the message
+    /// carries no header map. This constructor does not allocate.
+    pub const fn with_headers(
         method: AccessMethod,
         location: String<A>,
         headers: Option<Headers<A>>,
@@ -149,6 +165,19 @@ where
             location_: location,
             headers_: headers,
         }
+    }
+
+    /// 由「方法 + 位置 + 头表 + allocator」构造；位置由 `alloc` 分配，头表已经分配好。
+    ///
+    /// Build a request prefix, allocating the location with `alloc`; the header map is
+    /// already allocated.
+    pub fn with_headers_in(
+        method: AccessMethod,
+        location: &str,
+        headers: Option<Headers<A>>,
+        alloc: A,
+    ) -> Self {
+        Self::with_headers(method, String::from_str_in(location, alloc), headers)
     }
 }
 
@@ -171,9 +200,25 @@ where
         self.headers_.as_ref()
     }
 
+    /// 取可变头表；没有头时用调用者给的 `alloc` 现场创建一张空表。
+    ///
+    /// 创建头表是分配动作，因此 allocator 作为参数出现，而不是由前缀保存。
+    ///
+    /// Borrow the header map mutably, creating an empty one with `alloc` when absent.
+    pub fn headers_mut(&mut self, alloc: A) -> &mut Headers<A> {
+        self.headers_.get_or_insert_with(|| Headers::new_in(alloc))
+    }
+
     /// 取可变头表；没有头时**不会**自动创建。
     pub fn headers_mut_if_present(&mut self) -> Option<&mut Headers<A>> {
         self.headers_.as_mut()
+    }
+
+    /// 替换资源位置；新文本必须已经由调用者分配。
+    ///
+    /// Replace the location with an already allocated text.
+    pub fn set_location(&mut self, location: String<A>) {
+        self.location_ = location;
     }
 
     /// 整张替换头表；`None` 表示没有头。
@@ -186,7 +231,10 @@ impl<A> TrMsgPrefix for RequestPrefix<A>
 where
     A: AllocatorClone,
 {
-    type Headers<'f> = Headers<A> where Self: 'f;
+    type Headers<'f>
+        = Headers<A>
+    where
+        Self: 'f;
 
     fn headers(&self) -> Option<&Self::Headers<'_>> {
         self.headers_.as_ref()
@@ -217,9 +265,9 @@ where
 /// use mptp_wire::ResponsePrefix;
 /// use std::alloc::Global;
 ///
-/// let mut prefix = ResponsePrefix::new(Status::Ok, Global);
+/// let mut prefix = ResponsePrefix::new(Status::Ok);
 /// prefix
-///     .headers_mut()
+///     .headers_mut(Global)
 ///     .set_num(abs_mptp::spec::StdHeaderKey::Body_Size, 12);
 ///
 /// assert_eq!(prefix.status(), Status::Ok);
@@ -269,22 +317,16 @@ where
     }
 }
 
-impl<A> Eq for ResponsePrefix<A>
-where
-    A: AllocatorClone,
-{}
+impl<A> Eq for ResponsePrefix<A> where A: AllocatorClone {}
 
 impl<A> ResponsePrefix<A>
 where
     A: AllocatorClone,
 {
-    /// 由已分配好的三部分构造；供本 crate 的线格式解码使用。
+    /// 由已分配好的两部分构造；供本 crate 的线格式解码使用。
     ///
     /// Build from already allocated parts; used by this crate's wire decoder.
-    pub(crate) const fn from_parts_(
-        status: Status,
-        headers: Option<Headers<A>>,
-    ) -> Self {
+    pub(crate) const fn from_parts_(status: Status, headers: Option<Headers<A>>) -> Self {
         ResponsePrefix {
             status_: status,
             headers_: headers,
@@ -296,9 +338,9 @@ impl<A> ResponsePrefix<A>
 where
     A: AllocatorClone,
 {
-    /// 由「状态码 + allocator」构造一条**没有头**的回复前缀。
+    /// 构造一条**没有头**的回复前缀。本函数不分配。
     ///
-    /// Build a header-less response prefix; `alloc` is used for a later header map.
+    /// Build a header-less response prefix. This constructor does not allocate.
     pub const fn new(status: Status) -> Self {
         ResponsePrefix {
             status_: status,
@@ -306,13 +348,11 @@ where
         }
     }
 
-    /// 由三部分构造；`headers` 为 `None` 表示这条报文没有头表。
+    /// 由「状态码 + 头表」构造；`headers` 为 `None` 表示没有头表。本函数不分配。
     ///
-    /// Build from three parts; `None` means the message carries no header map.
-    pub const fn with_headers(
-        status: Status,
-        headers: Option<Headers<A>>,
-    ) -> Self {
+    /// Build from a status and an already allocated header map; `None` means the message
+    /// carries no header map.
+    pub const fn with_headers(status: Status, headers: Option<Headers<A>>) -> Self {
         ResponsePrefix {
             status_: status,
             headers_: headers,
@@ -332,6 +372,13 @@ where
     /// 取头表；没有头时返回 `None`。
     pub const fn headers(&self) -> Option<&Headers<A>> {
         self.headers_.as_ref()
+    }
+
+    /// 取可变头表；没有头时用调用者给的 `alloc` 现场创建一张空表。
+    ///
+    /// Borrow the header map mutably, creating an empty one with `alloc` when absent.
+    pub fn headers_mut(&mut self, alloc: A) -> &mut Headers<A> {
+        self.headers_.get_or_insert_with(|| Headers::new_in(alloc))
     }
 
     /// 取可变头表；没有头时**不会**自动创建。
@@ -354,7 +401,10 @@ impl<A> TrMsgPrefix for ResponsePrefix<A>
 where
     A: AllocatorClone,
 {
-    type Headers<'f> = Headers<A> where Self: 'f;
+    type Headers<'f>
+        = Headers<A>
+    where
+        Self: 'f;
 
     fn headers(&self) -> Option<&Self::Headers<'_>> {
         self.headers_.as_ref()
@@ -367,5 +417,65 @@ where
 {
     fn status(&self) -> Status {
         self.status_
+    }
+}
+
+#[cfg(test)]
+mod tests_ {
+    //! 前缀构造与「头表按需创建」的纯本地测试。
+    //!
+    //! Local tests for prefix construction and on-demand header-map creation.
+
+    use alloc::alloc::Global;
+
+    use abs_mptp::spec::{Status, StdHeaderKey, access_method::AccessMethod};
+
+    use super::*;
+
+    /// 测试 `RequestPrefix::new_in` 分配位置，`headers_mut` 才创建头表。
+    /// Test that `RequestPrefix::new_in` allocates the location and `headers_mut` creates
+    /// the header map only on demand.
+    ///
+    /// - 手段 / Means: 用 `Global` 构造请求前缀，先查头表，再调用 `headers_mut` 写入
+    ///   `Body_Size`。
+    /// - 判定 / Verdict: 构造后 `headers()` 为 `None`；写入后头表存在且 `body_size()` 为
+    ///   `Some(7)`。
+    #[test]
+    fn request_prefix_allocates_location_and_headers_on_demand_() {
+        let mut prefix = RequestPrefix::new_in(AccessMethod::View, "/x", Global);
+        assert_eq!(prefix.location(), "/x");
+        assert!(prefix.headers().is_none());
+
+        prefix
+            .headers_mut(Global)
+            .set_num(StdHeaderKey::Body_Size, 7u16);
+
+        assert_eq!(
+            prefix.headers().and_then(Headers::body_size),
+            Option::Some(7usize)
+        );
+    }
+
+    /// 测试 `ResponsePrefix::new` 不创建头表，`headers_mut` 才创建。
+    /// Test that `ResponsePrefix::new` leaves the header map absent until `headers_mut` is
+    /// called.
+    ///
+    /// - 手段 / Means: 构造无头回复前缀，先查头表，再调用 `headers_mut` 写入
+    ///   `Body_Size`。
+    /// - 判定 / Verdict: 构造后 `headers()` 为 `None`；写入后头表存在且 `body_size()` 为
+    ///   `Some(8)`。
+    #[test]
+    fn response_prefix_headers_created_on_demand_() {
+        let mut prefix = ResponsePrefix::new(Status::Ok);
+        assert!(prefix.headers().is_none());
+
+        prefix
+            .headers_mut(Global)
+            .set_num(StdHeaderKey::Body_Size, 8u16);
+
+        assert_eq!(
+            prefix.headers().and_then(Headers::body_size),
+            Option::Some(8usize)
+        );
     }
 }

@@ -55,12 +55,10 @@ pub use io_::ReadExactError;
 pub use num_or_str_::U16OrStr;
 pub use prefix_::{RequestPrefix, ResponsePrefix};
 pub use wire_::{
-    ReadRequestPrefixAsync, ReadRequestPrefixInAsync, ReadRequestPrefixWithAsync,
-    ReadResponsePrefixAsync, ReadResponsePrefixInAsync, ReadResponsePrefixWithAsync,
-    WriteRequestPrefixAsync, WriteResponsePrefixAsync, read_request_prefix_async,
-    read_request_prefix_in_async, read_request_prefix_with_async, read_response_prefix_async,
-    read_response_prefix_in_async, read_response_prefix_with_async, write_request_prefix_async,
-    write_response_prefix_async,
+    ReadRequestPrefixInAsync, ReadRequestPrefixWithAsync, ReadResponsePrefixInAsync,
+    ReadResponsePrefixWithAsync, WriteRequestPrefixAsync, WriteResponsePrefixAsync,
+    read_request_prefix_in_async, read_request_prefix_with_async, read_response_prefix_in_async,
+    read_response_prefix_with_async, write_request_prefix_async, write_response_prefix_async,
 };
 
 /// 本 crate 依赖的外部 crate 转出，供下游与宏生成代码不必逐条声明版本。

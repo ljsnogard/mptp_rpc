@@ -76,6 +76,12 @@ where
 {
     /// 共享连接。
     conn_: SharedConn<C>,
+
+    /// 客户端作用域的 arena 句柄。
+    alloc_: SessionAlloc,
+
+    /// 新建 per-request arena 时使用的页大小。
+    page_size_: PageSize,
 }
 
 impl<C> MptpClient<C>
@@ -97,15 +103,52 @@ where
         Self::new_with_page_size(conn, PageSize::P2K).expect("PageSize::P2K 应当在当前平台受支持")
     }
 
+    /// 由共享连接与页大小构造客户端。
+    ///
+    /// # Errors
+    ///
+    /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
+    pub fn new_with_page_size(
+        conn: SharedConn<C>,
+        page_size: PageSize,
+    ) -> Result<Self, BumpListAllocError> {
+        let alloc_ = SessionAlloc::new(page_size)?;
+        Result::Ok(MptpClient {
+            conn_: conn,
+            alloc_,
+            page_size_: page_size,
+        })
+    }
+
+    /// 本客户端持有的客户端作用域 arena 句柄。
+    pub const fn allocator(&self) -> &SessionAlloc {
+        &self.alloc_
+    }
+
+    /// 本客户端使用的页大小。
+    pub const fn page_size(&self) -> PageSize {
+        self.page_size_
+    }
+
+    /// 为一次请求创建新的 per-request arena 句柄。
+    ///
+    /// 返回的句柄交给请求前缀；`MptpSession` 从前缀里接管同一个 arena，因此请求结束、
+    /// 会话 drop 时它的全部堆内存一起释放。
+    ///
+    /// # Panics
+    ///
+    /// 只会在构造客户端时已经验证过的页大小上失败，因此正常路径不会 panic。
+    pub fn new_session_alloc(&self) -> SessionAlloc {
+        SessionAlloc::new(self.page_size_).expect("客户端构造时已经验证过该页大小受支持")
+    }
+
     /// 统一入口：显式方法 + 位置。
-    pub fn request(
-        &self,
-        method: AccessMethod,
-        location: &str,
-    ) -> RequestBuilder<'_, C> {
+    pub fn request(&self, method: AccessMethod, location: &str) -> RequestBuilder<'_, C> {
+        let alloc_ = self.new_session_alloc();
         RequestBuilder::new_(
             self,
-            messaging::RequestPrefix::new(method, location, self.new_session_alloc()),
+            messaging::RequestPrefix::new_in(method, location, alloc_.clone()),
+            alloc_,
         )
     }
 
@@ -152,7 +195,20 @@ where
         &self,
         prefix: messaging::RequestPrefix<SessionAlloc>,
     ) -> RequestBuilder<'_, C> {
-        RequestBuilder::new_(self, prefix)
+        let alloc_ = self.new_session_alloc();
+        RequestBuilder::new_(self, prefix, alloc_)
+    }
+
+    /// 用调用者已经建好的 per-request arena 构造 builder。
+    ///
+    /// 与 [`MptpClient::request_prefix`] 的差别是：这里不会另建 arena；前缀、后续头表与
+    /// 会话共用一个 arena。调用者必须保证 `alloc` 与前缀里的 allocator 是同一个 arena。
+    pub fn request_prefix_with_alloc(
+        &self,
+        prefix: messaging::RequestPrefix<SessionAlloc>,
+        alloc: SessionAlloc,
+    ) -> RequestBuilder<'_, C> {
+        RequestBuilder::new_(self, prefix, alloc)
     }
 
     /// 开一条通往**指定垛口**的子流并发出一条请求——ring 内存走配置声明的默认工厂。
@@ -183,7 +239,8 @@ where
     where
         C: 'f,
         B: 'static
-            + Send + Sync
+            + Send
+            + Sync
             + TrUnique<Item = [MaybeUninit<u8>]>
             + TrAllocBy<Alloc: AllocatorClone>,
         P: 'static + TrPrepareRing<B, u8>,
@@ -199,7 +256,8 @@ where
     type Config = C;
     type Session = MptpSession<C>;
     type ReqErr = ClientError;
-    type RequestAsync<'f> = SendClientRequestAsync<'f, 'f, C>
+    type RequestAsync<'f>
+        = SendClientRequestAsync<'f, 'f, C>
     where
         Self: 'f;
 
@@ -269,6 +327,7 @@ where
 async fn accept_send_async_<'f, C, B, P, K>(
     handle: &'f mut ChannelHandle<C>,
     request: ReqPrefix<C>,
+    alloc: SessionAlloc,
     prepare: P,
     cancel: K,
 ) -> Result<MptpSession<C>, ClientError>
@@ -297,7 +356,6 @@ where
         }
     };
 
-    let alloc = request.allocator().clone();
     // 前缀必须**一次写完**：顺序由 `messaging` 负责，调用者不背顺序。
     if let Result::Err(err) = messaging::write_request_prefix_async(&request, &mut tx)
         .may_cancel_with(cancel.child_token())
@@ -357,7 +415,8 @@ where
             })
         })?;
 
-    accept_send_async_(&mut handle, request, prepare, cancel.child_token()).await
+    let alloc = client.new_session_alloc();
+    accept_send_async_(&mut handle, request, alloc, prepare, cancel.child_token()).await
 }
 
 /// 覆盖路径的 step 函数：ring 内存由调用者当场交出，因此这里不构造环境、也不碰工厂。
@@ -382,5 +441,6 @@ where
 {
     let (mut handle, _local_dock) =
         open_channel_dock_async_(client, dock, cancel.child_token()).await?;
-    accept_send_async_(&mut handle, request, prepare, cancel.child_token()).await
+    let alloc = client.new_session_alloc();
+    accept_send_async_(&mut handle, request, alloc, prepare, cancel.child_token()).await
 }

@@ -23,7 +23,6 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     spec::StdHeaderKey,
 };
-use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix, limited::LimitedReader};
 
@@ -250,9 +249,10 @@ where
     /// 发起请求的客户端。
     client_: &'a MptpClient<C>,
 
-    bump_: BumpListAlloc,
+    /// 本次请求自己的 arena；前缀、头表与后续会话共用它。
+    alloc_: SessionAlloc,
 
-    /// 请求前缀；它的 allocator 是本次请求自己的 arena。
+    /// 请求前缀；它的容器由 `alloc_` 分配。
     prefix_: RequestPrefix<SessionAlloc>,
 
     /// 目标垛口；缺省取配置。
@@ -269,27 +269,35 @@ where
 ///
 /// `Body_Size` 的 Num 形态是 `u16`；超过 `u16::MAX` 的体改用分块声明。这样大请求体仍然
 /// 发得出去，而不是被静默截断。
-fn set_sized_header_<A>(prefix: &mut RequestPrefix<A>, size: usize)
+fn set_sized_header_<A>(prefix: &mut RequestPrefix<A>, size: usize, alloc: A)
 where
     A: core::alloc::AllocatorClone,
 {
-    prefix.headers_mut().remove(StdHeaderKey::Body_Transfer);
+    prefix
+        .headers_mut(alloc.clone())
+        .remove(StdHeaderKey::Body_Transfer);
     if size == 0usize {
-        prefix.headers_mut().remove(StdHeaderKey::Body_Size);
+        prefix
+            .headers_mut(alloc.clone())
+            .remove(StdHeaderKey::Body_Size);
     } else if let Result::Ok(size) = u16::try_from(size) {
-        prefix.headers_mut().set_num(StdHeaderKey::Body_Size, size);
+        prefix
+            .headers_mut(alloc)
+            .set_num(StdHeaderKey::Body_Size, size);
     } else {
-        set_chunked_header_(prefix);
+        set_chunked_header_(prefix, alloc);
     }
 }
 
 /// 把前缀写成分块体声明。
-fn set_chunked_header_<A>(prefix: &mut RequestPrefix<A>)
+fn set_chunked_header_<A>(prefix: &mut RequestPrefix<A>, alloc: A)
 where
     A: core::alloc::AllocatorClone,
 {
-    prefix.headers_mut().remove(StdHeaderKey::Body_Size);
-    prefix.headers_mut().set_num(
+    prefix
+        .headers_mut(alloc.clone())
+        .remove(StdHeaderKey::Body_Size);
+    prefix.headers_mut(alloc).set_num(
         StdHeaderKey::Body_Transfer,
         abs_mptp::spec::StdHeaderVal::Body_Transfer_Chunked.into_inner(),
     );
@@ -299,10 +307,15 @@ impl<'a, C> RequestBuilder<'a, C, NilBody, NoSuffix>
 where
     C: TrConfig,
 {
-    /// 由「客户端 + 前缀」构造。
-    pub(crate) fn new_(client: &'a MptpClient<C>, prefix: RequestPrefix<SessionAlloc>) -> Self {
+    /// 由「客户端 + 前缀 + per-request arena」构造。
+    pub(crate) fn new_(
+        client: &'a MptpClient<C>,
+        prefix: RequestPrefix<SessionAlloc>,
+        alloc: SessionAlloc,
+    ) -> Self {
         RequestBuilder {
             client_: client,
+            alloc_: alloc,
             prefix_: prefix,
             dock_: Option::None,
             body_: NilBody,
@@ -327,7 +340,7 @@ where
         key: impl Into<HeaderKey<SessionAlloc>>,
         val: HeaderVal<SessionAlloc>,
     ) -> Self {
-        self.prefix_.headers_mut().set(key, val);
+        self.prefix_.headers_mut(self.alloc_.clone()).set(key, val);
         self
     }
 
@@ -337,10 +350,9 @@ where
         key: impl Into<HeaderKey<SessionAlloc>>,
         text: impl AsRef<str>,
     ) -> Self {
-        let alloc = self.prefix_.allocator().clone();
         self.prefix_
-            .headers_mut()
-            .set(key, HeaderVal::from_text(text, alloc));
+            .headers_mut(self.alloc_.clone())
+            .set(key, HeaderVal::from_text(text, self.alloc_.clone()));
         self
     }
 
@@ -348,10 +360,9 @@ where
     ///
     /// 键与值都由本请求的 arena 分配；调用者不需要知道 allocator 类型。
     pub fn header_text_named(mut self, name: &str, text: impl AsRef<str>) -> Self {
-        let alloc = self.prefix_.allocator().clone();
-        self.prefix_.headers_mut().set(
-            HeaderKey::from_text(name, alloc.clone()),
-            HeaderVal::from_text(text, alloc),
+        self.prefix_.headers_mut(self.alloc_.clone()).set(
+            HeaderKey::from_text(name, self.alloc_.clone()),
+            HeaderVal::from_text(text, self.alloc_.clone()),
         );
         self
     }
@@ -361,12 +372,13 @@ where
         let size = bytes.len();
         let mut next = RequestBuilder {
             client_: self.client_,
+            alloc_: self.alloc_,
             prefix_: self.prefix_,
             dock_: self.dock_,
             body_: BytesBody { bytes_: bytes },
             suffix_: self.suffix_,
         };
-        set_sized_header_(&mut next.prefix_, size);
+        set_sized_header_(&mut next.prefix_, size, next.alloc_.clone());
         next
     }
 
@@ -381,6 +393,7 @@ where
     {
         let mut next = RequestBuilder {
             client_: self.client_,
+            alloc_: self.alloc_,
             prefix_: self.prefix_,
             dock_: self.dock_,
             body_: SizedBody {
@@ -389,7 +402,7 @@ where
             },
             suffix_: self.suffix_,
         };
-        set_sized_header_(&mut next.prefix_, size);
+        set_sized_header_(&mut next.prefix_, size, next.alloc_.clone());
         next
     }
 
@@ -400,12 +413,13 @@ where
     {
         let mut next = RequestBuilder {
             client_: self.client_,
+            alloc_: self.alloc_,
             prefix_: self.prefix_,
             dock_: self.dock_,
             body_: ChunkedBody { src_: src },
             suffix_: self.suffix_,
         };
-        set_chunked_header_(&mut next.prefix_);
+        set_chunked_header_(&mut next.prefix_, next.alloc_.clone());
         next
     }
 
@@ -416,6 +430,7 @@ where
     {
         RequestBuilder {
             client_: self.client_,
+            alloc_: self.alloc_,
             prefix_: self.prefix_,
             dock_: self.dock_,
             body_: self.body_,
@@ -451,6 +466,7 @@ where
 {
     let RequestBuilder {
         client_,
+        alloc_,
         prefix_,
         dock_,
         mut body_,
@@ -458,6 +474,9 @@ where
     } = builder;
 
     let dock = dock_.unwrap_or_else(C::default_serving_dock);
+    // `alloc_` 是前缀与头表的 arena；会话另建一个 per-request arena 承载回复前缀。
+    // 生命周期重构后两者会合并成同一个 per-request arena。
+    drop(alloc_);
     let mut session = client_
         .request_to_dock_async(dock, prefix_)
         .may_cancel_with(cancel.child_token())
@@ -636,7 +655,7 @@ mod tests_ {
             AccessMethod::Pull,
             AccessMethod::Call,
         ] {
-            let prefix = RequestPrefix::new(method, "/x", Global);
+            let prefix = RequestPrefix::new_in(method, "/x", Global);
             assert_eq!(prefix.body_info(), BodySize::NilBody, "{method:?}");
         }
     }
@@ -651,9 +670,9 @@ mod tests_ {
     /// - Verdict: `body_info` is `FixedLength(Num(12))`, not chunked.
     #[test]
     fn sized_body_helper_overrides_chunked_() {
-        let mut prefix = RequestPrefix::new(AccessMethod::Post, "/x", Global);
-        set_chunked_header_(&mut prefix);
-        set_sized_header_(&mut prefix, 12usize);
+        let mut prefix = RequestPrefix::new_in(AccessMethod::Post, "/x", Global);
+        set_chunked_header_(&mut prefix, Global);
+        set_sized_header_(&mut prefix, 12usize, Global);
         assert_eq!(
             prefix.body_info(),
             BodySize::FixedLength(NumOrStr::Num(12usize))
@@ -670,9 +689,9 @@ mod tests_ {
     /// - Verdict: `body_info` is `ChunkedData`.
     #[test]
     fn chunked_body_helper_overrides_sized_() {
-        let mut prefix = RequestPrefix::new(AccessMethod::Call, "/x", Global);
-        set_sized_header_(&mut prefix, 8usize);
-        set_chunked_header_(&mut prefix);
+        let mut prefix = RequestPrefix::new_in(AccessMethod::Call, "/x", Global);
+        set_sized_header_(&mut prefix, 8usize, Global);
+        set_chunked_header_(&mut prefix, Global);
         assert_eq!(prefix.body_info(), BodySize::ChunkedData);
     }
 
@@ -686,8 +705,8 @@ mod tests_ {
     /// - Verdict: `body_info` is `NilBody`; neither body header is present.
     #[test]
     fn zero_sized_body_is_no_body_() {
-        let mut prefix = RequestPrefix::new(AccessMethod::Post, "/x", Global);
-        set_sized_header_(&mut prefix, 0usize);
+        let mut prefix = RequestPrefix::new_in(AccessMethod::Post, "/x", Global);
+        set_sized_header_(&mut prefix, 0usize, Global);
         assert_eq!(prefix.body_info(), BodySize::NilBody);
     }
 }

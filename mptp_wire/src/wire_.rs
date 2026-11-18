@@ -3,9 +3,9 @@
 //! | 方向 | 线上顺序 | 入口 |
 //! | --- | --- | --- |
 //! | 客户端发请求 | `access_method → location → headers` | [`write_request_prefix_async`] |
-//! | 服务端收请求 | 同上 | [`read_request_prefix_async`] |
+//! | 服务端收请求 | 同上 | [`read_request_prefix_in_async`] |
 //! | 服务端发回复 | `status → headers` | [`write_response_prefix_async`] |
-//! | 客户端收回复 | 同上 | [`read_response_prefix_async`] |
+//! | 客户端收回复 | 同上 | [`read_response_prefix_in_async`] |
 //!
 //! 每个值都是一个**连续的 MessagePack 值**，不额外包一层数组或结构体：把三个值装进元组会
 //! 多写一个数组头，直接改变线上字节。头表本身是「数字或字符串键 → 数字或 `[type_id, bin]`
@@ -13,11 +13,14 @@
 //!
 //! # 两个解码入口族
 //!
-//! - [`read_request_prefix_async`] / [`read_response_prefix_async`] 用 [`NoArena`] 解码，
-//!   返回 allocator 为 [`Global`] 的前缀；
 //! - [`read_request_prefix_in_async`] / [`read_response_prefix_in_async`] 接收一个
 //!   `&Alloc` arena，把 `location`、头键与头值都分配在同一个 arena 里，返回 allocator 为
-//!   `&'alloc Alloc` 的前缀。后者要求 `Alloc: TrArena<'alloc> + Allocator`。
+//!   `&'alloc Alloc` 的前缀；
+//! - [`read_request_prefix_with_async`] / [`read_response_prefix_with_async`] 也接收
+//!   `&Alloc` arena，但返回**拥有** allocator 句柄 `A` 的前缀；适合 `Arc` 这类可克隆、
+//!   带共享语义的 allocator。
+//!
+//! 两类都要求调用者显式提供 arena；本 crate 不再提供解码到 `Global` 的入口。
 //!
 //! # 只读前缀，不碰体
 //!
@@ -26,9 +29,9 @@
 //!
 //! # `wire_`: the prefix wire format
 //!
-//! Four entry points, one format. Requests are `method → location → headers`; responses are
-//! `status → headers`, each as a **separate** MessagePack value. The `_in_` variants decode
-//! into a caller-supplied arena; the plain variants decode into `Global`.
+//! Requests are `method → location → headers`; responses are `status → headers`, each as a
+//! **separate** MessagePack value. Every decode entry takes a caller-supplied arena; there is
+//! no implicit `Global` path.
 
 use core::alloc::{Allocator, AllocatorClone};
 
@@ -80,7 +83,6 @@ const fn method_from_u8_(code: u8) -> Option<AccessMethod> {
 ///
 /// 编码失败、写子流失败，或等待期间被取消时返回 [`MessagingError::Encode`]。
 pub fn write_request_prefix_async<'f, A, W>(
-    alloc: &'f A,
     prefix: &'f RequestPrefix<A>,
     tx: &'f mut W,
 ) -> WriteRequestPrefixAsync<'f, 'f, A, W>
@@ -88,14 +90,13 @@ where
     A: AllocatorClone,
     W: 'f + TrBuffWrite<u8>,
 {
-    WriteRequestPrefixAsync::new(alloc, prefix, tx)
+    WriteRequestPrefixAsync::new(prefix, tx)
 }
 
 /// [`write_request_prefix_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(WriteRequestPrefix, pub, new(pub(crate)))]
 async fn write_request_prefix_async_<'f, A, W, K>(
-    alloc: &'f A,
     prefix: &'f RequestPrefix<A>,
     tx: &'f mut W,
     cancel: K,
@@ -126,6 +127,24 @@ where
     Result::Ok(())
 }
 
+/// 从接收半边解出一个请求前缀，所有堆内存都由 `arena` 分配。
+///
+/// 返回的前缀 allocator 是 `&'alloc Alloc`，因此它不能活过 `arena`。
+///
+/// # Errors
+///
+/// 报文不是合法编码、方法位不可识别、对端提前关闭，或读子流失败时返回错误。
+pub fn read_request_prefix_in_async<'f, 'alloc, R, A>(
+    rx: &'f mut R,
+    arena: &'alloc A,
+) -> ReadRequestPrefixInAsync<'f, 'alloc, 'f, R, A>
+where
+    R: 'f + TrBuffRead<u8>,
+    A: TrArena<'alloc> + Allocator + 'alloc,
+    'alloc: 'f,
+{
+    ReadRequestPrefixInAsync::new(rx, arena)
+}
 
 /// [`read_request_prefix_in_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
@@ -149,14 +168,11 @@ where
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(MessagingError::Decode)?;
-    let headers_ =
-        Option::<Headers<&'alloc A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
-            .may_cancel_with(cancel)
-            .await
-            .map_err(MessagingError::Decode)?;
-    Result::Ok(RequestPrefix::from_parts_(
-        method_, location_, headers_,
-    ))
+    let headers_ = Option::<Headers<&'alloc A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel)
+        .await
+        .map_err(MessagingError::Decode)?;
+    Result::Ok(RequestPrefix::from_parts_(method_, location_, headers_))
 }
 
 /// 从接收半边解出一个请求前缀，所有堆内存都由 `arena` 分配，但返回**拥有** allocator
@@ -168,7 +184,7 @@ where
 ///
 /// # Errors
 ///
-/// 同 [`read_request_prefix_async`]。
+/// 同 [`read_request_prefix_in_async`]。
 pub fn read_request_prefix_with_async<'f, 'alloc, R, A>(
     rx: &'f mut R,
     arena: &'alloc A,
@@ -207,11 +223,7 @@ where
         .may_cancel_with(cancel)
         .await
         .map_err(MessagingError::Decode)?;
-    Result::Ok(RequestPrefix::from_parts_(
-        method_,
-        location_,
-        headers_,
-    ))
+    Result::Ok(RequestPrefix::from_parts_(method_, location_, headers_))
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
@@ -263,6 +275,25 @@ where
     Result::Ok(())
 }
 
+/// 从接收半边解出一个回复前缀，所有堆内存都由 `arena` 分配。
+///
+/// 返回的前缀 allocator 是 `&'alloc Alloc`，因此它不能活过 `arena`。
+///
+/// # Errors
+///
+/// 报文不是合法编码、对端提前关闭，或读子流失败时返回错误。
+pub fn read_response_prefix_in_async<'f, 'alloc, R, A>(
+    rx: &'f mut R,
+    arena: &'alloc A,
+) -> ReadResponsePrefixInAsync<'f, 'alloc, 'f, R, A>
+where
+    R: 'f + TrBuffRead<u8>,
+    A: TrArena<'alloc> + Allocator + 'alloc,
+    'alloc: 'f,
+{
+    ReadResponsePrefixInAsync::new(rx, arena)
+}
+
 /// [`read_response_prefix_in_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ReadResponsePrefixIn, pub, new(pub(crate)))]
@@ -281,11 +312,10 @@ where
         .await
         .map_err(MessagingError::Decode)?;
     let status = Status::new(code);
-    let headers =
-        Option::<Headers<&'alloc A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
-            .may_cancel_with(cancel)
-            .await
-            .map_err(MessagingError::Decode)?;
+    let headers = Option::<Headers<&'alloc A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        .may_cancel_with(cancel)
+        .await
+        .map_err(MessagingError::Decode)?;
     Result::Ok(ResponsePrefix::from_parts_(status, headers))
 }
 
@@ -294,7 +324,7 @@ where
 ///
 /// # Errors
 ///
-/// 同 [`read_response_prefix_async`]。
+/// 同 [`read_response_prefix_in_async`]。
 pub fn read_response_prefix_with_async<'f, 'alloc, R, A>(
     rx: &'f mut R,
     arena: &'alloc A,
@@ -329,10 +359,7 @@ where
         .may_cancel_with(cancel)
         .await
         .map_err(MessagingError::Decode)?;
-    Result::Ok(ResponsePrefix::from_parts_(
-        status_,
-        headers_,
-    ))
+    Result::Ok(ResponsePrefix::from_parts_(status_, headers_))
 }
 
 #[cfg(test)]
@@ -418,6 +445,9 @@ mod tests_ {
         }
     }
 
+    /// 测试专用的静态 arena：让构造与解码使用同一个 `&'static TestArena`。
+    static TEST_ARENA: TestArena = TestArena;
+
     /// 测试 `_in_` 解码把字符串与头表分配进调用方给的 arena。
     /// Test that `_in_` decoding allocates strings and the header map in the supplied arena.
     ///
@@ -432,17 +462,17 @@ mod tests_ {
     ///   allocator is `&TestArena`, proving the heap memory came from that arena.
     #[test]
     fn request_prefix_decodes_into_supplied_arena_() {
-        let mut headers = Headers::new_in(Global);
+        let mut headers = Headers::new_in(&TEST_ARENA);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set(
             HeaderKey::from(StdHeaderKey::Cookie),
-            HeaderVal::from_bytes(0x1234, b"v", Global),
+            HeaderVal::from_bytes(0x1234, b"v", &TEST_ARENA),
         );
-        let prefix = RequestPrefix::with_headers(
+        let prefix = RequestPrefix::with_headers_in(
             AccessMethod::Call,
             "/arena",
             Option::Some(headers),
-            Global,
+            &TEST_ARENA,
         );
 
         let mut storage = [0u8; 128usize];
@@ -486,7 +516,7 @@ mod tests_ {
     /// - Verdict: `01 a2 2f 78 c0`.
     #[test]
     fn request_prefix_wire_order_() {
-        let prefix = RequestPrefix::new(AccessMethod::View, "/x", Global);
+        let prefix = RequestPrefix::new_in(AccessMethod::View, "/x", &TEST_ARENA);
         let mut storage = [0u8; 32usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -511,7 +541,7 @@ mod tests_ {
     /// - Verdict: `cc c8 c0`.
     #[test]
     fn response_prefix_wire_order_() {
-        let prefix = ResponsePrefix::new(Status::Ok, Global);
+        let prefix: ResponsePrefix<&'static TestArena> = ResponsePrefix::new(Status::Ok);
         let mut storage = [0u8; 16usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -538,11 +568,11 @@ mod tests_ {
     ///   `[0xAA, 0xBB]`.
     #[test]
     fn request_prefix_leaves_body_untouched_() {
-        let prefix = RequestPrefix::with_headers(
+        let prefix = RequestPrefix::with_headers_in(
             AccessMethod::Call,
             "/rpc/echo",
-            Option::Some(Headers::new_in(Global)),
-            Global,
+            Option::Some(Headers::new_in(&TEST_ARENA)),
+            &TEST_ARENA,
         );
         let mut storage = [0u8; 128usize];
         let cap = storage.len();
@@ -559,7 +589,8 @@ mod tests_ {
 
         let mut input: &[u8] = &storage[..written + body.len()];
         let decoded = block_on_(
-            read_request_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+            read_request_prefix_in_async(&mut input, &TEST_ARENA)
+                .may_cancel_with(NonCancellableToken::new()),
         )
         .expect("请求前缀解码应当成功");
 
@@ -581,7 +612,7 @@ mod tests_ {
     ///   integers and objects are two-element arrays.
     #[test]
     fn response_prefix_obj_value_wire_form_() {
-        let mut headers = Headers::new_in(Global);
+        let mut headers = Headers::new_in(&TEST_ARENA);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set_num(
             StdHeaderKey::Body_Type,
@@ -589,9 +620,9 @@ mod tests_ {
         );
         headers.set(
             HeaderKey::from(StdHeaderKey::Cookie),
-            HeaderVal::from_bytes(0x1234, b"v", Global),
+            HeaderVal::from_bytes(0x1234, b"v", &TEST_ARENA),
         );
-        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers), Global);
+        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers));
 
         let mut storage = [0u8; 64usize];
         let cap = storage.len();
@@ -632,7 +663,8 @@ mod tests_ {
         ];
         let mut input: &[u8] = &bytes;
         let decoded = block_on_(
-            read_response_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+            read_response_prefix_in_async(&mut input, &TEST_ARENA)
+                .may_cancel_with(NonCancellableToken::new()),
         )
         .expect("有符号正整数的头值应当可解");
 
@@ -657,7 +689,7 @@ mod tests_ {
     /// - Verdict: status, the whole map and the custom key all compare equal.
     #[test]
     fn response_prefix_headers_roundtrip_() {
-        let mut headers = Headers::new_in(Global);
+        let mut headers = Headers::new_in(&TEST_ARENA);
         headers.set_num(StdHeaderKey::Body_Size, 12);
         headers.set_num(
             StdHeaderKey::Body_Type,
@@ -665,11 +697,11 @@ mod tests_ {
         );
         headers.set(
             HeaderKey::from(StdHeaderKey::Cookie),
-            HeaderVal::from_bytes(0xabc, b"payload", Global),
+            HeaderVal::from_bytes(0xabc, b"payload", &TEST_ARENA),
         );
         headers.set_num(StdHeaderKey::new(0x01), 7u16);
 
-        let prefix = ResponsePrefix::with_headers(Status::Created, Option::Some(headers), Global);
+        let prefix = ResponsePrefix::with_headers(Status::Created, Option::Some(headers));
         let mut storage = [0u8; 128usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -682,7 +714,8 @@ mod tests_ {
 
         let mut input: &[u8] = &storage[..written];
         let decoded = block_on_(
-            read_response_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+            read_response_prefix_in_async(&mut input, &TEST_ARENA)
+                .may_cancel_with(NonCancellableToken::new()),
         )
         .expect("回复前缀解码应当成功");
 
@@ -708,12 +741,15 @@ mod tests_ {
     /// - Verdict: the whole map compares equal and the string key resolves again.
     #[test]
     fn string_header_key_roundtrips_() {
-        let key = HeaderKey::from_text("x-custom", Global);
-        let mut headers = Headers::new_in(Global);
+        let key = HeaderKey::from_text("x-custom", &TEST_ARENA);
+        let mut headers = Headers::new_in(&TEST_ARENA);
         headers.set_num(StdHeaderKey::Body_Size, 12);
-        headers.set(key.clone(), HeaderVal::from_bytes(0x1234, b"v", Global));
+        headers.set(
+            key.clone(),
+            HeaderVal::from_bytes(0x1234, b"v", &TEST_ARENA),
+        );
 
-        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers), Global);
+        let prefix = ResponsePrefix::with_headers(Status::Ok, Option::Some(headers));
         let mut storage = [0u8; 128usize];
         let cap = storage.len();
         let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -726,14 +762,15 @@ mod tests_ {
 
         let mut input: &[u8] = &storage[..written];
         let decoded = block_on_(
-            read_response_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+            read_response_prefix_in_async(&mut input, &TEST_ARENA)
+                .may_cancel_with(NonCancellableToken::new()),
         )
         .expect("回复前缀解码应当成功");
 
         assert_eq!(decoded, prefix);
         assert_eq!(
             decoded.headers().expect("应该有头表").try_get(key),
-            Option::Some(&HeaderVal::from_bytes(0x1234, b"v", Global))
+            Option::Some(&HeaderVal::from_bytes(0x1234, b"v", &TEST_ARENA))
         );
     }
 
@@ -748,7 +785,7 @@ mod tests_ {
     #[test]
     fn response_status_is_open_() {
         for code in [0u16, 599u16, u16::MAX] {
-            let prefix = ResponsePrefix::new(Status::new(code), Global);
+            let prefix: ResponsePrefix<&'static TestArena> = ResponsePrefix::new(Status::new(code));
             let mut storage = [0u8; 16usize];
             let cap = storage.len();
             let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -761,7 +798,8 @@ mod tests_ {
 
             let mut input: &[u8] = &storage[..written];
             let decoded = block_on_(
-                read_response_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+                read_response_prefix_in_async(&mut input, &TEST_ARENA)
+                    .may_cancel_with(NonCancellableToken::new()),
             )
             .expect("回复前缀解码应当成功");
             assert_eq!(decoded.status(), Status::new(code));
@@ -781,7 +819,8 @@ mod tests_ {
         let bytes = [0xcdu8, 0x00u8, 0xc8u8, 0xc0u8];
         let mut input: &[u8] = &bytes;
         let decoded = block_on_(
-            read_response_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+            read_response_prefix_in_async(&mut input, &TEST_ARENA)
+                .may_cancel_with(NonCancellableToken::new()),
         )
         .expect("固定宽度的状态码应当可解");
 
@@ -804,7 +843,8 @@ mod tests_ {
         let bytes = [0x7fu8, 0xa0u8, 0xc0u8];
         let mut input: &[u8] = &bytes;
         let result = block_on_(
-            read_request_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+            read_request_prefix_in_async(&mut input, &TEST_ARENA)
+                .may_cancel_with(NonCancellableToken::new()),
         );
 
         assert!(
@@ -825,15 +865,15 @@ mod tests_ {
     /// - Verdict: the first reports `None`, the second `Some` with `is_empty()` true.
     #[test]
     fn absent_and_empty_headers_stay_distinct_() {
-        let absent = RequestPrefix::new(AccessMethod::Head, "/x", Global);
-        let empty = RequestPrefix::with_headers(
+        let absent = RequestPrefix::new_in(AccessMethod::Head, "/x", &TEST_ARENA);
+        let empty = RequestPrefix::with_headers_in(
             AccessMethod::Head,
             "/x",
-            Option::Some(Headers::new_in(Global)),
-            Global,
+            Option::Some(Headers::new_in(&TEST_ARENA)),
+            &TEST_ARENA,
         );
 
-        let decode = |prefix: &RequestPrefix<Global>| {
+        let decode = |prefix: &RequestPrefix<&'static TestArena>| {
             let mut storage = [0u8; 64usize];
             let cap = storage.len();
             let mut sink: &mut [u8] = storage.as_mut_slice();
@@ -846,7 +886,8 @@ mod tests_ {
 
             let mut input: &[u8] = &storage[..written];
             block_on_(
-                read_request_prefix_async(&mut input).may_cancel_with(NonCancellableToken::new()),
+                read_request_prefix_in_async(&mut input, &TEST_ARENA)
+                    .may_cancel_with(NonCancellableToken::new()),
             )
             .expect("请求前缀解码应当成功")
         };

@@ -130,11 +130,11 @@ mod tests_ {
         fn assert_same(_: mptp_wire::RequestPrefix<Global>) {}
 
         let prefix: crate::messaging::RequestPrefix<Global> =
-            crate::messaging::RequestPrefix::new(AccessMethod::Call, "/alias", Global);
+            crate::messaging::RequestPrefix::new_in(AccessMethod::Call, "/alias", Global);
         assert_same(prefix);
 
         let root_prefix: crate::RequestPrefix<Global> =
-            mptp_wire::RequestPrefix::new(AccessMethod::Call, "/root", Global);
+            mptp_wire::RequestPrefix::new_in(AccessMethod::Call, "/root", Global);
         assert_same(root_prefix);
     }
 }

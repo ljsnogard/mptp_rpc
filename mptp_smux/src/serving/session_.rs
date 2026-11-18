@@ -168,7 +168,7 @@ where
 
     /// 构造回复 helper；终结时才写前缀。
     pub fn response(&mut self, status: Status) -> ResponseBuilder<'_, C> {
-        self.response_prefix(ResponsePrefix::new(status, self.alloc_.clone()))
+        self.response_prefix(ResponsePrefix::new(status))
     }
 
     /// 用给定的回复前缀构造 helper。
@@ -367,7 +367,9 @@ where
         key: impl Into<HeaderKey<SessionAlloc>>,
         val: HeaderVal<SessionAlloc>,
     ) -> &mut Self {
-        self.prefix_.headers_mut().set(key, val);
+        self.prefix_
+            .headers_mut(self.session_.allocator().clone())
+            .set(key, val);
         self
     }
 
@@ -377,9 +379,9 @@ where
         key: impl Into<HeaderKey<SessionAlloc>>,
         text: impl AsRef<str>,
     ) -> &mut Self {
-        let alloc = self.prefix_.allocator().clone();
+        let alloc = self.session_.allocator().clone();
         self.prefix_
-            .headers_mut()
+            .headers_mut(alloc.clone())
             .set(key, HeaderVal::from_text(text, alloc));
         self
     }
@@ -388,8 +390,8 @@ where
     ///
     /// 键与值都由本会话的 arena 分配；调用者不需要知道 allocator 类型。
     pub fn header_text_named(&mut self, name: &str, text: impl AsRef<str>) -> &mut Self {
-        let alloc = self.prefix_.allocator().clone();
-        self.prefix_.headers_mut().set(
+        let alloc = self.session_.allocator().clone();
+        self.prefix_.headers_mut(alloc.clone()).set(
             HeaderKey::from_text(name, alloc.clone()),
             HeaderVal::from_text(text, alloc),
         );
@@ -596,8 +598,13 @@ where
             text: StdString::from("定长回复体超过 u16::MAX；请改用分块体"),
         }));
     };
-    prefix_.headers_mut().set_num(StdHeaderKey::Body_Size, size);
-    prefix_.headers_mut().remove(StdHeaderKey::Body_Transfer);
+    let alloc = session_.allocator().clone();
+    prefix_
+        .headers_mut(alloc.clone())
+        .set_num(StdHeaderKey::Body_Size, size);
+    prefix_
+        .headers_mut(alloc)
+        .remove(StdHeaderKey::Body_Transfer);
 
     write_response_prefix_inner_(session_, prefix_, cancel.child_token()).await?;
 
@@ -630,8 +637,11 @@ where
 
     ensure_body_allowed_(session_.method_)?;
 
-    prefix_.headers_mut().remove(StdHeaderKey::Body_Size);
-    prefix_.headers_mut().set_num(
+    let alloc = session_.allocator().clone();
+    prefix_
+        .headers_mut(alloc.clone())
+        .remove(StdHeaderKey::Body_Size);
+    prefix_.headers_mut(alloc).set_num(
         StdHeaderKey::Body_Transfer,
         StdHeaderVal::Body_Transfer_Chunked.into_inner(),
     );
@@ -1051,8 +1061,10 @@ mod tests_ {
     /// - Verdict: it returns `BodyDeclaredButNotWritten`.
     #[test]
     fn no_body_rejects_declared_body_() {
-        let mut prefix = ResponsePrefix::new(Status::Ok, Global);
-        prefix.headers_mut().set_num(StdHeaderKey::Body_Size, 8u16);
+        let mut prefix: ResponsePrefix<Global> = ResponsePrefix::new(Status::Ok);
+        prefix
+            .headers_mut(Global)
+            .set_num(StdHeaderKey::Body_Size, 8u16);
         let res = ensure_no_body_(&prefix);
         assert!(matches!(
             res,
@@ -1070,7 +1082,7 @@ mod tests_ {
     /// - Verdict: `ensure_no_body_` returns `Ok`.
     #[test]
     fn no_body_accepts_plain_prefix_() {
-        let prefix = ResponsePrefix::new(Status::Ok, Global);
+        let prefix: ResponsePrefix<Global> = ResponsePrefix::new(Status::Ok);
         assert!(ensure_no_body_(&prefix).is_ok());
     }
 

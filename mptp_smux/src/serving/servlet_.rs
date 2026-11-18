@@ -265,8 +265,8 @@ where
 
     // 405：方法不在 handler 声明的集合内。先写回复，再收尾，不进入 handler。
     if !allow.contains(method) {
-        let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed, session.allocator().clone());
-        prefix.headers_mut().set(
+        let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
+        prefix.headers_mut(session.allocator().clone()).set(
             HeaderKey::from_num(K_TMP_ALLOW_HEADER_KEY),
             HeaderVal::from_text(allow.to_allow_value(), session.allocator().clone()),
         );
@@ -409,8 +409,8 @@ mod tests_ {
     #[test]
     fn method_not_allowed_allow_header_round_trips_() {
         let allow = MethodSet::POST.union(MethodSet::CALL);
-        let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed, Global);
-        prefix.headers_mut().set(
+        let mut prefix: ResponsePrefix<Global> = ResponsePrefix::new(Status::MethodNotAllowed);
+        prefix.headers_mut(Global).set(
             HeaderKey::from_num(K_TMP_ALLOW_HEADER_KEY),
             HeaderVal::from_text(allow.to_allow_value(), Global),
         );
@@ -434,7 +434,7 @@ mod tests_ {
     /// - Verdict: the status is preserved and the prefix constructs normally.
     #[test]
     fn not_found_is_ordinary_status_() {
-        let prefix = ResponsePrefix::new(Status::NotFound, Global);
+        let prefix: ResponsePrefix<Global> = ResponsePrefix::new(Status::NotFound);
         assert_eq!(prefix.status(), Status::NotFound);
     }
 }
