@@ -10,7 +10,7 @@
 
 use core::future::Future;
 
-use mptp_smux::{ServeError, SessionAlloc};
+use mptp_smux::{RequestAlloc, ServeError};
 
 use super::{
     arena_::{ArenaFuture, arena_future_},
@@ -24,7 +24,7 @@ use super::{
 /// The future returned by a handler: a type-erased box allocated in the request-scoped
 /// arena. The allocator handle is owned by the future, so the handler does not borrow the
 /// context in the future's allocator type.
-pub type HandlerFuture<'a> = ArenaFuture<'a, Result<(), ServeError>>;
+pub type HandlerFuture<'f, 'a> = ArenaFuture<'f, 'a, Result<(), ServeError>>;
 
 /// 一个路由目标：只做业务。
 ///
@@ -46,17 +46,25 @@ where
     ///
     /// `'a` 是本次借用的生命周期，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，
     /// 这样调用方可以在一次 `.await` 之后重新借用 `ctx`（中间件链的关键）。
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a>;
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x;
 }
 
 /// 把 future 分配进请求级 arena，返回类型擦除的 arena box。
 ///
 /// 终端处理器 / 中间件先经 [`MptpContext::arena`] 取出 allocator 句柄克隆，构造好 future
-/// 后交给本函数；allocator 句柄随 future 一起持有，因此 future 的 `'a` 只描述它捕获的
-/// 数据，不要求 `&MptpContext` 活到 `'a`。
-pub fn box_future_<'a, F, O>(arena: SessionAlloc, fut: F) -> ArenaFuture<'a, O>
+/// 后交给本函数；allocator 句柄随 future 一起持有，因此 future 的 `'f` 只描述它捕获的
+/// 数据，不要求 `&MptpContext` 活到 `'f`；`'a` 是请求级 arena 的生命周期，必须覆盖
+/// future（`'a: 'f`）。
+pub fn box_future_<'f, 'a, F, O>(arena: RequestAlloc<'a>, fut: F) -> ArenaFuture<'f, 'a, O>
 where
-    F: Future<Output = O> + 'a,
+    F: Future<Output = O> + 'f,
+    'a: 'f,
 {
     arena_future_(arena, fut)
 }

@@ -14,7 +14,8 @@ readme = "README.md"
 abs_buff = { git = "https://gitee.com/lino_snsalias/buffex.rs.git" }
 # 协议层的形状全在这里：本 crate 只实现它规定的 trait，不重复定义协议。
 abs_mptp = { path = "../abs_mptp" }
-# `SessionAlloc` 直接实现 denco 的 `TrArena` / `TrArenaBytes` / `TrAllocSource`。
+# `BumpListAllocRef` 把 denco 的 `TrArena` / `TrArenaBytes` / `TrAllocSource` 转发到
+# per-request / per-session arena 句柄上。
 abs_denco = { git = "https://gitee.com/lino_snsalias/denco.rs.git", features = ["type-id"] }
 abs_str = { git = "https://gitee.com/lino_snsalias/abs_str-rs.git", default-features = false, features = [
     "str_alloc",

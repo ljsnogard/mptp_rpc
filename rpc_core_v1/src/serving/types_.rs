@@ -16,7 +16,7 @@
 
 use abs_mptp::spec::{Status, access_method::AccessMethod};
 use mptp_smux::{
-    SessionAlloc,
+    RequestAlloc,
     serving::{ResponseBuilder, ServingSession, config::TrConfig},
 };
 use mptp_wire::{Headers, ResponsePrefix};
@@ -50,17 +50,18 @@ use crate::x_deps::{abs_mptp, mptp_smux, mptp_wire};
 /// );
 /// let mut stream = builder.suffix_stream_async().await?;
 /// ```
-pub fn typed_response<'a, C>(
-    session: &'a mut ServingSession<C>,
+pub fn typed_response<'b, 'a, C>(
+    session: &'b mut ServingSession<'a, C>,
     status: Status,
     method: AccessMethod,
     info: &RpcDataTypeInfo,
-) -> ResponseBuilder<'a, C>
+) -> ResponseBuilder<'b, 'a, C>
 where
     C: TrConfig + 'a,
+    'a: 'b,
 {
     let alloc = session.allocator().clone();
-    let mut headers = Headers::<SessionAlloc>::new_in(alloc.clone());
+    let mut headers = Headers::<RequestAlloc<'a>>::new_in(alloc.clone());
     apply_response_type_headers(&mut headers, method, info);
     session.response_prefix(ResponsePrefix::with_headers(status, Option::Some(headers)))
 }

@@ -1,7 +1,7 @@
 //! 请求级 arena future：把 future 放进请求级 allocator，并在轮询时保持其位置固定。
 //!
 //! 直接用 `Pin<Box<dyn Future, &A>>` 在当前 nightly 上会要求 `A: StaticAllocator`；
-//! 而 [`SessionAlloc`] 的析构**会**让分配块失效，因此不能虚假实现
+//! 而 [`RequestAlloc`] 的析构**会**让分配块失效，因此不能虚假实现
 //! `StaticAllocator`。本模块用一个自定义 [`ArenaFuture`] 绕开这个约束：
 //!
 //! - 内层是普通的 `Box<dyn Future, ArenaBoxAlloc>`（不需要 `Pin`）；
@@ -16,12 +16,19 @@
 //! 前先向 arena **探测**一次：放得下就进 arena；放不下回退到 [`Global`]，避免整个
 //! 请求因为 future 太大而 abort。回退只影响这一块内存，语义不变。
 //!
+//! # 两个生命周期
+//!
+//! `'f` 是 future 自身的生命周期（它捕获的借用），`'a` 是请求级 arena 的生命周期。
+//! allocator 值里带着 `RequestAlloc<'a>`，所以 `'a: 'f`；把两者写进类型而不是擦除，
+//! 是为了不把 arena 句柄偷偷延长成 `'static`。
+//!
 //! # `arena_`: request-scoped arena futures
 //!
 //! A custom `ArenaFuture` avoids the nightly `StaticAllocator` requirement of
 //! `Pin<Box<dyn Future, &A>>`; the inner future is boxed normally and pinned at its heap
 //! address when polled. Blocks that do not fit the arena's single-page limit fall back to
-//! `Global` instead of aborting the request.
+//! `Global` instead of aborting the request. `'f` is the future lifetime and `'a` the
+//! request-arena lifetime; `'a: 'f` keeps the arena handle from being stretched.
 
 use alloc::{alloc::Global, boxed::Box};
 use core::{
@@ -32,24 +39,24 @@ use core::{
     task::{Context, Poll},
 };
 
-use mptp_smux::SessionAlloc;
+use mptp_smux::RequestAlloc;
 
 /// 请求级 arena future 的内部 allocator：正常走 arena，超大块回退 [`Global`]。
-enum ArenaBoxAlloc {
+enum ArenaBoxAlloc<'a> {
     /// 分配在请求级 arena 里。
-    Arena(SessionAlloc),
+    Arena(RequestAlloc<'a>),
 
     /// 单块超过 arena 页容量时的兜底。
     Global,
 }
 
 // SAFETY: `allocate` / `deallocate` 都转发给同一个变体所表示的 allocator；`Box` 按值
-// 保存本枚举，因此 `deallocate` 看到的变体与分配时一致。`SessionAlloc` 与 `Global` 都
+// 保存本枚举，因此 `deallocate` 看到的变体与分配时一致。`RequestAlloc` 与 `Global` 都
 // 满足 `Allocator` 契约。
-unsafe impl Allocator for ArenaBoxAlloc {
+unsafe impl<'a> Allocator for ArenaBoxAlloc<'a> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         match self {
-            Self::Arena(arena) => <SessionAlloc as Allocator>::allocate(arena, layout),
+            Self::Arena(arena) => <RequestAlloc<'a> as Allocator>::allocate(arena, layout),
             Self::Global => Global.allocate(layout),
         }
     }
@@ -58,7 +65,7 @@ unsafe impl Allocator for ArenaBoxAlloc {
         match self {
             Self::Arena(arena) => {
                 // SAFETY: 调用方保证 ptr/layout 来自本 allocator；变体与分配时相同。
-                unsafe { <SessionAlloc as Allocator>::deallocate(arena, ptr, layout) }
+                unsafe { <RequestAlloc<'a> as Allocator>::deallocate(arena, ptr, layout) }
             }
             Self::Global => {
                 // SAFETY: 调用方保证 ptr/layout 来自本 allocator；变体与分配时相同。
@@ -69,12 +76,14 @@ unsafe impl Allocator for ArenaBoxAlloc {
 }
 
 /// 分配在请求级 arena（或超大块时的 [`Global`]）上的类型擦除 future。
-pub struct ArenaFuture<'a, O> {
+///
+/// `'f` 是内层 future 的生命周期，`'a` 是请求级 arena 的生命周期。
+pub struct ArenaFuture<'f, 'a, O> {
     /// 内层 future；盒子本身移动不会移动堆上的 future。
-    inner_: Box<dyn Future<Output = O> + 'a, ArenaBoxAlloc>,
+    inner_: Box<dyn Future<Output = O> + 'f, ArenaBoxAlloc<'a>>,
 }
 
-impl<O> Future for ArenaFuture<'_, O> {
+impl<O> Future for ArenaFuture<'_, '_, O> {
     type Output = O;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<O> {
@@ -90,14 +99,14 @@ impl<O> Future for ArenaFuture<'_, O> {
 }
 
 /// 选择这次装箱使用的 allocator：先探测 arena 能否放下一个这样的块。
-fn select_alloc_(arena: SessionAlloc, layout: Layout) -> ArenaBoxAlloc {
+fn select_alloc_<'a>(arena: RequestAlloc<'a>, layout: Layout) -> ArenaBoxAlloc<'a> {
     // SAFETY: 探测得到的块立即按同一 layout 归还；没有读取或移动未初始化内存。
-    let probe = <SessionAlloc as Allocator>::allocate(&arena, layout);
+    let probe = <RequestAlloc<'a> as Allocator>::allocate(&arena, layout);
     match probe {
         Result::Ok(block) => {
             let ptr = block.cast::<u8>();
             // SAFETY: ptr/layout 来自上面同一次分配，且尚未交给其它人。
-            unsafe { <SessionAlloc as Allocator>::deallocate(&arena, ptr, layout) };
+            unsafe { <RequestAlloc<'a> as Allocator>::deallocate(&arena, ptr, layout) };
             ArenaBoxAlloc::Arena(arena)
         }
         Result::Err(_) => ArenaBoxAlloc::Global,
@@ -107,14 +116,15 @@ fn select_alloc_(arena: SessionAlloc, layout: Layout) -> ArenaBoxAlloc {
 /// 把 `fut` 分配进 `arena`，返回一个可在原地轮询的 [`ArenaFuture`]。
 ///
 /// 单块超过 arena 页容量时回退到 [`Global`]；见模块文档。
-pub fn arena_future_<'a, F, O>(arena: SessionAlloc, fut: F) -> ArenaFuture<'a, O>
+pub fn arena_future_<'f, 'a, F, O>(arena: RequestAlloc<'a>, fut: F) -> ArenaFuture<'f, 'a, O>
 where
-    F: Future<Output = O> + 'a,
+    F: Future<Output = O> + 'f,
+    'a: 'f,
 {
     let alloc = select_alloc_(arena, Layout::new::<F>());
-    let boxed: Box<F, ArenaBoxAlloc> = Box::new_in(fut, alloc);
+    let boxed: Box<F, ArenaBoxAlloc<'a>> = Box::new_in(fut, alloc);
     let (raw, alloc) = Box::into_raw_with_allocator(boxed);
-    let raw: *mut (dyn Future<Output = O> + 'a) = raw;
+    let raw: *mut (dyn Future<Output = O> + 'f) = raw;
     // SAFETY: `raw` 仍指向同一个 arena box，只是把 `*mut F` 拓宽成 `*mut dyn Future`；
     // vtable 由 dyn 提供。`from_raw_in` 用同一个 allocator 重建所有权。
     let inner_ = unsafe { Box::from_raw_in(raw, alloc) };

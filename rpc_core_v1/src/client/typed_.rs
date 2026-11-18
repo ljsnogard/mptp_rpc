@@ -77,7 +77,7 @@ where
     let accept = info
         .accept()
         .unwrap_or_else(|| AcceptType::new(info.body_codec(), info.response_suffix()));
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     let mut headers = Headers::new_in(alloc.clone());
     apply_request_type_headers(&mut headers, AccessMethod::Pull, &info);
     write_accept(&mut headers, accept);
@@ -97,7 +97,7 @@ where
             .prefix()
             .headers()
             .cloned()
-            .unwrap_or_else(|| Headers::new_in(client.new_session_alloc()));
+            .unwrap_or_else(|| Headers::new_in(client.new_request_alloc()));
         if let Result::Err(rejection) =
             validate_response_types(AccessMethod::Pull, &resp_headers, &info)
         {
@@ -131,7 +131,7 @@ pub fn open_push_async<'f, C, T>(
     client: &'f MptpClient<C>,
     path: &'static str,
     info: RpcDataTypeInfo,
-) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<TypedSlotFlux<'static, RequestSuffixStream<C>, T>>>
+) -> impl TrMayCancel<'f, MayCancelOutput = RpcResult<TypedSlotFlux<'f, RequestSuffixStream<'f, C>, T>>>
 + 'f
 where
     C: TrRpcClientConfig + 'static,
@@ -149,7 +149,7 @@ async fn open_push_async_<'f, C, T, K>(
     path: &'static str,
     info: RpcDataTypeInfo,
     cancel: K,
-) -> RpcResult<TypedSlotFlux<'static, RequestSuffixStream<C>, T>>
+) -> RpcResult<TypedSlotFlux<'f, RequestSuffixStream<'f, C>, T>>
 where
     C: TrRpcClientConfig + 'static,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState + 'static,
@@ -161,7 +161,7 @@ where
             "Push {path} 的端点元信息没有声明 request_suffix 类型 ID"
         )));
     };
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     let mut headers = Headers::new_in(alloc.clone());
     apply_request_type_headers(&mut headers, AccessMethod::Push, &info);
     let prefix =
@@ -178,13 +178,14 @@ where
 }
 
 /// 非 `200` 时读出错误体并转成 [`RpcError::Remote`]。
-async fn ensure_ok_async_<C, K>(
-    response: &mut Response<C>,
+async fn ensure_ok_async_<'f, 'a, C, K>(
+    response: &'f mut Response<'a, C>,
     path: &'static str,
     cancel: K,
 ) -> RpcResult<()>
 where
     C: TrRpcClientConfig,
+    'a: 'f,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {

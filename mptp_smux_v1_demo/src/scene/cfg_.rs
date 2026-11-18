@@ -20,7 +20,7 @@ use abs_mm::{
 use buffex_compio_adapt::{BuffRead, BuffWrite, DefaultAllocConfig, SharedRingOf};
 use mm_ptr::{Owned, Shared};
 use mptp_smux::{
-    K_DEFAULT_SERVING_DOCK, RingBuffs, SessionAlloc, TrPrepFactory, TrPrepareCtx,
+    K_DEFAULT_SERVING_DOCK, RequestAlloc, RingBuffs, TrPrepFactory, TrPrepareCtx,
     client::{ClientPrepCtx, config as client_cfg},
     messaging::{Headers, RequestPrefix, ResponsePrefix},
     serving::{ServingPrepCtx, config as serving_cfg},
@@ -93,9 +93,15 @@ impl abs_mptp::client::config::TrConfig for ClientCfg {
 
     type SharedConn = SharedConn;
 
-    type ReqPrefix = RequestPrefix<SessionAlloc>;
+    type ReqPrefix<'a>
+        = RequestPrefix<RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type RespPrefix = ResponsePrefix<SessionAlloc>;
+    type RespPrefix<'a>
+        = ResponsePrefix<RequestAlloc<'a>>
+    where
+        Self: 'a;
 }
 
 impl client_cfg::TrConfig for ClientCfg {
@@ -166,13 +172,25 @@ pub struct ServingCfg;
 impl abs_mptp::serving::config::TrConfig for ServingCfg {
     type MuxConn = Conn;
 
-    type ReqHeaders = Headers<SessionAlloc>;
+    type ReqHeaders<'a>
+        = Headers<RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type RespHeaders = Headers<SessionAlloc>;
+    type RespHeaders<'a>
+        = Headers<RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type ReqPrefix = RequestPrefix<SessionAlloc>;
+    type ReqPrefix<'a>
+        = RequestPrefix<RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type RespPrefix = ResponsePrefix<SessionAlloc>;
+    type RespPrefix<'a>
+        = ResponsePrefix<RequestAlloc<'a>>
+    where
+        Self: 'a;
 }
 
 impl serving_cfg::TrConfig for ServingCfg {

@@ -56,9 +56,12 @@ pub trait TrReplyError {
 ///
 /// 读 body 失败返回 [`ServeError::Transport`] / 协议错误；MessagePack 解码失败返回
 /// [`ServeError::Target`]。
-pub async fn decode_body_async<C, T>(session: &mut ServingSession<C>) -> Result<T, ServeError>
+pub async fn decode_body_async<'f, 'a, C, T>(
+    session: &'f mut ServingSession<'a, C>,
+) -> Result<T, ServeError>
 where
     C: TrConfig,
+    'a: 'f,
     T: TrDecodableOwned,
 {
     let mut body = session.req_body_async().await?;
@@ -76,12 +79,13 @@ where
 ///
 /// MessagePack 编码失败返回 [`ServeError::Target`]；写回复失败返回
 /// [`ServeError::Transport`]。
-pub async fn write_ok_async<C, T>(
-    session: &mut ServingSession<C>,
+pub async fn write_ok_async<'f, 'a, C, T>(
+    session: &'f mut ServingSession<'a, C>,
     value: &T,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
+    'a: 'f,
     T: ?Sized + TrEncodable,
 {
     let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
@@ -119,7 +123,7 @@ where
 /// use rpc_core_v1::x_deps::abs_mptp::spec::{Status, access_method::AccessMethod};
 ///
 /// # async fn demo<C>(
-/// #     session: &mut mptp_smux::serving::ServingSession<C>,
+/// #     session: &mut mptp_smux::serving::ServingSession<'a, C>,
 /// #     info: &rpc_core_v1::stream::RpcDataTypeInfo,
 /// # ) -> Result<(), mptp_smux::ServeError>
 /// # where C: mptp_smux::serving::config::TrConfig,
@@ -131,8 +135,8 @@ where
 /// # Errors
 ///
 /// 编码失败返回 [`ServeError::Target`]；写回复前缀 / 体失败返回底层错误。
-pub async fn write_typed_value_async<C, T>(
-    session: &mut ServingSession<C>,
+pub async fn write_typed_value_async<'f, 'a, C, T>(
+    session: &'f mut ServingSession<'a, C>,
     status: Status,
     method: AccessMethod,
     info: &RpcDataTypeInfo,
@@ -140,6 +144,7 @@ pub async fn write_typed_value_async<C, T>(
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
+    'a: 'f,
     T: ?Sized + TrEncodable,
 {
     let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);
@@ -168,13 +173,14 @@ where
 /// # Errors
 ///
 /// 写回复失败返回 [`ServeError::Transport`]。
-pub async fn write_status_async<C>(
-    session: &mut ServingSession<C>,
+pub async fn write_status_async<'f, 'a, C>(
+    session: &'f mut ServingSession<'a, C>,
     status: Status,
     message: String,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
+    'a: 'f,
 {
     let mut bytes = message.into_bytes();
     let len = bytes.len();
@@ -189,12 +195,14 @@ where
 ///
 /// MessagePack 编码失败返回 [`ServeError::Target`]；写 chunk 失败返回
 /// [`ServeError::Transport`]。
-pub async fn write_stream_item_async<'a, C, T>(
-    stream: &mut SuffixStream<'a, C>,
+pub async fn write_stream_item_async<'f, 'b, 'a, C, T>(
+    stream: &'f mut SuffixStream<'b, 'a, C>,
     value: &T,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
+    'b: 'f,
+    'a: 'f,
     T: ?Sized + TrEncodable,
 {
     let mut ring = BodyRing_::new_unchecked([MaybeUninit::uninit(); K_BODY_RING_CAP_]);

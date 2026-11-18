@@ -85,7 +85,7 @@ where
     /// # Panics
     ///
     /// [`PageSize::P2K`] 在支持 16 位 cell 下标的平台上总是受支持；不支持的目标会在
-    /// 构造连接 arena 时 panic。需要显式处理时用
+    /// 构造 servlet 的 root arena 时 panic。需要显式处理时用
     /// [`MptpServlet::new_with_page_size`]。
     pub fn new(handler: H) -> Self {
         Self::new_with_page_size(handler, PageSize::P2K)
@@ -146,12 +146,18 @@ where
 
     /// 接受一条入向子流：income → ring → accept → 读请求前缀。
     ///
-    /// `'a` 同时是 `&'a self` 与 `&'a mut listener` 的借用：返回的会话把请求前缀与头表
-    /// 分配在本 servlet 的 per-session arena 里，因此它的类型带 `'a`，不会活过 servlet。
-    pub fn accept_async<'a>(&'a self, listener: &'a mut Listener<C>) -> AcceptAsync<'a, 'a, C, H>
+    /// `'a` 是 servlet 借用，`'l` 是对 listener 的借用：返回的会话把请求前缀与头表分配在
+    /// 本 servlet 的 per-session arena 里，因此它的类型带 `'a`，不会活过 servlet；而
+    /// listener 只在 accept 期间被借用，所以会话可以活到 listener 释放之后（只要 servlet
+    /// 还在）。
+    pub fn accept_async<'a, 'l>(
+        &'a self,
+        listener: &'l mut Listener<C>,
+    ) -> AcceptAsync<'a, 'l, 'l, C, H>
     where
-        C: 'a,
+        C: 'a + 'l,
         H: 'a,
+        'a: 'l,
         ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
@@ -197,14 +203,15 @@ where
 /// [`MptpServlet::accept_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(Accept, pub, new(pub(crate)))]
-async fn servlet_accept_async_<'a, C, H, K>(
+async fn servlet_accept_async_<'a, 'l, C, H, K>(
     servlet: &'a MptpServlet<C, H>,
-    listener: &'a mut Listener<C>,
+    listener: &'l mut Listener<C>,
     cancel: K,
 ) -> Result<ServingSession<'a, C>, ServeError>
 where
-    C: TrConfig + 'a,
+    C: TrConfig + 'a + 'l,
     H: TrServeHandler<C> + 'a,
+    'a: 'l,
     ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,

@@ -46,12 +46,16 @@ impl<C, S> TrMiddleware<C, S, SceneRequestState> for PrincipalMiddleware
 where
     C: TrConfig,
 {
-    fn call<'a, 'f>(
-        &'a self,
-        endpoint: &'a Endpoint<C, S, SceneRequestState>,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-        next: &'a mut NextFn<'a, 'f, C, S, SceneRequestState>,
-    ) -> MiddlewareFuture<'a> {
+    fn call<'x, 'f, 'a>(
+        &'x self,
+        endpoint: &'x Endpoint<C, S, SceneRequestState>,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+        next: &'x mut NextFn<'x, 'f, 'a, C, S, SceneRequestState>,
+    ) -> MiddlewareFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         mptp_serving::box_future_(arena, async move {
             let principal = ctx

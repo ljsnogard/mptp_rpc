@@ -32,6 +32,6 @@ cantok_rs = { git = "https://gitee.com/lino_snsalias/cancel_rs.git" }
 # 单元测试用 tokio 驱动会话；库本体不选运行时。
 tokio = { version = "1", features = ["macros", "rt"] }
 # 元数据测试与 `im_session` 示例需要 `rpc_core_v1` 的类型标记；它已迁移到
-# `SessionAlloc` 前缀，可以正常作为 dev-dependency 编译。
+# `RequestAlloc` 前缀，可以正常作为 dev-dependency 编译。
 rpc_core_v1 = { path = "../rpc_core_v1" }
 

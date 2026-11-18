@@ -159,10 +159,26 @@ impl SceneClient {
     ///
     /// 请求失败或状态非 200 时返回错误。
     pub async fn pull_async_(&self, uri: &str, events: Sender<PlanetEvent>) -> Result<PullHandle> {
-        let mut resp = self.client_.pull(uri).send_async().await?;
-        ensure_ok_(&resp, uri)?;
+        // 会话借用 `MptpClient` 的 per-session arena，因此请求必须在后台任务内部创建：
+        // 任务拥有 `Rc<MptpClient>`，借用在任务状态机内部跨 await，不会逃逸到任务外；
+        // 建流结果经一个一次性通道回传给调用方。
+        let client = Rc::clone(&self.client_);
+        let uri = uri.to_string();
+        let (setup_tx, setup_rx) = flume::unbounded::<Result<(), String>>();
         let scope = crate::scene::cfg_::compio_rt_().local_scope();
         let handle = scope.spawn_local(async move {
+            let mut resp = match client.pull(&uri).send_async().await {
+                Result::Ok(resp) => resp,
+                Result::Err(err) => {
+                    let _ = setup_tx.send(Result::Err(format!("{err:#}")));
+                    return;
+                }
+            };
+            if let Result::Err(err) = ensure_ok_(&resp, &uri) {
+                let _ = setup_tx.send(Result::Err(format!("{err:#}")));
+                return;
+            }
+            let _ = setup_tx.send(Result::Ok(()));
             let Ok(mut suffix) = resp.suffix_async().await else {
                 return;
             };
@@ -178,7 +194,17 @@ impl SceneClient {
                 }
             }
         });
-        Ok(handle)
+        match setup_rx.recv_async().await {
+            Result::Ok(Result::Ok(())) => Ok(handle),
+            Result::Ok(Result::Err(msg)) => {
+                drop(handle);
+                bail!("{msg}")
+            }
+            Result::Err(_) => {
+                drop(handle);
+                bail!("Pull 任务在建立流之前结束")
+            }
+        }
     }
 
     /// 底层 `MptpClient`（网络线程做 Pull 时使用）。
@@ -213,7 +239,7 @@ fn start_keepalive_(client: Rc<MptpClient<ClientCfg>>, token: SceneCancelToken) 
 }
 
 /// 检查回复状态为 200。
-fn ensure_ok_(resp: &mptp_smux::client::Response<ClientCfg>, what: &str) -> Result<()> {
+fn ensure_ok_(resp: &mptp_smux::client::Response<'_, ClientCfg>, what: &str) -> Result<()> {
     if resp.status() != Status::Ok {
         bail!("{what} 返回 {}", resp.status().inner());
     }

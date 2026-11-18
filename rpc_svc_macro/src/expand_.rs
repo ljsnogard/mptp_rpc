@@ -429,10 +429,14 @@ fn handler_impl_(
         where
             C: TrConfig,
         {
-            fn handle<'a, 'f>(
-                &'a self,
-                ctx: &'a mut MptpContext<'f, C, S, R>,
-            ) -> HandlerFuture<'a> {
+            fn handle<'f, 'x, 'a>(
+                &'x self,
+                ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+            ) -> HandlerFuture<'x, 'a>
+            where
+                'f: 'x,
+                'a: 'x,
+            {
                 let arena = ctx.arena();
                 box_future_(arena, async move {
                     #(#decode_stmts)*
@@ -529,10 +533,14 @@ fn pull_handler_impl_(
     Result::Ok(quote! {
         #[doc(hidden)]
         impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for #handler_ident {
-            fn handle<'a, 'f>(
-                &'a self,
-                ctx: &'a mut MptpContext<'f, C, S, R>,
-            ) -> HandlerFuture<'a> {
+            fn handle<'f, 'x, 'a>(
+                &'x self,
+                ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+            ) -> HandlerFuture<'x, 'a>
+            where
+                'f: 'x,
+                'a: 'x,
+            {
                 let arena = ctx.arena();
                 box_future_(arena, async move {
                     let cancel = ctx.cancel().child_token();
@@ -1199,13 +1207,14 @@ fn impl_of_module_(model: &ImplOfModel_) -> ::zyn::TokenStream {
             type CallTy_ = #call_ty;
 
             /// 一个业务结果写成 typed 200 或错误状态。
-            async fn write_result_<C, T>(
-                session: &mut ServingSession<C>,
+            async fn write_result_<'f, 'a, C, T>(
+                session: &'f mut ServingSession<'a, C>,
                 info: &RpcDataTypeInfo,
                 result: RpcResult<T>,
             ) -> Result<(), ServeError>
             where
                 C: TrConfig,
+                'a: 'f,
                 T: TrEncodable,
             {
                 match result {
@@ -1240,10 +1249,14 @@ fn impl_of_module_(model: &ImplOfModel_) -> ::zyn::TokenStream {
             where
                 C: TrConfig + 'static,
             {
-                fn handle<'a, 'f>(
-                    &'a self,
-                    ctx: &'a mut MptpContext<'f, C, S, R>,
-                ) -> HandlerFuture<'a> {
+                fn handle<'f, 'x, 'a>(
+                    &'x self,
+                    ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+                ) -> HandlerFuture<'x, 'a>
+                where
+                    'f: 'x,
+                    'a: 'x,
+                {
                     let arena = ctx.arena();
                     box_future_(arena, async move {
                         let call: CallTy_ = match decode_body_async(ctx.session_mut()).await {

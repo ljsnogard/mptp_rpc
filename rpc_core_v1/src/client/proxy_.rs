@@ -203,7 +203,7 @@ where
 
     // 业务体不预编码：请求头只声明「分块」，编码器与 `send_req_body_async` 通过
     // 一对 SPSC ring 并发推进——编码写满时等待，发送搬走多少就再编多少。
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     let mut headers = Headers::new_in(alloc.clone());
     headers.set_num(
         StdHeaderKey::Body_Transfer,
@@ -303,7 +303,7 @@ where
     Req: TrEncodable + 'f,
     K: TrCancellationToken,
 {
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     let mut headers = Headers::new_in(alloc.clone());
     headers.set_num(
         StdHeaderKey::Body_Transfer,
@@ -450,7 +450,7 @@ where
     Rep: TrDecodableOwned + 'f,
     K: TrCancellationToken,
 {
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     let mut headers = Headers::new_in(alloc.clone());
     if let Option::Some(extra) = extra_headers {
         for (key, val) in extra.iter() {
@@ -591,7 +591,7 @@ where
     Rep: TrDecodableOwned + 'f,
     K: TrCancellationToken,
 {
-    let alloc = client.new_session_alloc();
+    let alloc = client.new_request_alloc();
     let mut headers = Headers::new_in(alloc.clone());
     headers.set_num(
         StdHeaderKey::Body_Transfer,

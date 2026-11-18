@@ -102,12 +102,16 @@ impl<C> TrMiddleware<C> for TypeCheckMiddleware_
 where
     C: TrConfig + 'static,
 {
-    fn call<'a, 'f>(
-        &'a self,
-        endpoint: &'a Endpoint<C>,
-        ctx: &'a mut MptpContext<'f, C>,
-        next: &'a mut NextFn<'a, 'f, C>,
-    ) -> MiddlewareFuture<'a> {
+    fn call<'x, 'f, 'a>(
+        &'x self,
+        endpoint: &'x Endpoint<C>,
+        ctx: &'x mut MptpContext<'f, 'a, C>,
+        next: &'x mut NextFn<'x, 'f, 'a, C>,
+    ) -> MiddlewareFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         let method = ctx.method();
         let headers = ctx.headers().clone();
@@ -134,7 +138,11 @@ where
     C: TrConfig + 'static,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
 {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(&'x self, ctx: &'x mut MptpContext<'f, 'a, C>) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let name: String = decode_body_async(ctx.session_mut()).await?;
@@ -161,7 +169,11 @@ where
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     ChannelTx<C>: TrBuffWrite<u8>,
 {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(&'x self, ctx: &'x mut MptpContext<'f, 'a, C>) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let info = room_events_info_();
@@ -193,7 +205,11 @@ where
     C: TrConfig + 'static,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
 {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(&'x self, ctx: &'x mut MptpContext<'f, 'a, C>) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let view = ctx.req_suffix_async().await?;
@@ -224,7 +240,11 @@ impl<C> TrEndpointHandler<C> for FallbackHandler_
 where
     C: TrConfig + 'static,
 {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(&'x self, ctx: &'x mut MptpContext<'f, 'a, C>) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             ctx.session_mut()

@@ -271,12 +271,27 @@ async fn spawn_pull_(
     planet_id: PlanetId,
     event_tx: Sender<NetEvent>,
 ) -> Result<PullTask_> {
-    let mut response = client.pull(&uri).send_async().await?;
-    if response.status() != Status::Ok {
-        return Err(anyhow!("Pull {uri} 返回 {}", response.status().inner()));
-    }
+    // 会话借用 `MptpClient` 的 per-session arena，所以请求必须在后台任务内部创建；任务
+    // 拥有 `Rc<MptpClient>`，借用在任务状态机内部跨 await，不会逃逸。建流结果经一次性
+    // 通道回传。
+    let (setup_tx, setup_rx) = flume::unbounded::<Result<(), String>>();
     let scope = crate::scene::cfg_::compio_rt_().local_scope();
     let handle = scope.spawn_local(async move {
+        let mut response = match client.pull(&uri).send_async().await {
+            Result::Ok(response) => response,
+            Result::Err(err) => {
+                let _ = setup_tx.send(Result::Err(format!("{err:#}")));
+                return;
+            }
+        };
+        if response.status() != Status::Ok {
+            let _ = setup_tx.send(Result::Err(format!(
+                "Pull {uri} 返回 {}",
+                response.status().inner()
+            )));
+            return;
+        }
+        let _ = setup_tx.send(Result::Ok(()));
         let Ok(mut suffix) = response.suffix_async().await else {
             return;
         };
@@ -304,5 +319,15 @@ async fn spawn_pull_(
             }
         }
     });
-    Ok(PullTask_ { handle_: handle })
+    match setup_rx.recv_async().await {
+        Result::Ok(Result::Ok(())) => Ok(PullTask_ { handle_: handle }),
+        Result::Ok(Result::Err(msg)) => {
+            drop(handle);
+            Err(anyhow!(msg))
+        }
+        Result::Err(_) => {
+            drop(handle);
+            Err(anyhow!("Pull 任务在建立流之前结束"))
+        }
+    }
 }

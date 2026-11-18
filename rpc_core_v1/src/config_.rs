@@ -184,18 +184,24 @@ impl<TyConn, TyDock, TyAllocCfg> ClientConfig<TyConn, TyDock, TyAllocCfg> {
 impl<TyConn, TyDock, TyAllocCfg> abs_mptp::client::config::TrConfig
     for ClientConfig<TyConn, TyDock, TyAllocCfg>
 where
-    TyConn: TrConnection<Config: TrMuxConfig<Data = u8, Dock = TyDock>>,
-    TyDock: TrDefaultDock,
-    TyAllocCfg: TrRpcClientAllocConfig,
+    TyConn: TrConnection<Config: TrMuxConfig<Data = u8, Dock = TyDock>> + 'static,
+    TyDock: TrDefaultDock + 'static,
+    TyAllocCfg: TrRpcClientAllocConfig + 'static,
 {
     type MuxConn = TyConn;
 
     /// 共享连接对象的分配器来自分配约定，而不是本 crate 的固定选择。
     type SharedConn = Shared<TyConn, TyAllocCfg::SharedConnAlloc>;
 
-    type ReqPrefix = mptp_wire::RequestPrefix<mptp_smux::SessionAlloc>;
+    type ReqPrefix<'a>
+        = mptp_wire::RequestPrefix<mptp_smux::RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type RespPrefix = mptp_wire::ResponsePrefix<mptp_smux::SessionAlloc>;
+    type RespPrefix<'a>
+        = mptp_wire::ResponsePrefix<mptp_smux::RequestAlloc<'a>>
+    where
+        Self: 'a;
 }
 
 impl<TyConn, TyDock, TyAllocCfg> mptp_cli_cfg::TrConfig for ClientConfig<TyConn, TyDock, TyAllocCfg>
@@ -255,19 +261,31 @@ impl<TyConn, TyDock, TyAllocCfg> ServingConfig<TyConn, TyDock, TyAllocCfg> {
 impl<TyConn, TyDock, TyAllocCfg> abs_mptp::serving::config::TrConfig
     for ServingConfig<TyConn, TyDock, TyAllocCfg>
 where
-    TyConn: TrConnection<Config: TrMuxConfig<Data = u8, Dock = TyDock>>,
-    TyDock: TrDefaultDock,
-    TyAllocCfg: TrServingAllocConfig,
+    TyConn: TrConnection<Config: TrMuxConfig<Data = u8, Dock = TyDock>> + 'static,
+    TyDock: TrDefaultDock + 'static,
+    TyAllocCfg: TrServingAllocConfig + 'static,
 {
     type MuxConn = TyConn;
 
-    type ReqHeaders = mptp_wire::Headers<mptp_smux::SessionAlloc>;
+    type ReqHeaders<'a>
+        = mptp_wire::Headers<mptp_smux::RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type RespHeaders = mptp_wire::Headers<mptp_smux::SessionAlloc>;
+    type RespHeaders<'a>
+        = mptp_wire::Headers<mptp_smux::RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type ReqPrefix = mptp_wire::RequestPrefix<mptp_smux::SessionAlloc>;
+    type ReqPrefix<'a>
+        = mptp_wire::RequestPrefix<mptp_smux::RequestAlloc<'a>>
+    where
+        Self: 'a;
 
-    type RespPrefix = mptp_wire::ResponsePrefix<mptp_smux::SessionAlloc>;
+    type RespPrefix<'a>
+        = mptp_wire::ResponsePrefix<mptp_smux::RequestAlloc<'a>>
+    where
+        Self: 'a;
 }
 
 impl<TyConn, TyDock, TyAllocCfg> mptp_srv_cfg::TrConfig

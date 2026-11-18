@@ -51,7 +51,7 @@ where
     H: TrServeHandler<C>,
     S: Send + Sync + 'static,
 {
-    /// 由「binding + handler + 状态」构造；连接 arena 的页大小取 [`PageSize::P2K`]。
+    /// 由「binding + handler + 状态」构造；per-session arena 的页大小取 [`PageSize::P2K`]。
     ///
     /// 调用方负责先把连接绑定到默认 serving dock（`bind_async`），再把 binding 交进来；
     /// `state` 是共享状态，通常 `Arc::clone` 一份给 handler（如 `mptp_serving::RadixRouter`
@@ -60,7 +60,7 @@ where
     /// # Panics
     ///
     /// [`PageSize::P2K`] 在支持 16 位 cell 下标的平台上总是受支持；不支持的目标会在
-    /// 构造连接 arena 时 panic。需要显式处理时用
+    /// 构造 servlet 的 root arena 时 panic。需要显式处理时用
     /// [`MptpConnection::new_with_page_size`]。
     pub fn new(binding: DockBinding<C>, handler: H, state: Arc<S>) -> Self {
         Self::new_with_page_size(binding, handler, state, PageSize::P2K)

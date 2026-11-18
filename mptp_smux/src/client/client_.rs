@@ -96,7 +96,7 @@ where
     /// # Panics
     ///
     /// [`PageSize::P2K`] 在支持 16 位 cell 下标的平台上总是受支持；不支持的目标会在
-    /// 构造客户端 arena 时 panic。需要显式处理时用
+    /// 构造客户端 root arena 时 panic。需要显式处理时用
     /// [`MptpClient::new_with_page_size`]。
     pub fn new(conn: SharedConn<C>) -> Self {
         Self::new_with_page_size(conn, PageSize::P2K).expect("PageSize::P2K 应当在当前平台受支持")

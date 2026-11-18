@@ -48,7 +48,11 @@ where
     H: TrReqHandler<C> + Send + Sync + 'static,
     H::Err: 'static,
 {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(&'x self, ctx: &'x mut MptpContext<'f, 'a, C, S>) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         let method = ctx.method();
         // 先同步取走两半，再装箱：异步块只捕获拥有所有权的两半与 handler 引用，

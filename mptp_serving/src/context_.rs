@@ -19,7 +19,7 @@
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_mptp::spec::{Status, access_method::AccessMethod};
 use mptp_smux::{
-    SessionAlloc,
+    RequestAlloc,
     serving::{
         RequestBodyAsync, RequestSuffixAsync, ResponseBuilder, ServingSession,
         config::{ChannelRx, TrConfig},
@@ -36,7 +36,7 @@ use super::{RequestCancel, route_params_::RouteParams};
 ///
 /// `R` 与端点元数据分工明确：元数据是**装配期声明**（鉴权策略、超时……），`R` 是**本请求
 /// 的运行期事实**（已通过鉴权、主体是谁、配额余量……）。它由装配者定义，框架不解释它。
-pub struct MptpContext<'f, C, S = (), R = ()>
+pub struct MptpContext<'f, 'a, C, S = (), R = ()>
 where
     C: TrConfig,
 {
@@ -47,7 +47,7 @@ where
     ///
     /// 它按值持有 `Arc<BumpListAlloc>` 句柄，因此 context 既拥有 arena，又能把由该
     /// arena 分配的 future 交出去；句柄克隆不产生自引用。
-    arena_: SessionAlloc,
+    arena_: RequestAlloc<'a>,
 
     /// 本次请求的位置（借用调用方的克隆）。
     location_: &'f str,
@@ -56,7 +56,7 @@ where
     route_: RouteParams<'f>,
 
     /// 服务端会话（借用自 servlet）。
-    session_: &'f mut ServingSession<C>,
+    session_: &'f mut ServingSession<'a, C>,
 
     /// 连接作用域状态（共享借用）。
     state_: &'f S,
@@ -68,7 +68,7 @@ where
     cancel_: RequestCancel<'f>,
 }
 
-impl<'f, C, S, R> MptpContext<'f, C, S, R>
+impl<'f, 'a, C, S, R> MptpContext<'f, 'a, C, S, R>
 where
     C: TrConfig,
 {
@@ -78,11 +78,11 @@ where
     // 借用再包一层，因此显式允许超参数。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_(
-        arena: SessionAlloc,
+        arena: RequestAlloc<'a>,
         method: AccessMethod,
         location: &'f str,
         route: RouteParams<'f>,
-        session: &'f mut ServingSession<C>,
+        session: &'f mut ServingSession<'a, C>,
         state: &'f S,
         request_state: &'f mut R,
         cancel: RequestCancel<'f>,
@@ -106,11 +106,11 @@ where
 
     /// 请求级 arena 句柄的克隆。
     ///
-    /// 返回的是 `SessionAlloc` 的**克隆**而不是 `&SessionAlloc`：处理器先取出句柄、
+    /// 返回的是 [`RequestAlloc`] 的**克隆**而不是 `&RequestAlloc`：处理器先取出句柄、
     /// 再构造 future、最后经 [`crate::handler_::box_future_`] 装箱。按值交出句柄让
     /// future 自己拥有 allocator，避免把 `&MptpContext` 借进 future 的类型里。
     #[doc(hidden)]
-    pub fn arena(&self) -> SessionAlloc {
+    pub fn arena(&self) -> RequestAlloc<'a> {
         self.arena_.clone()
     }
 
@@ -128,7 +128,7 @@ where
     ///
     /// 处理器 / 中间件经它读取请求头（例如 `#[from_header]` 参数来源）；需要改写头表时用
     /// [`headers_mut`](Self::headers_mut)。
-    pub fn headers(&self) -> &mptp_smux::Headers<SessionAlloc> {
+    pub fn headers(&self) -> &mptp_smux::Headers<RequestAlloc<'a>> {
         self.session_.headers()
     }
 
@@ -136,7 +136,7 @@ where
     ///
     /// 改写的是会话持有的请求头副本，**不**写回已经解码好的请求前缀；因此可以用它做
     /// 「中间件把规范化后的头交给后续处理器」这类请求内改写。
-    pub fn headers_mut(&mut self) -> &mut mptp_smux::Headers<SessionAlloc> {
+    pub fn headers_mut(&mut self) -> &mut mptp_smux::Headers<RequestAlloc<'a>> {
         self.session_.headers_mut()
     }
 
@@ -150,7 +150,7 @@ where
     }
 
     /// 只读会话视图。
-    pub fn session(&self) -> &ServingSession<C> {
+    pub fn session(&self) -> &ServingSession<'a, C> {
         self.session_
     }
 
@@ -159,7 +159,7 @@ where
     /// 这是逃逸口：多数处理器应优先用 [`req_body_async`](Self::req_body_async) /
     /// [`req_suffix_async`](Self::req_suffix_async) / [`response`](Self::response) 这些
     /// 一级 helper，只有需要会话层面的操作（如 `finish_async`、`take_parts`）时才用它。
-    pub fn session_mut(&mut self) -> &mut ServingSession<C> {
+    pub fn session_mut(&mut self) -> &mut ServingSession<'a, C> {
         self.session_
     }
 
@@ -172,9 +172,10 @@ where
     ///
     /// `await` 后可能返回 [`mptp_smux::ServeError`]：会话状态不允许读体、请求前缀缺失或
     /// 底层传输读失败。
-    pub fn req_body_async<'a>(&'a mut self) -> RequestBodyAsync<'a, 'a, C>
+    pub fn req_body_async<'x>(&'x mut self) -> RequestBodyAsync<'x, 'a, 'x, C>
     where
-        C: 'a,
+        C: 'x,
+        'a: 'x,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
         self.session_.req_body_async()
@@ -189,9 +190,10 @@ where
     ///
     /// `await` 后可能返回 [`mptp_smux::ServeError`]：会话状态不允许读后缀、请求前缀缺失或
     /// 排空请求体时传输失败。
-    pub fn req_suffix_async<'a>(&'a mut self) -> RequestSuffixAsync<'a, 'a, C>
+    pub fn req_suffix_async<'x>(&'x mut self) -> RequestSuffixAsync<'x, 'a, 'x, C>
     where
-        C: 'a,
+        C: 'x,
+        'a: 'x,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
         self.session_.req_suffix_async()
@@ -205,7 +207,7 @@ where
     /// ```text
     /// ctx.response(Status::Ok).no_body_async().await?;
     /// ```
-    pub fn response(&mut self, status: Status) -> ResponseBuilder<'_, C> {
+    pub fn response(&mut self, status: Status) -> ResponseBuilder<'_, 'a, C> {
         self.session_.response(status)
     }
 

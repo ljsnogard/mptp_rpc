@@ -8,6 +8,14 @@
 //! 短路有两种写法：返回 `Ok(Some(status))` 让管线写该状态的无体回复（省事、统一），或者
 //! 自己写完回复后返回 `Ok(None)` 且不调用 `next`（需要写头 / 写体时）。
 //!
+//! # 三个生命周期
+//!
+//! - `'x`：本次调用的借用（中间件、端点、`ctx`、`next`）；
+//! - `'f`：[`MptpContext`] 内部的请求借用；
+//! - `'a`：请求级 arena，`ctx.arena()` 交出的句柄带它。
+//!
+//! `'f: 'x` 与 `'a: 'x` 让 arena future 安全地短借 `ctx`，又不把句柄延长成 `'static`。
+//!
 //! # `middleware_`: middleware and the pipeline
 //!
 //! Middleware is an onion: each [`TrMiddleware::call`] receives a `next` callback, invokes it
@@ -20,7 +28,7 @@ use alloc::{alloc::Global, boxed::Box, sync::Arc, vec::Vec};
 use core::alloc::Allocator;
 
 use abs_mptp::spec::Status;
-use mptp_smux::{ServeError, SessionAlloc, serving::config::TrConfig};
+use mptp_smux::{RequestAlloc, ServeError, serving::config::TrConfig};
 
 use super::{
     arena_::ArenaFuture, context_::MptpContext, endpoint_::Endpoint, handler_::box_future_,
@@ -29,15 +37,15 @@ use super::{
 /// 中间件 `call` 返回的 future：分配在请求级 arena 里、类型擦除的 [`ArenaFuture`]。
 ///
 /// 不带 `Send`：与 [`TrEndpointHandler`](crate::TrEndpointHandler) 一致，future 链天然 `!Send`，`Send` 边界在分派层。
-pub type MiddlewareFuture<'a> = ArenaFuture<'a, Result<Option<Status>, ServeError>>;
+pub type MiddlewareFuture<'x, 'a> = ArenaFuture<'x, 'a, Result<Option<Status>, ServeError>>;
 
 /// 中间件的 `next` 回调：把控制权交给链上的下一环。
 ///
-/// `'a` 是本次借用的生命周期，`'f` 是 [`MptpContext`] 内部借用的生命周期。回调由
-/// [`Pipeline`] 在请求作用域、从请求级 arena 里构造，因此可以在中间件的 future 里跨
-/// `.await` 存活；中间件调用 `next(ctx)` 即放行，不调用即短路。
-pub type NextFn<'a, 'f, C, S = (), R = ()> =
-    dyn FnMut(&'a mut MptpContext<'f, C, S, R>) -> MiddlewareFuture<'a> + 'a;
+/// `'x` 是本次借用的生命周期，`'f` 是 [`MptpContext`] 内部借用的生命周期，`'a` 是请求级
+/// arena。回调由 [`Pipeline`] 在请求作用域、从请求级 arena 里构造，因此可以在中间件的
+/// future 里跨 `.await` 存活；中间件调用 `next(ctx)` 即放行，不调用即短路。
+pub type NextFn<'x, 'f, 'a, C, S = (), R = ()> =
+    dyn FnMut(&'x mut MptpContext<'f, 'a, C, S, R>) -> MiddlewareFuture<'x, 'a> + 'x;
 
 /// 一个横切策略中间件。
 ///
@@ -51,20 +59,23 @@ pub type NextFn<'a, 'f, C, S = (), R = ()> =
 /// - `Ok(Some(status))`：短路，且由管线写该状态的无体回复（中间件不必自己写）；
 /// - `Err(err)`：按 [`ServeError`] 上抛，收尾仍由 servlet 兜底。
 ///
-/// `'a` 是本次借用，`'f` 是 [`MptpContext`] 内部借用的生命周期；两者分离，使管线在一次
-/// `.await` 之后能重新借用 `ctx`。
+/// `'x` 是本次借用，`'f` 是 [`MptpContext`] 内部借用，`'a` 是请求级 arena；三者分离，
+/// 使管线在一次 `.await` 之后能重新借用 `ctx`。
 pub trait TrMiddleware<C, S = (), R = (), M = Global>: Send + Sync
 where
     C: TrConfig,
     M: Allocator,
 {
     /// 包裹一次请求处理：在调用 `next` 之前 / 之后做本中间件的事。
-    fn call<'a, 'f>(
-        &'a self,
-        endpoint: &'a Endpoint<C, S, R, M>,
-        ctx: &'a mut MptpContext<'f, C, S, R>,
-        next: &'a mut NextFn<'a, 'f, C, S, R>,
-    ) -> MiddlewareFuture<'a>;
+    fn call<'x, 'f, 'a>(
+        &'x self,
+        endpoint: &'x Endpoint<C, S, R, M>,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+        next: &'x mut NextFn<'x, 'f, 'a, C, S, R>,
+    ) -> MiddlewareFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x;
 }
 
 /// 一条有序的中间件链，末端接终端处理器。
@@ -127,11 +138,15 @@ where
     ///
     /// 任一中间件返回 `Some(status)`（且没有继续调用 `next`）时，管线写该状态的无体回复；
     /// 中间件返回错误或处理器返回错误都按 [`ServeError`] 上抛，收尾仍由 servlet 兜底。
-    pub async fn run<'a, 'f>(
-        &'a self,
-        endpoint: &'a Endpoint<C, S, R, M>,
-        ctx: &'a mut MptpContext<'f, C, S, R>,
-    ) -> Result<(), ServeError> {
+    pub async fn run<'x, 'f, 'a>(
+        &'x self,
+        endpoint: &'x Endpoint<C, S, R, M>,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> Result<(), ServeError>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         // 只把 ctx 借给整条链一次：链跑完后还要用同一份 ctx 写短路回复。
         let short_circuit = {
             let ctx = &mut *ctx;
@@ -145,33 +160,37 @@ where
 
     /// 从第 `index` 环开始跑：把「下一环」装成 arena 里的 `next` 回调交给当前中间件。
     ///
-    /// 之所以把回调放进请求级 arena 而不是栈上局部变量：`next` 的借用生命周期是 `'a`
-    /// （中间件的 future 持有它跨 `.await`），而栈上局部变量活不到调用者选定的 `'a`。
+    /// 之所以把回调放进请求级 arena 而不是栈上局部变量：`next` 的借用生命周期是 `'x`
+    /// （中间件的 future 持有它跨 `.await`），而栈上局部变量活不到调用者选定的 `'x`。
     /// 闭包只捕获 `&self` / `&endpoint` / `usize`，没有 `Drop` 需要执行，因此用
     /// [`Box::new_in`] 放进 arena 不会遗漏析构。
-    async fn run_from_<'a, 'f>(
-        &'a self,
+    async fn run_from_<'x, 'f, 'a>(
+        &'x self,
         index: usize,
-        endpoint: &'a Endpoint<C, S, R, M>,
-        ctx: &'a mut MptpContext<'f, C, S, R>,
-    ) -> Result<Option<Status>, ServeError> {
+        endpoint: &'x Endpoint<C, S, R, M>,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> Result<Option<Status>, ServeError>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let Some(middleware) = self.middlewares_.get(index) else {
             endpoint.handler().handle(ctx).await?;
             return Result::Ok(Option::None);
         };
         let arena = ctx.arena();
-        let next = move |ctx: &'a mut MptpContext<'f, C, S, R>| -> MiddlewareFuture<'a> {
+        let next = move |ctx: &'x mut MptpContext<'f, 'a, C, S, R>| -> MiddlewareFuture<'x, 'a> {
             let arena = ctx.arena();
             box_future_(arena, self.run_from_(index + 1usize, endpoint, ctx))
         };
-        let next_box: Box<_, SessionAlloc> = Box::new_in(next, arena);
+        let next_box: Box<_, RequestAlloc<'a>> = Box::new_in(next, arena);
         let (raw, alloc) = Box::into_raw_with_allocator(next_box);
-        let raw: *mut NextFn<'a, 'f, C, S, R> = raw;
+        let raw: *mut NextFn<'x, 'f, 'a, C, S, R> = raw;
         // SAFETY: `raw` 仍指向同一个 arena box，只是把闭包指针拓宽成 trait object；
         // 闭包没有 Drop 需要执行，内存随请求级 allocator 整体释放。
-        let next_box: Box<NextFn<'a, 'f, C, S, R>, SessionAlloc> =
+        let next_box: Box<NextFn<'x, 'f, 'a, C, S, R>, RequestAlloc<'a>> =
             unsafe { Box::from_raw_in(raw, alloc) };
-        let next: &'a mut NextFn<'a, 'f, C, S, R> = Box::leak(next_box);
+        let next: &'x mut NextFn<'x, 'f, 'a, C, S, R> = Box::leak(next_box);
         middleware.call(endpoint, ctx, next).await
     }
 }

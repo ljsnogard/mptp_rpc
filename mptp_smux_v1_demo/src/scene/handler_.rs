@@ -155,7 +155,14 @@ struct ScenePlanets {
 }
 
 impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for ScenePlanets {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             match ctx.method() {
@@ -194,10 +201,14 @@ struct ScenePull {
 }
 
 impl<S, R> TrEndpointHandler<crate::scene::cfg_::ServingCfg, S, R> for ScenePull {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, crate::scene::cfg_::ServingCfg, S, R>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, crate::scene::cfg_::ServingCfg, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let cancel = ctx.cancel().child_token();
@@ -232,12 +243,13 @@ impl Drop for SubGuard_ {
 const K_PULL_IDLE_HEARTBEAT: core::time::Duration = core::time::Duration::from_millis(300u64);
 
 /// `Pull /scene/planets/{id}`：先发 `Snapshot`，再持续写更新。
-async fn pull_async_<K>(
+async fn pull_async_<'f, 'a, K>(
     conn: &ConnectionCtx,
-    session: &mut ServingSession<crate::scene::cfg_::ServingCfg>,
+    session: &'f mut ServingSession<'a, crate::scene::cfg_::ServingCfg>,
     cancel: K,
 ) -> Result<(), ServeError>
 where
+    'a: 'f,
     K: TrCancellationToken,
 {
     let Some(planet_id) = parse_planet_uri_(session.location()) else {
@@ -266,7 +278,7 @@ where
         sub_id_: sub_id,
     };
 
-    let mut stream: SuffixStream<'_, crate::scene::cfg_::ServingCfg> = session
+    let mut stream: SuffixStream<'_, '_, crate::scene::cfg_::ServingCfg> = session
         .response(Status::Ok)
         .suffix_stream_async()
         .may_cancel_with(cancel.child_token())
@@ -314,12 +326,13 @@ where
 }
 
 /// 写一条无体状态回复。
-async fn reply_status_async_<C>(
-    session: &mut ServingSession<C>,
+async fn reply_status_async_<'f, 'a, C>(
+    session: &'f mut ServingSession<'a, C>,
     status: Status,
 ) -> Result<(), ServeError>
 where
     C: mptp_smux::serving::config::TrConfig,
+    'a: 'f,
 {
     session.response(status).no_body_async().await?;
     Ok(())
@@ -329,7 +342,14 @@ where
 struct SceneRoot;
 
 impl<C: TrConfig, S, R> TrEndpointHandler<C, S, R> for SceneRoot {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             ctx.session_mut()

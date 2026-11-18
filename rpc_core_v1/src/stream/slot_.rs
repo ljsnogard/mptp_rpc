@@ -76,28 +76,29 @@ pub trait TrSuffixFinish<'f>: TrSuffixWrite + 'f {
     fn finish_async(self) -> StreamFuture<'f, Self::FinishOutput>;
 }
 
-impl<'a, C> TrSuffixWrite for SuffixStream<'a, C>
+impl<'b, 'a, C> TrSuffixWrite for SuffixStream<'b, 'a, C>
 where
     C: TrConfig + 'a,
     ServingChannelTx<C>: TrBuffWrite<u8>,
 {
-    type Writer<'b>
-        = ResponseSuffixWriter<'b, C>
+    type Writer<'x>
+        = ResponseSuffixWriter<'x, C>
     where
-        Self: 'b;
+        Self: 'x;
 
     fn writer_mut(&mut self) -> Result<Self::Writer<'_>, StreamError> {
         SuffixStream::writer(self).map_err(StreamError::from)
     }
 }
 
-impl<'a, C> TrSuffixFinish<'a> for SuffixStream<'a, C>
+impl<'b, 'a, C> TrSuffixFinish<'b> for SuffixStream<'b, 'a, C>
 where
     C: TrConfig + 'a,
+    'a: 'b,
 {
     type FinishOutput = ();
 
-    fn finish_async(self) -> StreamFuture<'a, ()> {
+    fn finish_async(self) -> StreamFuture<'b, ()> {
         StreamFuture::new(async move {
             SuffixStream::finish_async(self)
                 .may_cancel_with(NonCancellableToken::new())
@@ -107,30 +108,30 @@ where
     }
 }
 
-impl<C> TrSuffixWrite for RequestSuffixStream<C>
+impl<'a, C> TrSuffixWrite for RequestSuffixStream<'a, C>
 where
-    C: ClientConfig,
+    C: ClientConfig + 'a,
     ClientChannelTx<C>: TrBuffWrite<u8>,
 {
-    type Writer<'b>
-        = RequestSuffixWriter<'b, C>
+    type Writer<'x>
+        = RequestSuffixWriter<'x, C>
     where
-        Self: 'b;
+        Self: 'x;
 
     fn writer_mut(&mut self) -> Result<Self::Writer<'_>, StreamError> {
         Result::Ok(RequestSuffixStream::writer(self))
     }
 }
 
-impl<C> TrSuffixFinish<'static> for RequestSuffixStream<C>
+impl<'a, C> TrSuffixFinish<'a> for RequestSuffixStream<'a, C>
 where
-    C: ClientConfig + 'static,
+    C: ClientConfig + 'a,
     mptp_smux::client::config::ChannelRx<C>:
         abs_buff::TrBuffRead<u8> + abs_buff::buffer::TrConsumerState,
 {
-    type FinishOutput = Response<C>;
+    type FinishOutput = Response<'a, C>;
 
-    fn finish_async(self) -> StreamFuture<'static, Response<C>> {
+    fn finish_async(self) -> StreamFuture<'a, Response<'a, C>> {
         StreamFuture::new(async move {
             RequestSuffixStream::finish_async(self)
                 .may_cancel_with(NonCancellableToken::new())

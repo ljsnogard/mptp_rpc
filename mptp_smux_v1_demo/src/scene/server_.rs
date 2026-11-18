@@ -20,10 +20,11 @@ use std::{
 
 use abs_art_facade::{TrJoinHandle, TrLocalScope};
 use abs_cancel::TrMayCancel as _;
-use mptp_smux::x_deps::abs_smux;
 use anyhow::{Result, anyhow};
 use compio::net::{TcpListener, TcpStream};
+use futures::stream::StreamExt;
 use mptp_smux::serving::MptpServlet;
+use mptp_smux::x_deps::abs_smux;
 
 use crate::scene::{
     ConnectionCtx, PlanetRegistry, SceneHub, SceneService, ServingCfg,
@@ -71,13 +72,9 @@ pub async fn serve_on_listener_async_(listener: TcpListener) -> Result<()> {
         let registry_for_conn = registry.clone();
         let hub_for_conn = hub.clone();
         let task = scope.spawn_local(async move {
-            if let Err(err) = serve_connection_async_(
-                stream,
-                connection_id,
-                registry_for_conn,
-                hub_for_conn,
-            )
-            .await
+            if let Err(err) =
+                serve_connection_async_(stream, connection_id, registry_for_conn, hub_for_conn)
+                    .await
             {
                 eprintln!("scene-server：连接 #{connection_id} 结束：{err:#}");
             }
@@ -126,19 +123,39 @@ async fn serve_connection_async_(
         .await
         .map_err(|err| anyhow!("监听子流失败：{err}"))?;
 
-    let scope = crate::scene::cfg_::compio_rt_().local_scope();
     // 连接级保活：客户端每 500ms 发一次 `Head`，这里用 1 秒的接受超时检查「最近是否
     // 还有请求」。超过 3 秒没有任何请求就判定连接已死；`smux_v1` 在对端断开时不一定
     // 会让 `income_async` 报错，因此需要这条业务级判据。
     const K_ACCEPT_TICK: core::time::Duration = core::time::Duration::from_secs(1u64);
     const K_IDLE_LIMIT: core::time::Duration = core::time::Duration::from_secs(3u64);
+
+    // 会话借用 servlet 的 per-session arena，生命周期不可能脱离本连接任务；因此不再把
+    // 每条 session 丢进 `spawn_local`（那要求 `'static`），而是在本任务内用
+    // `FuturesUnordered` 并发驱动。单线程运行时下二者语义相同：都是本地并发。
+    let mut sessions: futures::stream::FuturesUnordered<_> =
+        futures::stream::FuturesUnordered::new();
     loop {
-        let accepted = compio::time::timeout(K_ACCEPT_TICK, async {
-            servlet.accept_async(&mut listener).await
+        let tick = compio::time::timeout(K_ACCEPT_TICK, async {
+            if sessions.is_empty() {
+                let session = servlet.accept_async(&mut listener).await?;
+                Result::Ok(Option::Some(session))
+            } else {
+                let accept = servlet.accept_async(&mut listener).into_future();
+                let next = sessions.next();
+                futures::pin_mut!(accept, next);
+                match futures::future::select(accept, next).await {
+                    futures::future::Either::Left((accepted, _)) => accepted.map(Option::Some),
+                    futures::future::Either::Right((..)) => Result::Ok(Option::None),
+                }
+            }
         })
         .await;
-        let session = match accepted {
-            Ok(Ok(session)) => session,
+        match tick {
+            Ok(Ok(Option::Some(session))) => {
+                let token = ctx.token_();
+                sessions.push(servlet.serve_session_async(session).may_cancel_with(token));
+            }
+            Ok(Ok(Option::None)) => {}
             Ok(Err(err)) => {
                 println!("scene-server：连接 #{connection_id} 不再接受子流（{err}）");
                 break;
@@ -148,28 +165,10 @@ async fn serve_connection_async_(
                     println!("scene-server：连接 #{connection_id} 空闲超时，判死");
                     break;
                 }
-                continue;
             }
-        };
-        let servlet_for_session = servlet.clone();
-        let token = ctx.token_();
-        let task = scope.spawn_local(async move {
-            if let Err(err) = servlet_for_session
-                .serve_session_async(session)
-                .may_cancel_with(token)
-                .await
-            {
-                // `405` / handler 错误是单条请求的正常结果，不拆连接。
-                if !matches!(
-                    err,
-                    mptp_smux::ServeError::NotAllowed { .. } | mptp_smux::ServeError::Target { .. }
-                ) {
-                    eprintln!("scene-server：session 结束（{err}）");
-                }
-            }
-        });
-        task.detach();
+        }
     }
+    drop(sessions);
 
     // 正常收尾：取消在途 session、广播 Removed、删除行星与订阅。
     ctx.cleanup_async_().await;

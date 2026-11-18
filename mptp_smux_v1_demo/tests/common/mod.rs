@@ -30,6 +30,7 @@ use abs_mptp::spec::Status;
 use anyhow::{Result, anyhow, bail};
 use compio::net::TcpListener;
 use flume::Receiver;
+use futures::stream::StreamExt;
 use mptp_serving::{
     Endpoint, HandlerFuture, MiddlewareFuture, MptpContext, NextFn, TrEndpointHandler,
     TrMiddleware, box_future_,
@@ -304,26 +305,39 @@ async fn serve_connection_(
     )
     .await
     .map_err(|err| anyhow!("绑定服务垛口失败：{err}"))?;
+    let _ = scope;
     let mut listener = servlet
         .listen_async(&mut binding, 8usize)
         .await
         .map_err(|err| anyhow!("监听失败：{err}"))?;
+    // 会话借用 servlet 的 per-session arena，不能丢进要求 `'static` 的 `spawn_local`；
+    // 在连接任务内用 `FuturesUnordered` 并发驱动全部 session。
+    let mut sessions: futures::stream::FuturesUnordered<_> =
+        futures::stream::FuturesUnordered::new();
     loop {
-        let session = match servlet.accept_async(&mut listener).await {
-            Ok(session) => session,
-            // 连接失败 / 对端关闭：离开接受循环，交给清理守卫。
-            Err(_) => break,
-        };
-        let servlet = servlet.clone();
-        let token = ctx.token_();
-        let task = scope.spawn_local(async move {
-            let _ = servlet
-                .serve_session_async(session)
-                .may_cancel_with(token)
-                .await;
-        });
-        task.detach();
+        if sessions.is_empty() {
+            let session = match servlet.accept_async(&mut listener).await {
+                Ok(session) => session,
+                // 连接失败 / 对端关闭：离开接受循环，交给清理守卫。
+                Err(_) => break,
+            };
+            let token = ctx.token_();
+            sessions.push(servlet.serve_session_async(session).may_cancel_with(token));
+        } else {
+            let accept = servlet.accept_async(&mut listener).into_future();
+            let next = sessions.next();
+            futures::pin_mut!(accept, next);
+            match futures::future::select(accept, next).await {
+                futures::future::Either::Left((Ok(session), _)) => {
+                    let token = ctx.token_();
+                    sessions.push(servlet.serve_session_async(session).may_cancel_with(token));
+                }
+                futures::future::Either::Left((Err(_), _)) => break,
+                futures::future::Either::Right((..)) => {}
+            }
+        }
     }
+    drop(sessions);
     ctx.cleanup_async_().await;
     Ok(())
 }
@@ -336,10 +350,17 @@ async fn serve_connection_(
 struct TestChunks;
 
 impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestChunks {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
-            let mut stream: SuffixStream<'_, C> = ctx
+            let mut stream: SuffixStream<'_, '_, C> = ctx
                 .session_mut()
                 .response(Status::Ok)
                 .suffix_stream_async()
@@ -367,7 +388,14 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
 struct TestSplit;
 
 impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestSplit {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let event = PlanetEvent::Updated(PlanetDescriptor {
@@ -389,7 +417,7 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
                     detail: err.to_string(),
                 })?;
             let middle = bytes.len() / 2usize;
-            let mut stream: SuffixStream<'_, C> = ctx
+            let mut stream: SuffixStream<'_, '_, C> = ctx
                 .session_mut()
                 .response(Status::Ok)
                 .suffix_stream_async()
@@ -441,7 +469,14 @@ struct TestCtx {
 }
 
 impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestCtx {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let before = ctx.reply_written();
@@ -472,7 +507,14 @@ struct TestCtxBody {
 }
 
 impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestCtxBody {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let body = ctx.req_body_async().await?;
@@ -495,7 +537,14 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
 struct TestMultiView;
 
 impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestMultiView {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let mut response = ctx.response(Status::Ok);
@@ -512,7 +561,14 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
 struct TestMultiPull;
 
 impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> for TestMultiPull {
-    fn handle<'a, 'f>(&'a self, ctx: &'a mut MptpContext<'f, C, S, R>) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, R>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let event = PlanetEvent::Removed {
@@ -524,7 +580,7 @@ impl<C: mptp_smux::serving::config::TrConfig, S, R> TrEndpointHandler<C, S, R> f
                 .map_err(|err| ServeError::Target {
                     detail: err.to_string(),
                 })?;
-            let mut stream: SuffixStream<'_, C> =
+            let mut stream: SuffixStream<'_, '_, C> =
                 ctx.response(Status::Ok).suffix_stream_async().await?;
             stream.write_chunk_async(&bytes).await?;
             let _ = stream.finish_async().await;
@@ -541,10 +597,14 @@ struct TestState;
 impl<C: mptp_smux::serving::config::TrConfig, S> TrEndpointHandler<C, S, SceneRequestState>
     for TestState
 {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let principal = ctx
@@ -574,12 +634,16 @@ impl<C, S> TrMiddleware<C, S, SceneRequestState> for OrderMiddleware
 where
     C: mptp_smux::serving::config::TrConfig,
 {
-    fn call<'a, 'f>(
-        &'a self,
-        _endpoint: &'a Endpoint<C, S, SceneRequestState>,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-        next: &'a mut NextFn<'a, 'f, C, S, SceneRequestState>,
-    ) -> MiddlewareFuture<'a> {
+    fn call<'x, 'f, 'a>(
+        &'x self,
+        _endpoint: &'x Endpoint<C, S, SceneRequestState>,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+        next: &'x mut NextFn<'x, 'f, 'a, C, S, SceneRequestState>,
+    ) -> MiddlewareFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             self.trace_.lock().expect("洋葱记录锁被污染").push("before");
@@ -599,12 +663,16 @@ impl<C, S> TrMiddleware<C, S, SceneRequestState> for GuardMiddleware
 where
     C: mptp_smux::serving::config::TrConfig,
 {
-    fn call<'a, 'f>(
-        &'a self,
-        _endpoint: &'a Endpoint<C, S, SceneRequestState>,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-        next: &'a mut NextFn<'a, 'f, C, S, SceneRequestState>,
-    ) -> MiddlewareFuture<'a> {
+    fn call<'x, 'f, 'a>(
+        &'x self,
+        _endpoint: &'x Endpoint<C, S, SceneRequestState>,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+        next: &'x mut NextFn<'x, 'f, 'a, C, S, SceneRequestState>,
+    ) -> MiddlewareFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             let denied = ctx.headers().try_get_str("X-Scene-Deny").is_some();
@@ -629,10 +697,14 @@ impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestOrder
 where
     C: mptp_smux::serving::config::TrConfig,
 {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             self.trace_
@@ -654,10 +726,14 @@ impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestNoReply
 where
     C: mptp_smux::serving::config::TrConfig,
 {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move { Ok(()) })
     }
@@ -673,10 +749,14 @@ impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestFail
 where
     C: mptp_smux::serving::config::TrConfig,
 {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             Err(ServeError::Target {
@@ -696,10 +776,14 @@ impl<C, S> TrEndpointHandler<C, S, SceneRequestState> for TestFailAfterReply
 where
     C: mptp_smux::serving::config::TrConfig,
 {
-    fn handle<'a, 'f>(
-        &'a self,
-        ctx: &'a mut MptpContext<'f, C, S, SceneRequestState>,
-    ) -> HandlerFuture<'a> {
+    fn handle<'f, 'x, 'a>(
+        &'x self,
+        ctx: &'x mut MptpContext<'f, 'a, C, S, SceneRequestState>,
+    ) -> HandlerFuture<'x, 'a>
+    where
+        'f: 'x,
+        'a: 'x,
+    {
         let arena = ctx.arena();
         box_future_(arena, async move {
             ctx.response(Status::Ok).no_body_async().await?;
@@ -849,11 +933,26 @@ impl SceneTestClient {
     ///
     /// 请求失败或状态非 200 时返回错误。
     pub async fn pull_with_capacity_async_(&self, uri: &str, capacity: usize) -> Result<ScenePull> {
-        let mut resp = with_timeout_(async { self.client_.pull(uri).send_async().await }).await?;
-        ensure_ok_(&resp, uri)?;
+        // 会话借用 `MptpClient` 的 per-session arena，请求必须在后台任务内部创建。
+        let client = self.client_.clone();
+        let uri_owned = uri.to_string();
+        let (setup_tx, setup_rx) = flume::unbounded::<Result<(), String>>();
         let (tx, rx) = flume::bounded::<PlanetEvent>(capacity);
         let scope = mptp_smux_v1_demo::scene::cfg_::compio_rt_().local_scope();
         let handle = scope.spawn_local(async move {
+            let mut resp =
+                match with_timeout_(async { client.pull(&uri_owned).send_async().await }).await {
+                    Result::Ok(resp) => resp,
+                    Result::Err(err) => {
+                        let _ = setup_tx.send(Result::Err(format!("{err:#}")));
+                        return;
+                    }
+                };
+            if let Result::Err(err) = ensure_ok_(&resp, &uri_owned) {
+                let _ = setup_tx.send(Result::Err(format!("{err:#}")));
+                return;
+            }
+            let _ = setup_tx.send(Result::Ok(()));
             let Ok(mut suffix) = resp.suffix_async().await else {
                 return;
             };
@@ -870,6 +969,17 @@ impl SceneTestClient {
                 }
             }
         });
+        match setup_rx.recv_async().await {
+            Result::Ok(Result::Ok(())) => {}
+            Result::Ok(Result::Err(msg)) => {
+                drop(handle);
+                return Err(anyhow!(msg));
+            }
+            Result::Err(_) => {
+                drop(handle);
+                return Err(anyhow!("Pull 任务在建立流之前结束"));
+            }
+        }
         let planet_id_ = mptp_smux_v1_demo::scene::protocol_::parse_planet_uri_(uri);
         Ok(ScenePull {
             rx_: rx,
