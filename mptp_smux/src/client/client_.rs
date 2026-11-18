@@ -59,26 +59,22 @@ use crate::{
 /// 客户端持有的连接智能指针。
 type SharedConn<C> = <C as abs_mptp::client::config::TrConfig>::SharedConn;
 
-/// MPTP 客户端：持有共享连接与客户端作用域的 allocation source。
+/// MPTP 客户端：持有共享连接与 per-request arena 的页大小。
 ///
-/// 它只持有连接与自己的 arena：**没有**本端垛口（每次由连接安排），**也没有**远端垛口
+/// 它只持有连接与页大小：**没有**本端垛口（每次由连接安排），**也没有**远端垛口
 /// （每次调用的实参或配置声明的缺省值）。于是同一个 `Client` 可以向任意垛口发起请求。
 ///
 /// # 内存作用域
 ///
-/// `MptpClient` 自己的 [`SessionAlloc`] 覆盖**客户端作用域**的对象（例如代理级附加头、
-/// 连接级缓存）。一次请求从 [`MptpClient::request`] 开始使用的是**新的** per-request
-/// arena：它随请求前缀进入 `RequestBuilder`，最终由 `MptpSession` 持有；请求结束
-/// （会话 drop）时整个 arena 随之释放。两者都不需要调用方再声明 allocator 类型。
+/// `MptpClient` **不**自己持有一份长期 arena。一次请求从 [`MptpClient::request`] 开始
+/// 创建**新的** per-request arena：它随请求前缀进入 `RequestBuilder`，最终由
+/// `MptpSession` 持有；请求结束（会话 drop）时整个 arena 随之释放。
 pub struct MptpClient<C>
 where
     C: TrConfig,
 {
     /// 共享连接。
     conn_: SharedConn<C>,
-
-    /// 客户端作用域的 arena 句柄。
-    alloc_: SessionAlloc,
 
     /// 新建 per-request arena 时使用的页大小。
     page_size_: PageSize,
@@ -112,17 +108,12 @@ where
         conn: SharedConn<C>,
         page_size: PageSize,
     ) -> Result<Self, BumpListAllocError> {
-        let alloc_ = SessionAlloc::new(page_size)?;
+        // 构造时不创建长期 arena；这里只校验页大小，让配置错误在构造期暴露。
+        let _ = SessionAlloc::new(page_size)?;
         Result::Ok(MptpClient {
             conn_: conn,
-            alloc_,
             page_size_: page_size,
         })
-    }
-
-    /// 本客户端持有的客户端作用域 arena 句柄。
-    pub const fn allocator(&self) -> &SessionAlloc {
-        &self.alloc_
     }
 
     /// 本客户端使用的页大小。

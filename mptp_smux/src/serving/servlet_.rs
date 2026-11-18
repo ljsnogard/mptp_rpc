@@ -62,12 +62,6 @@ where
     /// 单一 handler。
     handler_: H,
 
-    /// 连接级 arena 句柄。
-    ///
-    /// 它覆盖**连接作用域**的对象；每条接受的子流再创建自己的 arena（见
-    /// [`MptpServlet::new_session_alloc`]），两者不共享页。
-    alloc_: SessionAlloc,
-
     /// 新建 per-session arena 时使用的页大小。
     page_size_: PageSize,
 
@@ -100,10 +94,10 @@ where
     ///
     /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
     pub fn new_with_page_size(handler: H, page_size: PageSize) -> Result<Self, BumpListAllocError> {
-        let alloc_ = SessionAlloc::new(page_size)?;
+        // 构造时不创建长期 arena；这里只校验页大小，让配置错误在构造期暴露。
+        let _ = SessionAlloc::new(page_size)?;
         Result::Ok(MptpServlet {
             handler_: handler,
-            alloc_,
             page_size_: page_size,
             _use_c_: PhantomData,
         })
@@ -112,11 +106,6 @@ where
     /// 取回 handler。
     pub const fn handler(&self) -> &H {
         &self.handler_
-    }
-
-    /// 本 servlet 持有的连接作用域 arena 句柄。
-    pub const fn allocator(&self) -> &SessionAlloc {
-        &self.alloc_
     }
 
     /// 为一条入向子流创建新的 per-session arena 句柄。
