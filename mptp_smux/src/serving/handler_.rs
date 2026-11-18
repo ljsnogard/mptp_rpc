@@ -20,12 +20,12 @@ use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mptp::{serving::TrReqHandler, spec::access_method::AccessMethod};
 use gen_mcf2::gen_may_cancel_future;
 
+use super::{config::TrConfig, session_::ServingSession};
 use crate::{
     error_::{ServeError, StateError},
     method_set_::MethodSet,
     x_deps::{abs_cancel, abs_mptp, gen_mcf2},
 };
-use super::{config::TrConfig, session_::ServingSession};
 
 /// 服务端单一 handler。
 pub trait TrServeHandler<C>
@@ -43,17 +43,23 @@ where
         MethodSet::ALL
     }
 
-    type HandleAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<(), Self::Err>>
+    type HandleAsync<'f, 'a>: TrMayCancel<'f, MayCancelOutput = Result<(), Self::Err>>
     where
         Self: 'f,
-        C: 'f;
+        C: 'f,
+        'a: 'f;
 
     /// 一次请求的处理入口。
-    fn handle_async<'f>(
+    ///
+    /// `'f` 是对 handler 与会话的借用，`'a` 是会话 arena：`&'f mut ServingSession<'a, C>`
+    /// 对 `'a` 不变，不能把会话借用“缩短”成 arena 生命周期。
+    fn handle_async<'f, 'a>(
         &'f self,
         method: AccessMethod,
-        session: &'f mut ServingSession<C>,
-    ) -> Self::HandleAsync<'f>;
+        session: &'f mut ServingSession<'a, C>,
+    ) -> Self::HandleAsync<'f, 'a>
+    where
+        'a: 'f;
 }
 
 /// 旧 [`TrReqHandler`] 的适配器。
@@ -84,17 +90,21 @@ where
 {
     type Err = ServeError;
 
-    type HandleAsync<'f>
-        = LegacyHandleAsync<'f, 'f, C, H>
+    type HandleAsync<'f, 'a>
+        = LegacyHandleAsync<'f, 'a, 'f, C, H>
     where
         Self: 'f,
-        C: 'f;
+        C: 'f,
+        'a: 'f;
 
-    fn handle_async<'f>(
+    fn handle_async<'f, 'a>(
         &'f self,
         method: AccessMethod,
-        session: &'f mut ServingSession<C>,
-    ) -> Self::HandleAsync<'f> {
+        session: &'f mut ServingSession<'a, C>,
+    ) -> Self::HandleAsync<'f, 'a>
+    where
+        'a: 'f,
+    {
         LegacyHandleAsync::new(self, method, session)
     }
 }
@@ -102,15 +112,16 @@ where
 /// [`LegacyHandler::handle_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(LegacyHandle, pub, new(pub(crate)))]
-async fn legacy_handle_async_<'f, C, H, K>(
+async fn legacy_handle_async_<'f, 'a, C, H, K>(
     handler: &'f LegacyHandler<H>,
     method: AccessMethod,
-    session: &'f mut ServingSession<C>,
+    session: &'f mut ServingSession<'a, C>,
     cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
     H: TrReqHandler<C>,
+    'a: 'f,
     K: TrCancellationToken,
 {
     let Some((tx, rx, mut headers, location)) = session.take_parts() else {

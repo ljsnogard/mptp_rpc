@@ -1,8 +1,8 @@
 use abs_buff::x_deps::abs_cancel;
 use abs_cancel::TrMayCancel;
 
-use crate::spec::access_method::AccessMethod;
 use super::config as srv_config;
+use crate::spec::access_method::AccessMethod;
 
 /// 路径级 handler：在一条子流上响应某个具体路径的任意方法请求。
 ///
@@ -25,21 +25,28 @@ pub trait TrReqHandler<C>
 where
     C: srv_config::TrConfig,
 {
-    type HandleAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<(), Self::Err>>
+    /// 一次请求的 future。
+    ///
+    /// `'f` 是对 handler / 头表的借用，`'a` 是头表里的 arena 生命周期；两者分开，因为
+    /// 头表按值取自会话，而会话 arena 通常活得比一次调用更长。
+    type HandleAsync<'f, 'a>: TrMayCancel<'f, MayCancelOutput = Result<(), Self::Err>>
     where
-        Self: 'f;
+        Self: 'f,
+        'a: 'f;
 
     type Err: core::error::Error;
 
     /// 处理一次已经完成请求头解码的 MPTP 请求。
     ///
     /// 两个 channel 半边按值传入；handler 返回前必须完成（或转交给 worker 完成）收尾。
-    fn handle_async<'f>(
+    fn handle_async<'f, 'a>(
         &'f self,
         method: AccessMethod,
         location: &'f str,
-        headers: &'f mut srv_config::ReqHeaders<'f, C>,
+        headers: &'f mut srv_config::ReqHeaders<'a, C>,
         chan_tx: srv_config::ChannelTx<C>,
         chan_rx: srv_config::ChannelRx<C>,
-    ) -> Self::HandleAsync<'f>;
+    ) -> Self::HandleAsync<'f, 'a>
+    where
+        'a: 'f;
 }

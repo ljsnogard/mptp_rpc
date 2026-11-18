@@ -10,7 +10,7 @@
 //! **single** handler. `accept_async` returns a movable `ServingSession`; the caller
 //! decides how to run many of them concurrently. The crate never spawns.
 
-use alloc::string::ToString;
+use alloc::{boxed::Box, string::ToString};
 use core::marker::PhantomData;
 
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
@@ -20,7 +20,7 @@ use abs_smux::{
     chan::{TrChannelHalf, TrChannelHandle},
     conn::{TrChannelListener, TrDockBinding},
 };
-use bumplist_alloc::{BumpListAllocError, PageSize};
+use bumplist_alloc::{BumpListAlloc, BumpListAllocError, PageSize};
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, ResponsePrefix, read_request_prefix_with_async};
 
@@ -31,9 +31,10 @@ use super::{
     session_::ServingSession,
 };
 use crate::{
-    SessionAlloc,
+    RequestAlloc,
     copy_::drain_to_eof_async_,
     error_::{ProtocolError, ServeError, TransportError},
+    new_request_alloc,
     ring_prepare_::TrPrepFactory,
     x_deps::{abs_buff, abs_cancel, abs_mptp, abs_smux, gen_mcf2},
 };
@@ -61,6 +62,9 @@ where
 {
     /// 单一 handler。
     handler_: H,
+
+    /// 所有 per-session arena 的 root；它的地址由 `Box` 固定。
+    root_: Box<BumpListAlloc>,
 
     /// 新建 per-session arena 时使用的页大小。
     page_size_: PageSize,
@@ -94,10 +98,12 @@ where
     ///
     /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
     pub fn new_with_page_size(handler: H, page_size: PageSize) -> Result<Self, BumpListAllocError> {
-        // 构造时不创建长期 arena；这里只校验页大小，让配置错误在构造期暴露。
-        let _ = SessionAlloc::new(page_size)?;
+        // root 在构造时不申请 Page；它的地址由 `Box` 固定，之后可以安全地分配
+        // per-session `BumpListAlloc` 和它们的 Arc 控制块。
+        let root_ = Box::new(BumpListAlloc::new(page_size)?);
         Result::Ok(MptpServlet {
             handler_: handler,
+            root_,
             page_size_: page_size,
             _use_c_: PhantomData,
         })
@@ -108,13 +114,22 @@ where
         &self.handler_
     }
 
+    /// 本 servlet 使用的页大小。
+    pub const fn page_size(&self) -> PageSize {
+        self.page_size_
+    }
+
     /// 为一条入向子流创建新的 per-session arena 句柄。
+    ///
+    /// 内层 `BumpListAlloc` 由 Arc 拥有，Arc 控制块从本 servlet 的 root 分配；句柄带
+    /// `&self` 的生命周期，因此不会活过 servlet。
     ///
     /// # Panics
     ///
     /// 只会在构造 servlet 时已经验证过的页大小上失败，因此正常路径不会 panic。
-    pub fn new_session_alloc(&self) -> SessionAlloc {
-        SessionAlloc::new(self.page_size_).expect("servlet 构造时已经验证过该页大小受支持")
+    pub fn new_request_alloc<'a>(&'a self) -> RequestAlloc<'a> {
+        new_request_alloc(&self.root_, self.page_size_)
+            .expect("servlet 构造时已经验证过该页大小受支持")
     }
 
     /// 在 binding 上进入监听。
@@ -130,10 +145,13 @@ where
     }
 
     /// 接受一条入向子流：income → ring → accept → 读请求前缀。
-    pub fn accept_async<'f>(&'f self, listener: &'f mut Listener<C>) -> AcceptAsync<'f, 'f, C, H>
+    ///
+    /// `'a` 同时是 `&'a self` 与 `&'a mut listener` 的借用：返回的会话把请求前缀与头表
+    /// 分配在本 servlet 的 per-session arena 里，因此它的类型带 `'a`，不会活过 servlet。
+    pub fn accept_async<'a>(&'a self, listener: &'a mut Listener<C>) -> AcceptAsync<'a, 'a, C, H>
     where
-        C: 'f,
-        H: 'f,
+        C: 'a,
+        H: 'a,
         ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
@@ -141,13 +159,17 @@ where
     }
 
     /// 用单一 handler 处理一条 session。
-    pub fn serve_session_async<'f>(
+    ///
+    /// `'f` 是对 servlet 的借用，`'s` 是会话 arena；两者分开，因此调用者可以处理一条
+    /// 借用期比 `&self` 更短的会话。
+    pub fn serve_session_async<'f, 's>(
         &'f self,
-        session: ServingSession<C>,
-    ) -> ServeSessionAsync<'f, 'f, C, H>
+        session: ServingSession<'s, C>,
+    ) -> ServeSessionAsync<'f, 's, 'f, C, H>
     where
         C: 'f,
         H: 'f,
+        's: 'f,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
         ServeSessionAsync::new(self, session)
@@ -175,15 +197,14 @@ where
 /// [`MptpServlet::accept_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(Accept, pub, new(pub(crate)))]
-async fn servlet_accept_async_<'f, C, H, K>(
-    servlet: &'f MptpServlet<C, H>,
-    listener: &'f mut Listener<C>,
+async fn servlet_accept_async_<'a, C, H, K>(
+    servlet: &'a MptpServlet<C, H>,
+    listener: &'a mut Listener<C>,
     cancel: K,
-) -> Result<ServingSession<C>, ServeError>
+) -> Result<ServingSession<'a, C>, ServeError>
 where
-    C: TrConfig,
-    H: TrServeHandler<C>,
-    C: TrConfig + 'f,
+    C: TrConfig + 'a,
+    H: TrServeHandler<C> + 'a,
     ChannelHandle<C>: TrChannelHalf<MuxCfg<C>>,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
@@ -226,7 +247,7 @@ where
 
     // 每条子流有自己的 per-session arena：请求前缀、头表副本、location 与回复前缀都
     // 分配在这里，session 结束时整体释放。
-    let alloc = servlet.new_session_alloc();
+    let alloc = servlet.new_request_alloc();
     let prefix = read_request_prefix_with_async(&mut rx, &alloc)
         .may_cancel_with(cancel.child_token())
         .await
@@ -238,14 +259,15 @@ where
 /// [`MptpServlet::serve_session_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ServeSession, pub, new(pub(crate)))]
-async fn servlet_serve_session_async_<'f, C, H, K>(
+async fn servlet_serve_session_async_<'f, 's, C, H, K>(
     servlet: &'f MptpServlet<C, H>,
-    mut session: ServingSession<C>,
+    mut session: ServingSession<'s, C>,
     cancel: K,
 ) -> Result<ServeOutcome, ServeError>
 where
-    C: TrConfig + 'f,
+    C: TrConfig + 'f + 's,
     H: TrServeHandler<C> + 'f,
+    's: 'f,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {

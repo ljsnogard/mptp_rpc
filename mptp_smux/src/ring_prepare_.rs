@@ -37,18 +37,14 @@
 //! nor any existing factory. The factory declares which environment it accepts through the
 //! GAT `type Ctx<'a>`, and the environment type plus its construction stay in `mptp_smux`.
 
-use core::{
-    alloc::AllocatorClone,
-    marker::PhantomData,
-    mem::MaybeUninit,
-};
+use core::{alloc::AllocatorClone, marker::PhantomData, mem::MaybeUninit};
 
 use abs_cancel::TrMayCancel;
+use abs_mm::res_man::{TrAllocBy, TrUnique};
 use abs_smux::{
     chan::{RingBuffAlloc, TrPrepareRing},
     dock::TrDock,
 };
-use abs_mm::res_man::{TrAllocBy, TrUnique};
 
 use crate::x_deps::{abs_cancel, abs_mm, abs_smux};
 
@@ -214,8 +210,7 @@ pub trait TrPrepFactory {
     where
         Self: Sized;
 
-    type GetPreparedAsync<'f>: TrMayCancel<'f, MayCancelOutput =
-        Result<Self::Prep, Self::Err>>
+    type GetPreparedAsync<'f>: TrMayCancel<'f, MayCancelOutput = Result<Self::Prep, Self::Err>>
     where
         Self: 'f;
 
@@ -322,18 +317,23 @@ mod tests_ {
     //! ownership moves. "One fresh buffer per channel" is only checkable at this level, through
     //! a counter and pointer identity.
 
+    #[cfg(feature = "client")]
     use core::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(feature = "client")]
     use abs_buff::gen_may_cancel_future;
+    #[cfg(feature = "client")]
     use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
+    use abs_mm::CoreAlloc;
     use abs_smux::{conf::TrMuxConfig, dock::Dock};
+    use mm_ptr::Owned;
 
     use super::*;
+    #[cfg(feature = "client")]
     use crate::client::ClientPrepCtx;
+    #[cfg(all(feature = "server", not(feature = "client")))]
+    use crate::serving::ServingPrepCtx;
     use crate::x_deps::{abs_mm, abs_smux, mm_ptr};
-
-    use abs_mm::CoreAlloc;
-    use mm_ptr::Owned;
 
     /// 测试用的 mux 配置：只有 dock 与数据类型，没有任何连接行为。
     struct TestMuxCfg;
@@ -345,23 +345,28 @@ mod tests_ {
     }
 
     /// 测试用的准备失败错误。
+    #[cfg(feature = "client")]
     #[derive(Debug)]
     struct TestErr;
 
+    #[cfg(feature = "client")]
     impl core::fmt::Display for TestErr {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.write_str("测试用错误")
         }
     }
 
+    #[cfg(feature = "client")]
     impl core::error::Error for TestErr {}
 
     /// 测试工厂：容量由**环境**里的角色在构造时决定，并记录被生产了几次。
+    #[cfg(feature = "client")]
     struct RoleSizedFactory {
         cap_: usize,
         calls_: AtomicUsize,
     }
 
+    #[cfg(feature = "client")]
     impl TrPrepFactory for RoleSizedFactory {
         type Ctx<'a> = ClientPrepCtx<'a, TestMuxCfg>;
 
@@ -382,7 +387,8 @@ mod tests_ {
             }
         }
 
-        type GetPreparedAsync<'f> = PrepareRoleSizedAsync<'f, 'f>
+        type GetPreparedAsync<'f>
+            = PrepareRoleSizedAsync<'f, 'f>
         where
             Self: 'f;
 
@@ -395,6 +401,7 @@ mod tests_ {
     ///
     /// 生成的类型保持**私有**：它的 `MayCancelOutput` 里带着测试私有的错误类型，声明成
     /// `pub(crate)` 会撞上「私有类型出现在公开接口」。
+    #[cfg(feature = "client")]
     #[allow(clippy::needless_lifetimes)]
     #[gen_may_cancel_future(PrepareRoleSized, new(pub(crate)))]
     async fn prepare_role_sized_async_<'f, TyTok>(
@@ -423,6 +430,7 @@ mod tests_ {
     ///   accessors.
     /// - Verdict: both docks equal what was passed in and the role is always `Initiator`, so the
     ///   environment rewrites nothing.
+    #[cfg(feature = "client")]
     #[test]
     fn env_exposes_docks_and_role_() {
         let (local, remote) = (Dock::new(7u32), Dock::new(9u32));
@@ -444,6 +452,7 @@ mod tests_ {
     ///   capacity of the receive buffer it is about to hand over.
     /// - Verdict: 64 bytes, the initiator size chosen inside `with_ctx`; a factory that never saw
     ///   the environment would report the responder's 32 instead.
+    #[cfg(feature = "client")]
     #[tokio::test]
     async fn factory_sees_env_at_construction_() {
         let (local, remote) = (Dock::new(1u32), Dock::new(2u32));
@@ -471,6 +480,7 @@ mod tests_ {
     /// - Verdict: the counter is 2 and the two receive buffers have different pointers —
     ///   upstream `accept_async` takes ownership, so handing the same memory to two channels
     ///   would break.
+    #[cfg(feature = "client")]
     #[tokio::test]
     async fn factory_produces_new_buffs_per_call_() {
         let (local, remote) = (Dock::new(1u32), Dock::new(2u32));
@@ -490,6 +500,26 @@ mod tests_ {
 
         assert_eq!(factory.calls_.load(Ordering::SeqCst), 2usize);
         assert_ne!(first.rx_buff().as_ptr(), second.rx_buff().as_ptr());
+    }
+
+    /// 测试服务端环境把 dock 与响应方角色原样交出。
+    /// Test that the serving environment hands its docks and responder role over unchanged.
+    ///
+    /// - 手段：以 `(7, 9)` 两个 dock 构造服务端环境，再逐个读三个访问器。
+    /// - 判断：本端 / 远端 dock 与构造时逐项相等，角色恒为 `Responder`。
+    ///
+    /// - Means: build a serving environment from the docks `(7, 9)` and read its three
+    ///   accessors.
+    /// - Verdict: both docks equal what was passed in and the role is always `Responder`.
+    #[cfg(all(feature = "server", not(feature = "client")))]
+    #[test]
+    fn serving_env_exposes_docks_and_role_() {
+        let (local, remote) = (Dock::new(7u32), Dock::new(9u32));
+        let ctx = ServingPrepCtx::<TestMuxCfg>::new(&local, &remote);
+
+        assert_eq!(ctx.local_dock(), &Dock::new(7u32));
+        assert_eq!(ctx.remote_dock(), &Dock::new(9u32));
+        assert_eq!(ctx.role(), PeerRole::Responder);
     }
 
     /// 测试 `RingBuffs` 把两块内存原样交给上游契约。

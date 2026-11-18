@@ -30,7 +30,7 @@ use mptp_wire::{
 
 use super::config::{ChannelRx, ChannelTx, TrConfig};
 use crate::{
-    SessionAlloc,
+    RequestAlloc,
     body_::{BodyPlan, BodyRead, BodyState, SuffixRead},
     copy_::{CopyError, copy_all_async_, copy_sized_async_, drain_to_eof_async_},
     error_::{ProtocolError, ServeError, StateError},
@@ -46,32 +46,38 @@ pub type RequestBodyRead<'f, C> = BodyRead<'f, ChannelRx<C>>;
 pub type RequestSuffixRead<'f, C> = SuffixRead<'f, ChannelRx<C>>;
 
 /// [`ServingSession::take_parts`] 交出的四件套。
-pub type ServingParts<C> = (
+///
+/// 头表与位置字符串由会话 arena `'a` 分配，因此类型带 `'a`，不会活过会话。
+pub type ServingParts<'a, C> = (
     ChannelTx<C>,
     ChannelRx<C>,
-    Headers<SessionAlloc>,
-    String<SessionAlloc>,
+    Headers<RequestAlloc<'a>>,
+    String<RequestAlloc<'a>>,
 );
 
 /// 一条入向子流上的服务端会话。
-pub struct ServingSession<C>
+///
+/// `'a` 是**会话 arena**：本次请求的请求前缀、位置、头表副本与回复前缀都分配在它里面，
+/// 会话结束时整体释放。它由 [`MptpServlet`](super::MptpServlet) 的 root arena 派生，
+/// 因此不会活过 servlet。
+pub struct ServingSession<'a, C>
 where
     C: TrConfig,
 {
     /// 共享核心：两个半边、请求前缀、体边界与体进度。
-    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, SessionAlloc>,
+    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, RequestAlloc<'a>>,
 
     /// 本次请求的方法。
     method_: AccessMethod,
 
     /// 本次请求的位置。
-    location_: String<SessionAlloc>,
+    location_: String<RequestAlloc<'a>>,
 
     /// 请求头表的可变副本；handler 的修改不写回前缀。
-    headers_: Headers<SessionAlloc>,
+    headers_: Headers<RequestAlloc<'a>>,
 
     /// 已经写出的回复前缀。
-    resp_prefix_: Option<ResponsePrefix<SessionAlloc>>,
+    resp_prefix_: Option<ResponsePrefix<RequestAlloc<'a>>>,
 
     /// 服务端状态机。
     state_: ServingState,
@@ -79,20 +85,20 @@ where
     /// 是否已经写过回复前缀。
     responded_: bool,
 
-    /// 会话从 servlet 克隆来的分配器句柄。
-    alloc_: SessionAlloc,
+    /// 本会话自己的 arena 句柄；与核心里的前缀共享同一个 arena。
+    alloc_: RequestAlloc<'a>,
 }
 
-impl<C> ServingSession<C>
+impl<'a, C> ServingSession<'a, C>
 where
     C: TrConfig,
 {
     /// 由「已解码的请求前缀 + 两个半边」构造。
     pub(crate) fn new_(
-        prefix: RequestPrefix<SessionAlloc>,
+        prefix: RequestPrefix<RequestAlloc<'a>>,
         tx: ChannelTx<C>,
         rx: ChannelRx<C>,
-        alloc: SessionAlloc,
+        alloc: RequestAlloc<'a>,
     ) -> Result<Self, ServeError> {
         let plan = BodyPlan::from_info_(prefix.body_info()).map_err(ServeError::Protocol)?;
         let method_ = prefix.method();
@@ -124,22 +130,22 @@ where
     }
 
     /// 本会话持有的分配器句柄。
-    pub fn allocator(&self) -> &SessionAlloc {
+    pub fn allocator(&self) -> &RequestAlloc<'a> {
         &self.alloc_
     }
 
     /// 请求头表的可变副本。
-    pub fn headers(&self) -> &Headers<SessionAlloc> {
+    pub fn headers(&self) -> &Headers<RequestAlloc<'a>> {
         &self.headers_
     }
 
     /// 可变请求头表。
-    pub fn headers_mut(&mut self) -> &mut Headers<SessionAlloc> {
+    pub fn headers_mut(&mut self) -> &mut Headers<RequestAlloc<'a>> {
         &mut self.headers_
     }
 
     /// 已经写出的回复前缀。
-    pub fn sent_response_prefix(&self) -> Option<&ResponsePrefix<SessionAlloc>> {
+    pub fn sent_response_prefix(&self) -> Option<&ResponsePrefix<RequestAlloc<'a>>> {
         self.resp_prefix_.as_ref()
     }
 
@@ -149,33 +155,35 @@ where
     }
 
     /// 按请求前缀声明的体边界取读视图。
-    pub fn req_body_async<'f>(&'f mut self) -> RequestBodyAsync<'f, 'f, C>
+    pub fn req_body_async<'f>(&'f mut self) -> RequestBodyAsync<'f, 'a, 'f, C>
     where
         C: 'f,
+        'a: 'f,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
         RequestBodyAsync::new(self)
     }
 
     /// 丢弃未读完的请求体，然后把接收半边当裸后缀流交出去。
-    pub fn req_suffix_async<'f>(&'f mut self) -> RequestSuffixAsync<'f, 'f, C>
+    pub fn req_suffix_async<'f>(&'f mut self) -> RequestSuffixAsync<'f, 'a, 'f, C>
     where
         C: 'f,
+        'a: 'f,
         ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     {
         RequestSuffixAsync::new(self)
     }
 
     /// 构造回复 helper；终结时才写前缀。
-    pub fn response(&mut self, status: Status) -> ResponseBuilder<'_, C> {
+    pub fn response(&mut self, status: Status) -> ResponseBuilder<'_, 'a, C> {
         self.response_prefix(ResponsePrefix::new(status))
     }
 
     /// 用给定的回复前缀构造 helper。
     pub fn response_prefix(
         &mut self,
-        prefix: ResponsePrefix<SessionAlloc>,
-    ) -> ResponseBuilder<'_, C> {
+        prefix: ResponsePrefix<RequestAlloc<'a>>,
+    ) -> ResponseBuilder<'_, 'a, C> {
         ResponseBuilder {
             session_: self,
             prefix_: prefix,
@@ -185,12 +193,12 @@ where
     /// 收尾：丢弃剩余请求体 / 后缀、半关闭写端、读尽对端。
     ///
     /// 返回丢弃的请求字节数。若两个半边已经被 `take_parts` 取走，返回 `Ok(0)`。
-    pub fn finish_async(&mut self) -> FinishSessionAsync<'_, '_, C> {
+    pub fn finish_async(&mut self) -> FinishSessionAsync<'_, 'a, '_, C> {
         FinishSessionAsync::new(self)
     }
 
     /// 拿走两个半边与头表，自己驱动；之后框架不再兜底收尾。
-    pub fn take_parts(&mut self) -> Option<ServingParts<C>> {
+    pub fn take_parts(&mut self) -> Option<ServingParts<'a, C>> {
         let (tx, rx) = self.core_.take_channel_()?;
         let headers = core::mem::replace(&mut self.headers_, Headers::new_in(self.alloc_.clone()));
         let location = core::mem::replace(
@@ -233,12 +241,13 @@ fn resp_copy_error_(err: CopyError) -> ServeError {
 /// 请求体读视图的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(RequestBody, pub, new(pub(crate)))]
-async fn serving_req_body_async_<'f, C, K>(
-    session: &'f mut ServingSession<C>,
+async fn serving_req_body_async_<'f, 'a, C, K>(
+    session: &'f mut ServingSession<'a, C>,
     cancel: K,
 ) -> Result<RequestBodyRead<'f, C>, ServeError>
 where
     C: 'f + TrConfig,
+    'a: 'f,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -263,12 +272,13 @@ where
 /// 请求后缀流的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(RequestSuffix, pub, new(pub(crate)))]
-async fn serving_req_suffix_async_<'f, C, K>(
-    session: &'f mut ServingSession<C>,
+async fn serving_req_suffix_async_<'f, 'a, C, K>(
+    session: &'f mut ServingSession<'a, C>,
     cancel: K,
 ) -> Result<RequestSuffixRead<'f, C>, ServeError>
 where
     C: 'f + TrConfig,
+    'a: 'f,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -300,12 +310,13 @@ where
 
 /// 收尾的 step 函数。
 #[gen_may_cancel_future(FinishSession, pub, new(pub(crate)))]
-async fn finish_session_async_<'f, C, K>(
-    session: &'f mut ServingSession<C>,
+async fn finish_session_async_<'f, 'a, C, K>(
+    session: &'f mut ServingSession<'a, C>,
     cancel: K,
 ) -> Result<usize, ServeError>
 where
     C: TrConfig + 'f,
+    'a: 'f,
     ChannelRx<C>: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -346,26 +357,29 @@ where
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 
 /// 回复 helper：状态码 + 头 + 无体 / 定长体 / 分块体 / 后缀流。
-pub struct ResponseBuilder<'a, C>
+///
+/// `'b` 是对会话的借用，`'a` 是会话 arena；两者分开是因为 `&'b mut ServingSession<'a, C>`
+/// 对 `'a` 不变，不能把会话借用“缩短”成 arena 生命周期。
+pub struct ResponseBuilder<'b, 'a, C>
 where
     C: TrConfig,
 {
     /// 所属会话。
-    session_: &'a mut ServingSession<C>,
+    session_: &'b mut ServingSession<'a, C>,
 
     /// 待写出的回复前缀。
-    prefix_: ResponsePrefix<SessionAlloc>,
+    prefix_: ResponsePrefix<RequestAlloc<'a>>,
 }
 
-impl<'a, C> ResponseBuilder<'a, C>
+impl<'b, 'a, C> ResponseBuilder<'b, 'a, C>
 where
     C: TrConfig,
 {
     /// 追加 / 覆盖一个回复头。
     pub fn header(
         &mut self,
-        key: impl Into<HeaderKey<SessionAlloc>>,
-        val: HeaderVal<SessionAlloc>,
+        key: impl Into<HeaderKey<RequestAlloc<'a>>>,
+        val: HeaderVal<RequestAlloc<'a>>,
     ) -> &mut Self {
         self.prefix_
             .headers_mut(self.session_.allocator().clone())
@@ -376,7 +390,7 @@ where
     /// 追加 / 覆盖一个文本形态的回复头；值由本会话的 arena 分配。
     pub fn header_text(
         &mut self,
-        key: impl Into<HeaderKey<SessionAlloc>>,
+        key: impl Into<HeaderKey<RequestAlloc<'a>>>,
         text: impl AsRef<str>,
     ) -> &mut Self {
         let alloc = self.session_.allocator().clone();
@@ -399,35 +413,43 @@ where
     }
 
     /// 无回复体。
-    pub fn no_body_async(self) -> ResponseNoBodyAsync<'a, 'a, C>
+    pub fn no_body_async(self) -> ResponseNoBodyAsync<'b, 'a, 'b, C>
     where
-        C: 'a,
+        C: 'b,
+        'a: 'b,
     {
         ResponseNoBodyAsync::new(self)
     }
 
     /// 定长回复体：自动写 `Body_Size`。
-    pub fn sized_async<R>(self, body: &'a mut R, size: usize) -> ResponseSizedAsync<'a, 'a, C, R>
+    pub fn sized_async<R>(
+        self,
+        body: &'b mut R,
+        size: usize,
+    ) -> ResponseSizedAsync<'b, 'a, 'b, C, R>
     where
-        C: 'a,
+        C: 'b,
+        'a: 'b,
         R: TrBuffRead<u8> + TrConsumerState,
     {
         ResponseSizedAsync::new(self, body, size)
     }
 
     /// 分块回复体：自动写 `Body_Transfer: Chunked`。
-    pub fn chunked_async<R>(self, body: &'a mut R) -> ResponseChunkedAsync<'a, 'a, C, R>
+    pub fn chunked_async<R>(self, body: &'b mut R) -> ResponseChunkedAsync<'b, 'a, 'b, C, R>
     where
-        C: 'a,
+        C: 'b,
+        'a: 'b,
         R: TrBuffRead<u8> + TrConsumerState,
     {
         ResponseChunkedAsync::new(self, body)
     }
 
     /// 回复前缀之后的裸后缀流。
-    pub fn suffix_async<R>(self, suffix: &'a mut R) -> ResponseSuffixAsync<'a, 'a, C, R>
+    pub fn suffix_async<R>(self, suffix: &'b mut R) -> ResponseSuffixAsync<'b, 'a, 'b, C, R>
     where
-        C: 'a,
+        C: 'b,
+        'a: 'b,
         R: TrBuffRead<u8> + TrConsumerState,
     {
         ResponseSuffixAsync::new(self, suffix)
@@ -448,9 +470,10 @@ where
     ///   [`ProtocolError::ResponseBodyOnHeadOrDrop`]；
     /// - 前缀已声明了体：返回 [`ProtocolError::BodyDeclaredButNotWritten`]；
     /// - 写回复前缀失败：返回 [`ServeError::Protocol`]。
-    pub fn suffix_stream_async(self) -> ResponseSuffixStreamAsync<'a, 'a, C>
+    pub fn suffix_stream_async(self) -> ResponseSuffixStreamAsync<'b, 'a, 'b, C>
     where
-        C: 'a,
+        C: 'b,
+        'a: 'b,
     {
         ResponseSuffixStreamAsync::new(self)
     }
@@ -461,24 +484,25 @@ where
 /// [`ResponseBuilder::no_body_async`] / [`ResponseBuilder::sized_async`] /
 /// [`ResponseBuilder::chunked_async`] 返回本类型，因此 `Pull` / `Call` 可以先写回复体
 /// 再写回复后缀流。
-pub struct ResponseBodyWriter<'a, C>
+pub struct ResponseBodyWriter<'b, 'a, C>
 where
     C: TrConfig,
 {
     /// 所属会话。
-    session_: &'a mut ServingSession<C>,
+    session_: &'b mut ServingSession<'a, C>,
 }
 
-impl<'a, C> ResponseBodyWriter<'a, C>
+impl<'b, 'a, C> ResponseBodyWriter<'b, 'a, C>
 where
     C: TrConfig,
 {
     /// 在已经写出的回复体之后追加裸后缀流。
     ///
     /// `Head` / `Drop` 会被拒绝：这两个方法按协议没有后缀流。
-    pub fn suffix_async<R>(self, suffix: &'a mut R) -> ResponseWriterSuffixAsync<'a, 'a, C, R>
+    pub fn suffix_async<R>(self, suffix: &'b mut R) -> ResponseWriterSuffixAsync<'b, 'a, 'b, C, R>
     where
-        C: 'a,
+        C: 'b,
+        'a: 'b,
         R: TrBuffRead<u8> + TrConsumerState,
     {
         ResponseWriterSuffixAsync::new(self, suffix)
@@ -488,8 +512,8 @@ where
 /// [`ResponseBodyWriter::suffix_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ResponseWriterSuffix, pub, new(pub(crate)))]
-async fn response_writer_suffix_async_<'f, C, R, K>(
-    writer: ResponseBodyWriter<'f, C>,
+async fn response_writer_suffix_async_<'f, 'a, C, R, K>(
+    writer: ResponseBodyWriter<'f, 'a, C>,
     suffix: &'f mut R,
     cancel: K,
 ) -> Result<(), ServeError>
@@ -529,13 +553,14 @@ where
 }
 
 /// 写回复前缀，并标记为已回复。
-async fn write_response_prefix_inner_<C, K>(
-    session: &mut ServingSession<C>,
-    prefix: ResponsePrefix<SessionAlloc>,
+async fn write_response_prefix_inner_<'f, 'a, C, K>(
+    session: &'f mut ServingSession<'a, C>,
+    prefix: ResponsePrefix<RequestAlloc<'a>>,
     cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
+    'a: 'f,
     K: TrCancellationToken,
 {
     {
@@ -554,12 +579,13 @@ where
 /// 无回复体的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ResponseNoBody, pub, new(pub(crate)))]
-async fn response_no_body_async_<'f, C, K>(
-    builder: ResponseBuilder<'f, C>,
+async fn response_no_body_async_<'f, 'a, C, K>(
+    builder: ResponseBuilder<'f, 'a, C>,
     cancel: K,
-) -> Result<ResponseBodyWriter<'f, C>, ServeError>
+) -> Result<ResponseBodyWriter<'f, 'a, C>, ServeError>
 where
     C: TrConfig + 'f,
+    'a: 'f,
     K: TrCancellationToken,
 {
     let ResponseBuilder { session_, prefix_ } = builder;
@@ -575,14 +601,15 @@ where
 /// 定长回复体的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ResponseSized, pub, new(pub(crate)))]
-async fn response_sized_async_<'f, C, R, K>(
-    builder: ResponseBuilder<'f, C>,
+async fn response_sized_async_<'f, 'a, C, R, K>(
+    builder: ResponseBuilder<'f, 'a, C>,
     body: &'f mut R,
     size: usize,
     cancel: K,
-) -> Result<ResponseBodyWriter<'f, C>, ServeError>
+) -> Result<ResponseBodyWriter<'f, 'a, C>, ServeError>
 where
     C: TrConfig + 'f,
+    'a: 'f,
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -620,13 +647,14 @@ where
 /// 分块回复体的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ResponseChunked, pub, new(pub(crate)))]
-async fn response_chunked_async_<'f, C, R, K>(
-    builder: ResponseBuilder<'f, C>,
+async fn response_chunked_async_<'f, 'a, C, R, K>(
+    builder: ResponseBuilder<'f, 'a, C>,
     body: &'f mut R,
     cancel: K,
-) -> Result<ResponseBodyWriter<'f, C>, ServeError>
+) -> Result<ResponseBodyWriter<'f, 'a, C>, ServeError>
 where
     C: TrConfig + 'f,
+    'a: 'f,
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -667,13 +695,14 @@ where
 /// 回复后缀流的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ResponseSuffix, pub, new(pub(crate)))]
-async fn response_suffix_async_<'f, C, R, K>(
-    builder: ResponseBuilder<'f, C>,
+async fn response_suffix_async_<'f, 'a, C, R, K>(
+    builder: ResponseBuilder<'f, 'a, C>,
     suffix: &'f mut R,
     cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig,
+    'a: 'f,
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
 {
@@ -717,15 +746,15 @@ where
 /// [`finish_async`](Self::finish_async) 返回的 future 都实现
 /// [`TrMayCancel`]，调用方用 `.may_cancel_with(token)` 施加取消令牌。`finish_async`
 /// 复用标准收尾顺序：先半关闭写端，再读尽对端，最后把会话置为终止。
-pub struct SuffixStream<'a, C>
+pub struct SuffixStream<'b, 'a, C>
 where
     C: TrConfig,
 {
     /// 所属会话；句柄存活期间独占它。
-    session_: &'a mut ServingSession<C>,
+    session_: &'b mut ServingSession<'a, C>,
 }
 
-impl<'a, C> SuffixStream<'a, C>
+impl<'b, 'a, C> SuffixStream<'b, 'a, C>
 where
     C: TrConfig,
 {
@@ -742,9 +771,10 @@ where
     pub fn write_chunk_async<'f>(
         &'f mut self,
         chunk: &'f [u8],
-    ) -> SuffixWriteChunkAsync<'f, 'a, 'f, C>
+    ) -> SuffixWriteChunkAsync<'f, 'b, 'a, 'f, C>
     where
         C: 'a,
+        'b: 'f,
         'a: 'f,
     {
         SuffixWriteChunkAsync::new(self, chunk)
@@ -763,9 +793,10 @@ where
     pub fn write_chunks_async<'f, R>(
         &'f mut self,
         src: &'f mut R,
-    ) -> SuffixWriteChunksAsync<'f, 'a, 'f, C, R>
+    ) -> SuffixWriteChunksAsync<'f, 'b, 'a, 'f, C, R>
     where
         C: 'a,
+        'b: 'f,
         'a: 'f,
         R: TrBuffRead<u8> + TrConsumerState,
     {
@@ -780,7 +811,7 @@ where
     ///
     /// 收尾阶段的读错误**不**上报（它已经不影响写出的响应）；本方法目前只在底层
     /// 状态不成立（两个半边都已被取走）时返回 [`ServeError::State`]。
-    pub fn finish_async(self) -> SuffixFinishAsync<'a, 'a, C>
+    pub fn finish_async(self) -> SuffixFinishAsync<'b, 'a, 'b, C>
     where
         C: 'a,
     {
@@ -913,12 +944,13 @@ fn suffix_copy_error_(err: CopyError) -> ServeError {
 /// [`ResponseBuilder::suffix_stream_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ResponseSuffixStream, pub, new(pub(crate)))]
-async fn response_suffix_stream_async_<'f, C, K>(
-    builder: ResponseBuilder<'f, C>,
+async fn response_suffix_stream_async_<'f, 'a, C, K>(
+    builder: ResponseBuilder<'f, 'a, C>,
     cancel: K,
-) -> Result<SuffixStream<'f, C>, ServeError>
+) -> Result<SuffixStream<'f, 'a, C>, ServeError>
 where
     C: TrConfig + 'f,
+    'a: 'f,
     K: TrCancellationToken,
 {
     let ResponseBuilder { session_, prefix_ } = builder;
@@ -933,13 +965,14 @@ where
 /// [`SuffixStream::write_chunk_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SuffixWriteChunk, pub, new(pub(crate)))]
-async fn suffix_write_chunk_async_<'f, 'a, C, K>(
-    stream: &'f mut SuffixStream<'a, C>,
+async fn suffix_write_chunk_async_<'f, 'b, 'a, C, K>(
+    stream: &'f mut SuffixStream<'b, 'a, C>,
     chunk: &'f [u8],
     cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig + 'a,
+    'b: 'f,
     'a: 'f,
     K: TrCancellationToken,
 {
@@ -960,13 +993,14 @@ where
 /// [`SuffixStream::write_chunks_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SuffixWriteChunks, pub, new(pub(crate)))]
-async fn suffix_write_chunks_async_<'f, 'a, C, R, K>(
-    stream: &'f mut SuffixStream<'a, C>,
+async fn suffix_write_chunks_async_<'f, 'b, 'a, C, R, K>(
+    stream: &'f mut SuffixStream<'b, 'a, C>,
     src: &'f mut R,
     cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig + 'a,
+    'b: 'f,
     'a: 'f,
     R: TrBuffRead<u8> + TrConsumerState,
     K: TrCancellationToken,
@@ -983,12 +1017,13 @@ where
 /// [`SuffixStream::finish_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(SuffixFinish, pub, new(pub(crate)))]
-async fn suffix_finish_async_<'a, C, K>(
-    stream: SuffixStream<'a, C>,
+async fn suffix_finish_async_<'b, 'a, C, K>(
+    stream: SuffixStream<'b, 'a, C>,
     cancel: K,
 ) -> Result<(), ServeError>
 where
     C: TrConfig + 'a,
+    'a: 'b,
     K: TrCancellationToken,
 {
     let session_ = stream.session_;
