@@ -118,13 +118,15 @@ where
     /// 注意返回的是**响应**前缀（`RespPrefix`）：它与本端发出的请求前缀是两个独立的类型
     /// ——对端可能由另一份代码编译、独立升级。
     type RecvRespPrefixAsync<'f>: TrMayCancel<'f, MayCancelOutput =
-        Result<client_config::RespPrefix<'f, C>, Self::Err>>
+        Result<client_config::RespPrefix<'a, C>, Self::Err>>
     where
         Self: 'f,
         'a: 'f;
 
     /// 接收对端就本次请求给出的响应前缀（状态码 + 头）。
-    fn recv_resp_prefix_async<'f>(&'f mut self) -> Self::RecvRespPrefixAsync<'f>;
+    fn recv_resp_prefix_async<'f>(&'f mut self) -> Self::RecvRespPrefixAsync<'f>
+    where
+        'a: 'f;
 
     // -- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
     // recv_resp_body_async
