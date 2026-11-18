@@ -89,8 +89,7 @@ struct MockPrefix {
 }
 
 impl TrMsgPrefix for MockPrefix {
-    type Headers<'f>
-        = MockHeaders
+    type Headers<'f> = MockHeaders
     where
         Self: 'f;
 

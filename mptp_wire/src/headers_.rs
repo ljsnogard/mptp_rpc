@@ -821,7 +821,10 @@ impl<A: Allocator> Borrow<HeaderVal<A>> for HeaderEntry<A> {
 /// assert_eq!(headers.body_size(), Some(12usize));
 /// assert_eq!(headers.try_get(custom), Some(&HeaderVal::from_num(7)));
 /// ```
-pub struct Headers<A: AllocatorClone> {
+pub struct Headers<A>
+where
+    A: AllocatorClone,
+{
     map_: Arc<BTreeMap<HeaderKey<A>, HeaderVal<A>, A>, A>,
 }
 

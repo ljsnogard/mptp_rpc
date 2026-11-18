@@ -47,7 +47,10 @@ use super::headers_::Headers;
 /// assert_eq!(prefix.method(), AccessMethod::Call);
 /// assert_eq!(prefix.location(), "/api/v1/customer/goods");
 /// ```
-pub struct RequestPrefix<A: AllocatorClone> {
+pub struct RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 访问方法。
     pub(crate) method_: AccessMethod,
 
@@ -56,23 +59,25 @@ pub struct RequestPrefix<A: AllocatorClone> {
 
     /// 头表；没有头就是 `None`（线上写 `nil`，而不是空 map）。
     pub(crate) headers_: Option<Headers<A>>,
-
-    /// 现场创建头表 / 位置时使用的 allocator。
-    pub(crate) alloc_: A,
 }
 
-impl<A: AllocatorClone> Clone for RequestPrefix<A> {
+impl<A> Clone for RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
     fn clone(&self) -> Self {
         RequestPrefix {
             method_: self.method_,
             location_: self.location_.clone(),
             headers_: self.headers_.clone(),
-            alloc_: self.alloc_.clone(),
         }
     }
 }
 
-impl<A: AllocatorClone> fmt::Debug for RequestPrefix<A> {
+impl<A> fmt::Debug for RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RequestPrefix")
@@ -93,7 +98,10 @@ impl<A: AllocatorClone> PartialEq for RequestPrefix<A> {
 
 impl<A: AllocatorClone> Eq for RequestPrefix<A> {}
 
-impl<A: AllocatorClone> RequestPrefix<A> {
+impl<A> RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 由已分配好的四部分构造；供本 crate 的线格式解码使用。
     ///
     /// Build from already allocated parts; used by this crate's wire decoder.
@@ -101,32 +109,30 @@ impl<A: AllocatorClone> RequestPrefix<A> {
         method: AccessMethod,
         location: String<A>,
         headers: Option<Headers<A>>,
-        alloc: A,
     ) -> Self {
         RequestPrefix {
             method_: method,
             location_: location,
             headers_: headers,
-            alloc_: alloc,
         }
     }
 }
 
-impl<A: AllocatorClone> RequestPrefix<A> {
+impl<A> RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 由「方法 + 位置 + allocator」构造一条**没有头**的请求前缀。
     ///
     /// Build a header-less request prefix; the location is allocated by `alloc`.
-    pub fn new(
+    pub const fn new(
         method: AccessMethod,
-        location: &str,
-        alloc: A,
+        location: String<A>,
     ) -> Self {
-        let location_ = String::from_str_in(location, alloc.clone());
         RequestPrefix {
             method_: method,
-            location_,
+            location_: location,
             headers_: Option::None,
-            alloc_: alloc,
         }
     }
 
@@ -135,36 +141,21 @@ impl<A: AllocatorClone> RequestPrefix<A> {
     /// Build from four parts; `None` means the message carries no header map.
     pub fn with_headers(
         method: AccessMethod,
-        location: &str,
+        location: String<A>,
         headers: Option<Headers<A>>,
-        alloc: A,
     ) -> Self {
-        let location_ = String::from_str_in(location, alloc.clone());
         RequestPrefix {
             method_: method,
-            location_,
+            location_: location,
             headers_: headers,
-            alloc_: alloc,
         }
-    }
-
-    /// 取可变头表；没有头时用本前缀的 allocator 创建一张空表。
-    ///
-    /// Borrow the header map mutably, creating an empty one when absent.
-    pub fn headers_mut(&mut self) -> &mut Headers<A> {
-        let alloc = self.alloc_.clone();
-        self.headers_.get_or_insert_with(|| Headers::new_in(alloc))
-    }
-
-    /// 替换资源位置；新文本由本前缀的 allocator 分配。
-    ///
-    /// Replace the location; the new text is allocated by this prefix's allocator.
-    pub fn set_location(&mut self, location: &str) {
-        self.location_ = String::from_str_in(location, self.alloc_.clone());
     }
 }
 
-impl<A: AllocatorClone> RequestPrefix<A> {
+impl<A> RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 本请求使用的访问方法。
     pub const fn method(&self) -> AccessMethod {
         self.method_
@@ -180,11 +171,6 @@ impl<A: AllocatorClone> RequestPrefix<A> {
         self.headers_.as_ref()
     }
 
-    /// 本前缀的 allocator 句柄。
-    pub const fn allocator(&self) -> &A {
-        &self.alloc_
-    }
-
     /// 取可变头表；没有头时**不会**自动创建。
     pub fn headers_mut_if_present(&mut self) -> Option<&mut Headers<A>> {
         self.headers_.as_mut()
@@ -196,18 +182,21 @@ impl<A: AllocatorClone> RequestPrefix<A> {
     }
 }
 
-impl<A: AllocatorClone> TrMsgPrefix for RequestPrefix<A> {
-    type Headers<'f>
-        = Headers<A>
-    where
-        Self: 'f;
+impl<A> TrMsgPrefix for RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
+    type Headers<'f> = Headers<A> where Self: 'f;
 
     fn headers(&self) -> Option<&Self::Headers<'_>> {
         self.headers_.as_ref()
     }
 }
 
-impl<A: AllocatorClone> TrRequestPrefix for RequestPrefix<A> {
+impl<A> TrRequestPrefix for RequestPrefix<A>
+where
+    A: AllocatorClone,
+{
     fn method(&self) -> AccessMethod {
         self.method_
     }
@@ -235,28 +224,33 @@ impl<A: AllocatorClone> TrRequestPrefix for RequestPrefix<A> {
 ///
 /// assert_eq!(prefix.status(), Status::Ok);
 /// ```
-pub struct ResponsePrefix<A: AllocatorClone> {
+pub struct ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 状态码。
     pub(crate) status_: Status,
 
     /// 头表；没有头就是 `None`。
     pub(crate) headers_: Option<Headers<A>>,
-
-    /// 现场创建头表时使用的 allocator。
-    pub(crate) alloc_: A,
 }
 
-impl<A: AllocatorClone> Clone for ResponsePrefix<A> {
+impl<A> Clone for ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     fn clone(&self) -> Self {
         ResponsePrefix {
             status_: self.status_,
             headers_: self.headers_.clone(),
-            alloc_: self.alloc_.clone(),
         }
     }
 }
 
-impl<A: AllocatorClone> fmt::Debug for ResponsePrefix<A> {
+impl<A> fmt::Debug for ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ResponsePrefix")
@@ -266,60 +260,70 @@ impl<A: AllocatorClone> fmt::Debug for ResponsePrefix<A> {
     }
 }
 
-impl<A: AllocatorClone> PartialEq for ResponsePrefix<A> {
+impl<A> PartialEq for ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     fn eq(&self, other: &Self) -> bool {
         self.status_ == other.status_ && self.headers_ == other.headers_
     }
 }
 
-impl<A: AllocatorClone> Eq for ResponsePrefix<A> {}
+impl<A> Eq for ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{}
 
-impl<A: AllocatorClone> ResponsePrefix<A> {
+impl<A> ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 由已分配好的三部分构造；供本 crate 的线格式解码使用。
     ///
     /// Build from already allocated parts; used by this crate's wire decoder.
-    pub(crate) const fn from_parts_(status: Status, headers: Option<Headers<A>>, alloc: A) -> Self {
+    pub(crate) const fn from_parts_(
+        status: Status,
+        headers: Option<Headers<A>>,
+    ) -> Self {
         ResponsePrefix {
             status_: status,
             headers_: headers,
-            alloc_: alloc,
         }
     }
 }
 
-impl<A: AllocatorClone> ResponsePrefix<A> {
+impl<A> ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 由「状态码 + allocator」构造一条**没有头**的回复前缀。
     ///
     /// Build a header-less response prefix; `alloc` is used for a later header map.
-    pub fn new(status: Status, alloc: A) -> Self {
+    pub const fn new(status: Status) -> Self {
         ResponsePrefix {
             status_: status,
             headers_: Option::None,
-            alloc_: alloc,
         }
     }
 
     /// 由三部分构造；`headers` 为 `None` 表示这条报文没有头表。
     ///
     /// Build from three parts; `None` means the message carries no header map.
-    pub fn with_headers(status: Status, headers: Option<Headers<A>>, alloc: A) -> Self {
+    pub const fn with_headers(
+        status: Status,
+        headers: Option<Headers<A>>,
+    ) -> Self {
         ResponsePrefix {
             status_: status,
             headers_: headers,
-            alloc_: alloc,
         }
-    }
-
-    /// 取可变头表；没有头时用本前缀的 allocator 创建一张空表。
-    ///
-    /// Borrow the header map mutably, creating an empty one when absent.
-    pub fn headers_mut(&mut self) -> &mut Headers<A> {
-        let alloc = self.alloc_.clone();
-        self.headers_.get_or_insert_with(|| Headers::new_in(alloc))
     }
 }
 
-impl<A: AllocatorClone> ResponsePrefix<A> {
+impl<A> ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     /// 本次回复的状态码。
     pub const fn status(&self) -> Status {
         self.status_
@@ -328,11 +332,6 @@ impl<A: AllocatorClone> ResponsePrefix<A> {
     /// 取头表；没有头时返回 `None`。
     pub const fn headers(&self) -> Option<&Headers<A>> {
         self.headers_.as_ref()
-    }
-
-    /// 本前缀的 allocator 句柄。
-    pub const fn allocator(&self) -> &A {
-        &self.alloc_
     }
 
     /// 取可变头表；没有头时**不会**自动创建。
@@ -351,85 +350,22 @@ impl<A: AllocatorClone> ResponsePrefix<A> {
     }
 }
 
-impl<A: AllocatorClone> TrMsgPrefix for ResponsePrefix<A> {
-    type Headers<'f>
-        = Headers<A>
-    where
-        Self: 'f;
+impl<A> TrMsgPrefix for ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
+    type Headers<'f> = Headers<A> where Self: 'f;
 
     fn headers(&self) -> Option<&Self::Headers<'_>> {
         self.headers_.as_ref()
     }
 }
 
-impl<A: AllocatorClone> TrResponsePrefix for ResponsePrefix<A> {
+impl<A> TrResponsePrefix for ResponsePrefix<A>
+where
+    A: AllocatorClone,
+{
     fn status(&self) -> Status {
         self.status_
-    }
-}
-
-#[cfg(test)]
-mod tests_ {
-    //! 前缀的纯本地判定：体边界由两个标准头唯一决定。
-    //!
-    //! Local tests for the prefix types: the body boundary is decided uniquely by the two
-    //! standard headers.
-
-    use alloc::alloc::Global;
-
-    use abs_mptp::{
-        messaging::BodySize,
-        spec::{NumOrStr, StdHeaderKey, StdHeaderVal},
-    };
-
-    use super::*;
-
-    /// 测试请求前缀的体边界把三种声明各归各位。
-    /// Test that the request prefix maps each body declaration to its own boundary.
-    ///
-    /// - 手段：分别构造没有体声明的请求、`Body_Size: 12` 的请求与
-    ///   `Body_Transfer: Chunked` 的请求。
-    /// - 判断：`body_info` 依次为 `NilBody` / `FixedLength(Num(12))` / `ChunkedData`。
-    ///
-    /// - Means: build a request with no declaration, one with `Body_Size: 12` and one with
-    ///   `Body_Transfer: Chunked`.
-    /// - Verdict: `body_info` yields `NilBody`, `FixedLength(Num(12))` and `ChunkedData`.
-    #[test]
-    fn request_body_info_maps_declarations_() {
-        let plain = RequestPrefix::new(AccessMethod::View, "/rpc/echo", Global);
-        assert_eq!(plain.body_info(), BodySize::NilBody);
-
-        let mut sized = plain.clone();
-        sized.headers_mut().set_num(StdHeaderKey::Body_Size, 12);
-        assert_eq!(
-            sized.body_info(),
-            BodySize::FixedLength(NumOrStr::Num(12usize))
-        );
-
-        let mut chunked = plain;
-        chunked.headers_mut().set_num(
-            StdHeaderKey::Body_Transfer,
-            StdHeaderVal::Body_Transfer_Chunked.into_inner(),
-        );
-        assert_eq!(chunked.body_info(), BodySize::ChunkedData);
-    }
-
-    /// 测试回复前缀的体边界与请求前缀走同一套默认判定。
-    /// Test that response prefixes use the same default body-boundary decision.
-    ///
-    /// - 手段：构造 `Body_Size: 8` 的回复前缀。
-    /// - 判断：`body_info` 为 `FixedLength(Num(8))`。
-    ///
-    /// - Means: build a response prefix carrying `Body_Size: 8`.
-    /// - Verdict: `body_info` is `FixedLength(Num(8))`.
-    #[test]
-    fn response_body_info_uses_default_() {
-        let mut prefix = ResponsePrefix::new(Status::Ok, Global);
-        prefix.headers_mut().set_num(StdHeaderKey::Body_Size, 8);
-
-        assert_eq!(
-            prefix.body_info(),
-            BodySize::FixedLength(NumOrStr::Num(8usize))
-        );
     }
 }

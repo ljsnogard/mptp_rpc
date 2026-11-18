@@ -252,8 +252,7 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffWrite<u8>,
 {
-    type SegmMut<'f>
-        = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
+    type SegmMut<'f> = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
     where
         Self: 'f;
 
@@ -272,12 +271,14 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffWrite<u8>,
 {
-    type WriteAsync<'f>
-        = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
+    type WriteAsync<'f> = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
     where
         Self: 'f;
 
-    fn write_async<'f>(&'f mut self, demand: &'f Demand<usize>) -> Self::WriteAsync<'f> {
+    fn write_async<'f>(
+        &'f mut self,
+        demand: &'f Demand<usize>,
+    ) -> Self::WriteAsync<'f> {
         <ChannelTx<C> as TrBuffWrite<u8>>::write_async(self.tx_, demand)
     }
 }
@@ -301,13 +302,11 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffFlush<u8>,
 {
-    type FlushAsync<'f>
-        = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
+    type FlushAsync<'f> = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
     where
         Self: 'f;
 
-    type CloseAsync<'f>
-        = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
+    type CloseAsync<'f> = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
     where
         Self: 'f;
 

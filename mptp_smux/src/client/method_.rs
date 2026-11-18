@@ -23,6 +23,7 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     spec::StdHeaderKey,
 };
+use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix, limited::LimitedReader};
 
@@ -248,6 +249,8 @@ where
 {
     /// 发起请求的客户端。
     client_: &'a MptpClient<C>,
+
+    bump_: BumpListAlloc,
 
     /// 请求前缀；它的 allocator 是本次请求自己的 arena。
     prefix_: RequestPrefix<SessionAlloc>,

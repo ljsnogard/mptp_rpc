@@ -76,12 +76,6 @@ where
 {
     /// 共享连接。
     conn_: SharedConn<C>,
-
-    /// 客户端作用域的 arena 句柄。
-    alloc_: SessionAlloc,
-
-    /// 新建 per-request arena 时使用的页大小。
-    page_size_: PageSize,
 }
 
 impl<C> MptpClient<C>
@@ -103,85 +97,45 @@ where
         Self::new_with_page_size(conn, PageSize::P2K).expect("PageSize::P2K 应当在当前平台受支持")
     }
 
-    /// 由共享连接与页大小构造客户端。
-    ///
-    /// # Errors
-    ///
-    /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
-    pub fn new_with_page_size(
-        conn: SharedConn<C>,
-        page_size: PageSize,
-    ) -> Result<Self, BumpListAllocError> {
-        let alloc_ = SessionAlloc::new(page_size)?;
-        Result::Ok(MptpClient {
-            conn_: conn,
-            alloc_,
-            page_size_: page_size,
-        })
-    }
-
-    /// 本客户端持有的客户端作用域 arena 句柄。
-    pub const fn allocator(&self) -> &SessionAlloc {
-        &self.alloc_
-    }
-
-    /// 本客户端使用的页大小。
-    pub const fn page_size(&self) -> PageSize {
-        self.page_size_
-    }
-
-    /// 为一次请求创建新的 per-request arena 句柄。
-    ///
-    /// 返回的句柄交给请求前缀；`MptpSession` 从前缀里接管同一个 arena，因此请求结束、
-    /// 会话 drop 时它的全部堆内存一起释放。
-    ///
-    /// # Panics
-    ///
-    /// 只会在构造客户端时已经验证过的页大小上失败，因此正常路径不会 panic。
-    pub fn new_session_alloc(&self) -> SessionAlloc {
-        SessionAlloc::new(self.page_size_).expect("客户端构造时已经验证过该页大小受支持")
-    }
-
     /// 统一入口：显式方法 + 位置。
     pub fn request(
         &self,
         method: AccessMethod,
-        location: impl Into<alloc::string::String>,
+        location: &str,
     ) -> RequestBuilder<'_, C> {
-        let location = location.into();
         RequestBuilder::new_(
             self,
-            messaging::RequestPrefix::new(method, &location, self.new_session_alloc()),
+            messaging::RequestPrefix::new(method, location, self.new_session_alloc()),
         )
     }
 
     /// `Head`：查看资源元信息；回复不应有体。
-    pub fn head(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+    pub fn head(&self, location: &str) -> RequestBuilder<'_, C> {
         self.request(AccessMethod::Head, location)
     }
 
     /// `View`：查看资源内容；请求通常无体，回复通常有体。
-    pub fn view(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+    pub fn view(&self, location: &str) -> RequestBuilder<'_, C> {
         self.request(AccessMethod::View, location)
     }
 
     /// `Post`：上传资源；请求通常有体。
-    pub fn post(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+    pub fn post(&self, location: &str) -> RequestBuilder<'_, C> {
         self.request(AccessMethod::Post, location)
     }
 
     /// `Drop`：删除资源；请求与回复都不应有体。
-    pub fn drop(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+    pub fn drop(&self, location: &str) -> RequestBuilder<'_, C> {
         self.request(AccessMethod::Drop, location)
     }
 
     /// `Push`：向资源端推送流式数据；请求后缀流必需。
-    pub fn push(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+    pub fn push(&self, location: &str) -> RequestBuilder<'_, C> {
         self.request(AccessMethod::Push, location)
     }
 
     /// `Pull`：从资源端拉取流式数据；回复后缀流由服务端写。
-    pub fn pull(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+    pub fn pull(&self, location: &str) -> RequestBuilder<'_, C> {
         self.request(AccessMethod::Pull, location)
     }
 
@@ -189,7 +143,7 @@ where
     ///
     /// 名字取 `invoke` 而不是 `call`，避免与 RPC 层 `TrRpcClientExt::call::<I>()` 的
     /// 固有方法同名——固有方法会遮蔽扩展 trait 方法，改名是唯一不破坏后者的办法。
-    pub fn invoke(&self, location: impl Into<alloc::string::String>) -> RequestBuilder<'_, C> {
+    pub fn invoke(&self, location: &str) -> RequestBuilder<'_, C> {
         self.request(AccessMethod::Call, location)
     }
 
@@ -229,8 +183,7 @@ where
     where
         C: 'f,
         B: 'static
-            + Send
-            + Sync
+            + Send + Sync
             + TrUnique<Item = [MaybeUninit<u8>]>
             + TrAllocBy<Alloc: AllocatorClone>,
         P: 'static + TrPrepareRing<B, u8>,
@@ -246,8 +199,7 @@ where
     type Config = C;
     type Session = MptpSession<C>;
     type ReqErr = ClientError;
-    type RequestAsync<'f>
-        = SendClientRequestAsync<'f, 'f, C>
+    type RequestAsync<'f> = SendClientRequestAsync<'f, 'f, C>
     where
         Self: 'f;
 

@@ -30,7 +30,6 @@
 //! `status → headers`, each as a **separate** MessagePack value. The `_in_` variants decode
 //! into a caller-supplied arena; the plain variants decode into `Global`.
 
-use alloc::alloc::Global;
 use core::alloc::{Allocator, AllocatorClone};
 
 use abs_buff::{TrBuffRead, TrBuffWrite};
@@ -81,6 +80,7 @@ const fn method_from_u8_(code: u8) -> Option<AccessMethod> {
 ///
 /// 编码失败、写子流失败，或等待期间被取消时返回 [`MessagingError::Encode`]。
 pub fn write_request_prefix_async<'f, A, W>(
+    alloc: &'f A,
     prefix: &'f RequestPrefix<A>,
     tx: &'f mut W,
 ) -> WriteRequestPrefixAsync<'f, 'f, A, W>
@@ -88,21 +88,22 @@ where
     A: AllocatorClone,
     W: 'f + TrBuffWrite<u8>,
 {
-    WriteRequestPrefixAsync::new(prefix, tx)
+    WriteRequestPrefixAsync::new(alloc, prefix, tx)
 }
 
 /// [`write_request_prefix_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(WriteRequestPrefix, pub, new(pub(crate)))]
-async fn write_request_prefix_async_<'f, A, W, TyTok>(
+async fn write_request_prefix_async_<'f, A, W, K>(
+    alloc: &'f A,
     prefix: &'f RequestPrefix<A>,
     tx: &'f mut W,
-    cancel: TyTok,
+    cancel: K,
 ) -> Result<(), MessagingError>
 where
     A: AllocatorClone,
     W: TrBuffWrite<u8>,
-    TyTok: TrCancellationToken,
+    K: TrCancellationToken,
 {
     // 三个值**依次编进同一个写口**：线上格式就是「三个连续的 MessagePack 值」。
     (prefix.method_ as u8)
@@ -125,98 +126,36 @@ where
     Result::Ok(())
 }
 
-/// 从接收半边解出一个请求前缀，allocator 为 [`Global`]。
-///
-/// 只读前缀所需的字节：报文体的第一个字节仍在环里。未知方法位报
-/// [`MessagingError::UnknownMethod`]，不猜一个近似值。
-///
-/// # Errors
-///
-/// 报文不是合法编码、方法位不可识别、对端提前关闭，或读子流失败时返回错误。
-pub fn read_request_prefix_async<'f, R>(rx: &'f mut R) -> ReadRequestPrefixAsync<'f, 'f, R>
-where
-    R: 'f + TrBuffRead<u8>,
-{
-    ReadRequestPrefixAsync::new(rx)
-}
-
-/// [`read_request_prefix_async`] 的 step 函数。
-#[allow(clippy::needless_lifetimes)]
-#[gen_may_cancel_future(ReadRequestPrefix, pub, new(pub(crate)))]
-async fn read_request_prefix_async_<'f, R, TyTok>(
-    rx: &'f mut R,
-    cancel: TyTok,
-) -> Result<RequestPrefix<Global>, MessagingError>
-where
-    R: TrBuffRead<u8>,
-    TyTok: TrCancellationToken,
-{
-    let code = u8::decode_async(MpDecoder::new(&mut *rx))
-        .may_cancel_with(cancel.child_token())
-        .await
-        .map_err(MessagingError::Decode)?;
-    let method_ = method_from_u8_(code).ok_or(MessagingError::UnknownMethod { code })?;
-    let location_ = AllocString::<Global>::decode_async(MpDecoder::new(&mut *rx))
-        .may_cancel_with(cancel.child_token())
-        .await
-        .map_err(MessagingError::Decode)?;
-    let headers_ = Option::<Headers<Global>>::decode_async(MpDecoder::new(&mut *rx))
-        .may_cancel_with(cancel)
-        .await
-        .map_err(MessagingError::Decode)?;
-    Result::Ok(RequestPrefix::from_parts_(
-        method_, location_, headers_, Global,
-    ))
-}
-
-/// 从接收半边解出一个请求前缀，所有堆内存都由 `arena` 分配。
-///
-/// 返回的前缀 allocator 是 `&'alloc Alloc`，因此它不能活过 `arena`。
-///
-/// # Errors
-///
-/// 同 [`read_request_prefix_async`]。
-pub fn read_request_prefix_in_async<'f, 'alloc, R, Alloc>(
-    rx: &'f mut R,
-    arena: &'alloc Alloc,
-) -> ReadRequestPrefixInAsync<'f, 'alloc, 'f, R, Alloc>
-where
-    R: 'f + TrBuffRead<u8>,
-    Alloc: TrArena<'alloc> + Allocator + 'alloc,
-    'alloc: 'f,
-{
-    ReadRequestPrefixInAsync::new(rx, arena)
-}
 
 /// [`read_request_prefix_in_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ReadRequestPrefixIn, pub, new(pub(crate)))]
-async fn read_request_prefix_in_async_<'f, 'alloc, R, Alloc, TyTok>(
+async fn read_request_prefix_in_async_<'f, 'alloc, R, A, K>(
     rx: &'f mut R,
-    arena: &'alloc Alloc,
-    cancel: TyTok,
-) -> Result<RequestPrefix<&'alloc Alloc>, MessagingError>
+    arena: &'alloc A,
+    cancel: K,
+) -> Result<RequestPrefix<&'alloc A>, MessagingError>
 where
     R: TrBuffRead<u8>,
-    Alloc: TrArena<'alloc> + Allocator + 'alloc,
-    TyTok: TrCancellationToken,
+    A: TrArena<'alloc> + Allocator + 'alloc,
+    K: TrCancellationToken,
 {
     let code = u8::decode_async(MpDecoder::new_in(&mut *rx, arena))
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(MessagingError::Decode)?;
     let method_ = method_from_u8_(code).ok_or(MessagingError::UnknownMethod { code })?;
-    let location_ = AllocString::<&'alloc Alloc>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+    let location_ = AllocString::<&'alloc A>::decode_async(MpDecoder::new_in(&mut *rx, arena))
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(MessagingError::Decode)?;
     let headers_ =
-        Option::<Headers<&'alloc Alloc>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+        Option::<Headers<&'alloc A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
             .may_cancel_with(cancel)
             .await
             .map_err(MessagingError::Decode)?;
     Result::Ok(RequestPrefix::from_parts_(
-        method_, location_, headers_, arena,
+        method_, location_, headers_,
     ))
 }
 
@@ -272,7 +211,6 @@ where
         method_,
         location_,
         headers_,
-        arena.clone(),
     ))
 }
 
@@ -299,15 +237,15 @@ where
 /// [`write_response_prefix_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(WriteResponsePrefix, pub, new(pub(crate)))]
-async fn write_response_prefix_async_<'f, A, W, TyTok>(
+async fn write_response_prefix_async_<'f, A, W, K>(
     prefix: &'f ResponsePrefix<A>,
     tx: &'f mut W,
-    cancel: TyTok,
+    cancel: K,
 ) -> Result<(), MessagingError>
 where
     A: AllocatorClone,
     W: TrBuffWrite<u8>,
-    TyTok: TrCancellationToken,
+    K: TrCancellationToken,
 {
     prefix
         .status_
@@ -325,82 +263,30 @@ where
     Result::Ok(())
 }
 
-/// 从接收半边解出一个回复前缀，allocator 为 [`Global`]。
-///
-/// # Errors
-///
-/// 报文不是合法编码、对端提前关闭，或读子流失败时返回错误。
-pub fn read_response_prefix_async<'f, R>(rx: &'f mut R) -> ReadResponsePrefixAsync<'f, 'f, R>
-where
-    R: 'f + TrBuffRead<u8>,
-{
-    ReadResponsePrefixAsync::new(rx)
-}
-
-/// [`read_response_prefix_async`] 的 step 函数。
-#[allow(clippy::needless_lifetimes)]
-#[gen_may_cancel_future(ReadResponsePrefix, pub, new(pub(crate)))]
-async fn read_response_prefix_async_<'f, R, TyTok>(
-    rx: &'f mut R,
-    cancel: TyTok,
-) -> Result<ResponsePrefix<Global>, MessagingError>
-where
-    R: TrBuffRead<u8>,
-    TyTok: TrCancellationToken,
-{
-    let code = u16::decode_async(MpDecoder::new(&mut *rx))
-        .may_cancel_with(cancel.child_token())
-        .await
-        .map_err(MessagingError::Decode)?;
-    let status_ = Status::new(code);
-    let headers_ = Option::<Headers<Global>>::decode_async(MpDecoder::new(&mut *rx))
-        .may_cancel_with(cancel)
-        .await
-        .map_err(MessagingError::Decode)?;
-    Result::Ok(ResponsePrefix::from_parts_(status_, headers_, Global))
-}
-
-/// 从接收半边解出一个回复前缀，所有堆内存都由 `arena` 分配。
-///
-/// # Errors
-///
-/// 同 [`read_response_prefix_async`]。
-pub fn read_response_prefix_in_async<'f, 'alloc, R, Alloc>(
-    rx: &'f mut R,
-    arena: &'alloc Alloc,
-) -> ReadResponsePrefixInAsync<'f, 'alloc, 'f, R, Alloc>
-where
-    R: 'f + TrBuffRead<u8>,
-    Alloc: TrArena<'alloc> + Allocator + 'alloc,
-    'alloc: 'f,
-{
-    ReadResponsePrefixInAsync::new(rx, arena)
-}
-
 /// [`read_response_prefix_in_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ReadResponsePrefixIn, pub, new(pub(crate)))]
-async fn read_response_prefix_in_async_<'f, 'alloc, R, Alloc, TyTok>(
+async fn read_response_prefix_in_async_<'f, 'alloc, R, A, K>(
     rx: &'f mut R,
-    arena: &'alloc Alloc,
-    cancel: TyTok,
-) -> Result<ResponsePrefix<&'alloc Alloc>, MessagingError>
+    arena: &'alloc A,
+    cancel: K,
+) -> Result<ResponsePrefix<&'alloc A>, MessagingError>
 where
     R: TrBuffRead<u8>,
-    Alloc: TrArena<'alloc> + Allocator + 'alloc,
-    TyTok: TrCancellationToken,
+    A: TrArena<'alloc> + Allocator + 'alloc,
+    K: TrCancellationToken,
 {
     let code = u16::decode_async(MpDecoder::new_in(&mut *rx, arena))
         .may_cancel_with(cancel.child_token())
         .await
         .map_err(MessagingError::Decode)?;
-    let status_ = Status::new(code);
-    let headers_ =
-        Option::<Headers<&'alloc Alloc>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
+    let status = Status::new(code);
+    let headers =
+        Option::<Headers<&'alloc A>>::decode_async(MpDecoder::new_in(&mut *rx, arena))
             .may_cancel_with(cancel)
             .await
             .map_err(MessagingError::Decode)?;
-    Result::Ok(ResponsePrefix::from_parts_(status_, headers_, arena))
+    Result::Ok(ResponsePrefix::from_parts_(status, headers))
 }
 
 /// 从接收半边解出一个回复前缀，所有堆内存都由 `arena` 分配，但返回**拥有** allocator
@@ -423,16 +309,16 @@ where
 /// [`read_response_prefix_with_async`] 的 step 函数。
 #[allow(clippy::needless_lifetimes)]
 #[gen_may_cancel_future(ReadResponsePrefixWith, pub, new(pub(crate)))]
-async fn read_response_prefix_with_async_<'f, 'alloc, R, A, TyTok>(
+async fn read_response_prefix_with_async_<'f, 'alloc, R, A, K>(
     rx: &'f mut R,
     arena: &'alloc A,
-    cancel: TyTok,
+    cancel: K,
 ) -> Result<ResponsePrefix<A>, MessagingError>
 where
     R: TrBuffRead<u8>,
     A: TrArena<'alloc> + AllocatorClone + TrAllocSource<'alloc, A> + 'alloc + 'f,
     'alloc: 'f,
-    TyTok: TrCancellationToken,
+    K: TrCancellationToken,
 {
     let code = u16::decode_async(MpDecoder::new_in(&mut *rx, arena))
         .may_cancel_with(cancel.child_token())
@@ -446,7 +332,6 @@ where
     Result::Ok(ResponsePrefix::from_parts_(
         status_,
         headers_,
-        arena.clone(),
     ))
 }
 
