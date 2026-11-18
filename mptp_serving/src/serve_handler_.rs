@@ -104,9 +104,8 @@ where
             settle_reply_(&mut ctx, result, router.error_hook_()).await
         }
         MatchOutcome::MethodNotAllowed { allowed } => {
-            let mut prefix =
-                ResponsePrefix::new(Status::MethodNotAllowed, session.allocator().clone());
-            prefix.headers_mut().set(
+            let mut prefix = ResponsePrefix::new(Status::MethodNotAllowed);
+            prefix.headers_mut(session.allocator().clone()).set(
                 HeaderKey::from_num(K_TMP_ALLOW_HEADER_KEY),
                 HeaderVal::from_text(allowed.to_allow_value(), session.allocator().clone()),
             );

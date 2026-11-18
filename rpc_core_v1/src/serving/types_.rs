@@ -62,9 +62,5 @@ where
     let alloc = session.allocator().clone();
     let mut headers = Headers::<SessionAlloc>::new_in(alloc.clone());
     apply_response_type_headers(&mut headers, method, info);
-    session.response_prefix(ResponsePrefix::with_headers(
-        status,
-        Option::Some(headers),
-        alloc,
-    ))
+    session.response_prefix(ResponsePrefix::with_headers(status, Option::Some(headers)))
 }

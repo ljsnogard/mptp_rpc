@@ -82,7 +82,7 @@ where
     apply_request_type_headers(&mut headers, AccessMethod::Pull, &info);
     write_accept(&mut headers, accept);
     let prefix =
-        RequestPrefix::with_headers(AccessMethod::Pull, path, Option::Some(headers), alloc);
+        RequestPrefix::with_headers_in(AccessMethod::Pull, path, Option::Some(headers), alloc);
     let mut response = client
         .request_prefix(prefix)
         .send_async()
@@ -165,7 +165,7 @@ where
     let mut headers = Headers::new_in(alloc.clone());
     apply_request_type_headers(&mut headers, AccessMethod::Push, &info);
     let prefix =
-        RequestPrefix::with_headers(AccessMethod::Push, path, Option::Some(headers), alloc);
+        RequestPrefix::with_headers_in(AccessMethod::Push, path, Option::Some(headers), alloc);
 
     let session = client
         .request_async(prefix)

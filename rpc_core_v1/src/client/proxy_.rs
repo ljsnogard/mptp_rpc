@@ -214,7 +214,7 @@ where
         StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
     );
     let prefix =
-        RequestPrefix::with_headers(AccessMethod::Call, &location, Option::Some(headers), alloc);
+        RequestPrefix::with_headers_in(AccessMethod::Call, &location, Option::Some(headers), alloc);
 
     let mut session = client
         .request_async(prefix)
@@ -313,7 +313,7 @@ where
         StdHeaderKey::Body_Type,
         StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
     );
-    let prefix = RequestPrefix::with_headers(method, &location, Option::Some(headers), alloc);
+    let prefix = RequestPrefix::with_headers_in(method, &location, Option::Some(headers), alloc);
     let mut session = client
         .request_async(prefix)
         .may_cancel_with(cancel.child_token())
@@ -466,7 +466,7 @@ where
         write_accept(&mut headers, accept);
     }
     let prefix =
-        RequestPrefix::with_headers(method, &location, Option::Some(headers), alloc.clone());
+        RequestPrefix::with_headers_in(method, &location, Option::Some(headers), alloc.clone());
     let mut session = client
         .request_async(prefix)
         .may_cancel_with(cancel.child_token())
@@ -601,7 +601,7 @@ where
         StdHeaderKey::Body_Type,
         StdHeaderVal::Mime_Body_Type_MsgPack.into_inner(),
     );
-    let prefix = RequestPrefix::with_headers(method, &location, Option::Some(headers), alloc);
+    let prefix = RequestPrefix::with_headers_in(method, &location, Option::Some(headers), alloc);
     let mut session = client
         .request_async(prefix)
         .may_cancel_with(cancel.child_token())
