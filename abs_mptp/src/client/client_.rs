@@ -16,9 +16,7 @@ use super::{config as client_config};
 pub trait TrMptpClient {
     type Config: client_config::TrConfig;
 
-    type Session<'f>: TrMptpSession<'f, Self::Config>
-    where
-        Self: 'f;
+    type Session<'f>: TrMptpSession<'f, Self::Config> where Self: 'f;
 
     type ReqErr: core::error::Error;
 
@@ -49,7 +47,7 @@ pub enum SessionState {
     /// 响应已到达，且会话状态就绪可以接收
     PrefixReady,
 
-    /// 回复存在恢复体且会话状态就绪可以接收
+    /// 回复存在回复体且会话状态就绪可以接收
     BodyReady,
 
     /// 会话存在 Suffix Stream 且就绪可以接收

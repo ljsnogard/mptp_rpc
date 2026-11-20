@@ -32,6 +32,8 @@
 //! write half is closed. The response body view is a single type over the two upstream
 //! readers; `TrMptpBuffRead` extracts the one the prefix already decided.
 
+use core::alloc::Allocator;
+
 use alloc::string::ToString;
 
 use abs_buff::{
@@ -43,6 +45,7 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     messaging::TrMsgPrefix,
 };
+use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{RequestPrefix, chunked::ChunkedEncode, read_response_prefix_with_async};
 
@@ -71,23 +74,22 @@ pub type RespBodyError<TyErr> = BodyError<TyErr>;
 /// 一次请求 / 回复过程的会话。
 ///
 /// 字段不对外公开：调用者只能通过 [`TrMptpSession`] 的契约驱动它。
-pub struct MptpSession<'a, C>
+pub struct MptpSession<'a, C, A>
 where
     C: TrConfig,
+    A: Allocator + Send,
 {
     /// 共享的会话核心：两个半边、请求前缀、体边界与体进度。
-    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, RequestAlloc<'a>>,
+    core_: SessionCore<ChannelTx<C>, ChannelRx<C>, BumpListAlloc<A>>,
 
     /// 客户端侧的状态机。
     state_: SessionState,
-
-    /// 本会话自己的 arena；请求前缀与回复前缀都由它分配。
-    alloc_: RequestAlloc<'a>,
 }
 
-impl<'a, C> MptpSession<'a, C>
+impl<'a, C, A> MptpSession<'a, C, A>
 where
     C: TrConfig,
+    A: Allocator + Send,
 {
     /// 由「请求前缀 + 该子流的收发半边」构造。
     ///
@@ -252,8 +254,7 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffWrite<u8>,
 {
-    type SegmMut<'f>
-        = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
+    type SegmMut<'f> = <ChannelTx<C> as TrBuffTryWrite<u8>>::SegmMut<'f>
     where
         Self: 'f;
 
@@ -272,8 +273,7 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffWrite<u8>,
 {
-    type WriteAsync<'f>
-        = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
+    type WriteAsync<'f> = <ChannelTx<C> as TrBuffWrite<u8>>::WriteAsync<'f>
     where
         Self: 'f;
 
@@ -301,13 +301,11 @@ where
     C: TrConfig,
     ChannelTx<C>: TrBuffFlush<u8>,
 {
-    type FlushAsync<'f>
-        = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
+    type FlushAsync<'f> = <ChannelTx<C> as TrBuffFlush<u8>>::FlushAsync<'f>
     where
         Self: 'f;
 
-    type CloseAsync<'f>
-        = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
+    type CloseAsync<'f> = <ChannelTx<C> as TrBuffFlush<u8>>::CloseAsync<'f>
     where
         Self: 'f;
 

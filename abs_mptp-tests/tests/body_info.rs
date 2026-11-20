@@ -62,7 +62,6 @@ impl TrHeaders for MockHeaders {
     type Key = StdHeaderKey;
     type Val = MockVal;
     type Entry = MockEntry;
-    type EntriesIter = std::vec::IntoIter<MockEntry>;
 
     fn try_get_std_header(&self, key: StdHeaderKey) -> Option<&Self::Val> {
         self.map_.get(&key).map(|entry| &entry.val_)
@@ -73,13 +72,6 @@ impl TrHeaders for MockHeaders {
         K: Borrow<Self::Key>,
     {
         self.map_.get(key.borrow()).map(|entry| &entry.val_)
-    }
-
-    fn into_entries(self) -> Self::EntriesIter {
-        self.map_
-            .into_values()
-            .collect::<Vec<MockEntry>>()
-            .into_iter()
     }
 }
 

@@ -10,8 +10,8 @@
 //! **single** handler. `accept_async` returns a movable `ServingSession`; the caller
 //! decides how to run many of them concurrently. The crate never spawns.
 
-use alloc::{boxed::Box, string::ToString};
-use core::marker::PhantomData;
+use alloc::{alloc::Global, string::ToString};
+use core::{alloc::Allocator, marker::PhantomData};
 
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
 use abs_cancel::{NonCancellableToken, TrCancellationToken, TrMayCancel};
@@ -20,7 +20,7 @@ use abs_smux::{
     chan::{TrChannelHalf, TrChannelHandle},
     conn::{TrChannelListener, TrDockBinding},
 };
-use bumplist_alloc::{BumpListAlloc, BumpListAllocError, PageSize};
+use bumplist_alloc::{BumpListAlloc, PageSize};
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, ResponsePrefix, read_request_prefix_with_async};
 
@@ -55,25 +55,22 @@ pub struct ServeOutcome {
 }
 
 /// 一条 MPTP 连接上的服务端入口。
-pub struct MptpServlet<C, H>
+pub struct MptpServlet<C, H, A = Global>
 where
     C: TrConfig,
     H: TrServeHandler<C>,
+    A: Allocator + Send,
 {
     /// 单一 handler。
     handler_: H,
 
-    /// 所有 per-session arena 的 root；它的地址由 `Box` 固定。
-    root_: Box<BumpListAlloc>,
-
-    /// 新建 per-session arena 时使用的页大小。
-    page_size_: PageSize,
+    bump_: BumpListAlloc<A>,
 
     /// `C` 只出现在通道类型与 handler 约束里。
     _use_c_: PhantomData<fn() -> C>,
 }
 
-impl<C, H> MptpServlet<C, H>
+impl<C, H> MptpServlet<C, H, Global>
 where
     C: TrConfig,
     H: TrServeHandler<C>,
@@ -88,25 +85,29 @@ where
     /// 构造 servlet 的 root arena 时 panic。需要显式处理时用
     /// [`MptpServlet::new_with_page_size`]。
     pub fn new(handler: H) -> Self {
-        Self::new_with_page_size(handler, PageSize::P2K)
-            .expect("PageSize::P2K 应当在当前平台受支持")
+        let bump = BumpListAlloc::new_in(Global, PageSize::P2K)
+            .expect("PageSize::P2K 应当在当前平台受支持");
+        Self::new_with(handler, bump)
     }
+}
 
+impl<C, H, A> MptpServlet<C, H, A>
+where
+    C: TrConfig,
+    H: TrServeHandler<C>,
+    A: Allocator + Send,
+{
     /// 用单一 handler 与页大小构造 servlet。
     ///
     /// # Errors
     ///
     /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
-    pub fn new_with_page_size(handler: H, page_size: PageSize) -> Result<Self, BumpListAllocError> {
-        // root 在构造时不申请 Page；它的地址由 `Box` 固定，之后可以安全地分配
-        // per-session `BumpListAlloc` 和它们的 Arc 控制块。
-        let root_ = Box::new(BumpListAlloc::new(page_size)?);
-        Result::Ok(MptpServlet {
+    pub fn new_with(handler: H, bump: BumpListAlloc<A>) -> Self {
+        MptpServlet {
             handler_: handler,
-            root_,
-            page_size_: page_size,
+            bump_: bump,
             _use_c_: PhantomData,
-        })
+        }
     }
 
     /// 取回 handler。
@@ -115,8 +116,8 @@ where
     }
 
     /// 本 servlet 使用的页大小。
-    pub const fn page_size(&self) -> PageSize {
-        self.page_size_
+    pub fn page_size(&self) -> PageSize {
+        self.bump_.page_size()
     }
 
     /// 为一条入向子流创建新的 per-session arena 句柄。
@@ -128,7 +129,7 @@ where
     ///
     /// 只会在构造 servlet 时已经验证过的页大小上失败，因此正常路径不会 panic。
     pub fn new_request_alloc<'a>(&'a self) -> RequestAlloc<'a> {
-        new_request_alloc(&self.root_, self.page_size_)
+        new_request_alloc(&self.bump_, self.page_size_)
             .expect("servlet 构造时已经验证过该页大小受支持")
     }
 

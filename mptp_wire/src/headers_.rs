@@ -30,9 +30,9 @@
 //! `[type_id(u32), bin]`. Every string / byte container is allocated by `A: Allocator`.
 
 use alloc::{
+    boxed::Box,
     collections::BTreeMap,
-    sync::Arc,
-    vec::{IntoIter, Vec},
+    vec::Vec,
 };
 use core::{
     alloc::{Allocator, AllocatorClone},
@@ -825,26 +825,18 @@ pub struct Headers<A>
 where
     A: AllocatorClone,
 {
-    map_: Arc<BTreeMap<HeaderKey<A>, HeaderVal<A>, A>, A>,
-}
-
-impl<A: AllocatorClone> Clone for Headers<A> {
-    fn clone(&self) -> Self {
-        Headers {
-            map_: self.map_.clone(),
-        }
-    }
+    map_: Box<BTreeMap<HeaderKey<A>, HeaderVal<A>, A>, A>,
 }
 
 impl<A: AllocatorClone> fmt::Debug for Headers<A> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_map().entries(self.map_.iter()).finish()
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.map_.iter()).finish()
     }
 }
 
 impl<A: AllocatorClone> PartialEq for Headers<A> {
     fn eq(&self, other: &Self) -> bool {
-        *self.map_ == *other.map_
+        self.map_ == other.map_
     }
 }
 
@@ -855,9 +847,8 @@ impl<A: AllocatorClone> Headers<A> {
     ///
     /// Build an empty header map; both the map and the `Arc` are allocated by `alloc`.
     pub fn new_in(alloc: A) -> Self {
-        let map = BTreeMap::new_in(alloc.clone());
         Headers {
-            map_: Arc::new_in(map, alloc),
+            map_: Box::new_in(BTreeMap::new_in(alloc.clone()), alloc),
         }
     }
 
@@ -903,8 +894,8 @@ impl<A: AllocatorClone> Headers<A> {
     /// Write a textual value; the payload is a MessagePack string tagged with the `str`
     /// type fingerprint.
     pub fn set_text(&mut self, key: StdHeaderKey, text: impl AsRef<str>) {
-        let alloc = Arc::allocator(&self.map_).clone();
-        self.set(key, HeaderVal::from_text(text, alloc));
+        let alloc = Box::allocator(&self.map_);
+        self.set(key, HeaderVal::from_text(text, alloc.clone()));
     }
 
     /// 按**文本键名**写一个文本值；键与值都由本头表自身的 allocator 分配。
@@ -926,7 +917,7 @@ impl<A: AllocatorClone> Headers<A> {
     /// );
     /// ```
     pub fn set_text_named(&mut self, name: &str, text: impl AsRef<str>) {
-        let alloc = Arc::allocator(&self.map_).clone();
+        let alloc = Box::allocator(&self.map_).clone();
         self.set(
             HeaderKey::from_text(name, alloc.clone()),
             HeaderVal::from_text(text, alloc),
@@ -943,7 +934,7 @@ impl<A: AllocatorClone> Headers<A> {
     where
         K: Into<HeaderKey<A>>,
     {
-        Arc::make_mut(&mut self.map_).insert(key.into(), val);
+        self.map_.insert(key.into(), val);
     }
 
     /// 删除一个标准键，返回被删掉的值。
@@ -956,7 +947,7 @@ impl<A: AllocatorClone> Headers<A> {
     where
         K: Borrow<HeaderKey<A>>,
     {
-        Arc::make_mut(&mut self.map_)
+        self.map_
             .remove_entry(key.borrow())
             .map(|(_, val)| val)
     }
@@ -1064,8 +1055,6 @@ impl<A: AllocatorClone> TrHeaders for Headers<A> {
 
     type Entry = HeaderEntry<A>;
 
-    type EntriesIter = IntoIter<HeaderEntry<A>, A>;
-
     fn try_get_std_header(&self, key: StdHeaderKey) -> Option<&Self::Val> {
         self.try_get_val(key)
     }
@@ -1076,20 +1065,11 @@ impl<A: AllocatorClone> TrHeaders for Headers<A> {
     {
         self.map_.get(key.borrow())
     }
-
-    fn into_entries(self) -> Self::EntriesIter {
-        let alloc = Arc::allocator(&self.map_).clone();
-        let mut entries = Vec::with_capacity_in(self.map_.len(), alloc);
-        for (key, val) in self.map_.iter() {
-            entries.push(HeaderEntry::from_kv(key.clone(), val.clone()));
-        }
-        entries.into_iter()
-    }
 }
 
 impl<A: AllocatorClone> TrHeadersMut for Headers<A> {
     fn try_add_header<K>(
-        mut self,
+        &mut self,
         key: K,
         factory: impl FnOnce(K) -> Self::Val,
     ) -> Result<Self::Entry, K>
@@ -1101,23 +1081,27 @@ impl<A: AllocatorClone> TrHeadersMut for Headers<A> {
             return Result::Err(key);
         }
         let val_ = factory(key);
-        Arc::make_mut(&mut self.map_).insert(key_.clone(), val_.clone());
+        self.map_.insert(key_.clone(), val_.clone());
         Result::Ok(HeaderEntry::from_kv(key_, val_))
     }
 
-    fn add_or_set_header<K, V>(mut self, key: K, val: V) -> Option<(Self::Key, Self::Val)>
+    fn add_or_set_header<K, V>(&mut self, key: K, val: V) -> Option<(Self::Key, Self::Val)>
     where
         K: Into<Self::Key>,
         V: Into<Self::Val>,
     {
         let key_ = key.into();
-        Arc::make_mut(&mut self.map_)
+        self.map_
             .insert(key_.clone(), val.into())
             .map(|old| (key_, old))
     }
 
-    fn remove_header(mut self, key: impl Borrow<Self::Key>) -> Option<(Self::Key, Self::Val)> {
-        Arc::make_mut(&mut self.map_).remove_entry(key.borrow())
+    fn remove_header<K>(&mut self, key: K) -> Option<(Self::Key, Self::Val)>
+    where
+        K: Borrow<Self::Key>,
+    {
+        self.map_
+            .remove_entry(key.borrow())
     }
 }
 
@@ -1225,7 +1209,7 @@ where
         values.insert(key, val);
     }
     Result::Ok(Headers {
-        map_: Arc::new_in(values, alloc),
+        map_: Box::new_in(values, alloc),
     })
 }
 

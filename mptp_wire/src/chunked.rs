@@ -139,8 +139,7 @@ impl<TySrcErr, TyDstErr> Error for ChunkedEncodeError<TySrcErr, TyDstErr>
 where
     TySrcErr: Error,
     TyDstErr: Error,
-{
-}
+{}
 
 /// 分块搬运器：把一个**读半边**的内容按块搬进一个**写半边**。
 ///

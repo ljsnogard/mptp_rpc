@@ -59,9 +59,7 @@ pub trait TrMsgPrefix {
     /// 本前缀携带的头表类型。
     ///
     /// The header-map type carried by this prefix.
-    type Headers<'f>: spec::TrHeaders
-    where
-        Self: 'f;
+    type Headers<'f>: spec::TrHeaders where Self: 'f;
 
     /// 取头表；没有头时返回 `None`。
     ///

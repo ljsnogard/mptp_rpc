@@ -12,9 +12,7 @@
 //! original `request_async` remain the escape hatches.
 
 use core::{
-    future::{Future, Ready, ready},
-    pin::Pin,
-    task::{Context, Poll},
+    alloc::Allocator, future::{Future, Ready, ready}, pin::Pin, task::{Context, Poll},
 };
 
 use abs_buff::{TrBuffRead, buffer::TrConsumerState};
@@ -23,6 +21,7 @@ use abs_mptp::{
     client::{SessionState, TrMptpSession},
     spec::StdHeaderKey,
 };
+use bumplist_alloc::BumpListAlloc;
 use gen_mcf2::gen_may_cancel_future;
 use mptp_wire::{HeaderKey, HeaderVal, RequestPrefix, ResponsePrefix, limited::LimitedReader};
 
@@ -274,35 +273,30 @@ where
 }
 
 /// 客户端请求 builder。
-pub struct RequestBuilder<'a, C, B = NilBody, S = NoSuffix>
+pub struct RequestBuilder<'a, C, A>
 where
     C: TrConfig,
+    A: Allocator + Send,
 {
     /// 发起请求的客户端。
-    client_: &'a MptpClient<C>,
+    client_: &'a MptpClient<C, A>,
 
-    /// 本次请求自己的 arena；前缀与头表由它分配。
-    alloc_: RequestAlloc<'a>,
-
-    /// 请求前缀；它的容器由 `alloc_` 分配。
-    prefix_: RequestPrefix<RequestAlloc<'a>>,
+    /// builder 完成使命后可以移交给 session
+    bump_: Option<BumpListAlloc<A>>,
 
     /// 目标垛口；缺省取配置。
     dock_: Option<Dock<C>>,
-
-    /// 请求体源。
-    body_: B,
-
-    /// 请求后缀源。
-    suffix_: S,
 }
 
 /// 把前缀写成「定长体」声明；`size == 0` 时清掉两个体头（等价于没有体）。
 ///
 /// `Body_Size` 的 Num 形态是 `u16`；超过 `u16::MAX` 的体改用分块声明。这样大请求体仍然
 /// 发得出去，而不是被静默截断。
-fn set_sized_header_<A>(prefix: &mut RequestPrefix<A>, size: usize, alloc: A)
-where
+fn set_sized_header_<A>(
+    prefix: &mut RequestPrefix<A>,
+    size: usize,
+    alloc: A,
+) where
     A: core::alloc::AllocatorClone,
 {
     prefix
@@ -335,23 +329,21 @@ where
     );
 }
 
-impl<'a, C> RequestBuilder<'a, C, NilBody, NoSuffix>
+impl<'a, C> RequestBuilder<'a, C, A>
 where
     C: TrConfig,
+    A: Allocator + Send,
 {
     /// 由「客户端 + 前缀 + per-request arena」构造。
     pub(crate) fn new_(
-        client: &'a MptpClient<C>,
+        client: &'a MptpClient<C, A>,
         prefix: RequestPrefix<RequestAlloc<'a>>,
-        alloc: RequestAlloc<'a>,
+        bump: BumpListAlloc<A>,
     ) -> Self {
         RequestBuilder {
             client_: client,
-            alloc_: alloc,
-            prefix_: prefix,
+            bump_: Option::Some(bump),
             dock_: Option::None,
-            body_: NilBody,
-            suffix_: NoSuffix,
         }
     }
 }
@@ -397,77 +389,6 @@ where
             HeaderVal::from_text(text, self.alloc_.clone()),
         );
         self
-    }
-
-    /// 定长请求体：自动写 `Body_Size`。
-    pub fn body_bytes(self, bytes: &'a [u8]) -> RequestBuilder<'a, C, BytesBody<'a>, S> {
-        let size = bytes.len();
-        let mut next = RequestBuilder {
-            client_: self.client_,
-            alloc_: self.alloc_,
-            prefix_: self.prefix_,
-            dock_: self.dock_,
-            body_: BytesBody { bytes_: bytes },
-            suffix_: self.suffix_,
-        };
-        set_sized_header_(&mut next.prefix_, size, next.alloc_.clone());
-        next
-    }
-
-    /// 定长请求体：自动写 `Body_Size`。
-    pub fn body_sized<R>(
-        self,
-        src: &'a mut R,
-        size: usize,
-    ) -> RequestBuilder<'a, C, SizedBody<'a, R>, S>
-    where
-        R: TrBuffRead<u8> + TrConsumerState,
-    {
-        let mut next = RequestBuilder {
-            client_: self.client_,
-            alloc_: self.alloc_,
-            prefix_: self.prefix_,
-            dock_: self.dock_,
-            body_: SizedBody {
-                limited_: LimitedReader::new(src, size),
-                size_: size,
-            },
-            suffix_: self.suffix_,
-        };
-        set_sized_header_(&mut next.prefix_, size, next.alloc_.clone());
-        next
-    }
-
-    /// 分块请求体：自动写 `Body_Transfer: Chunked`。
-    pub fn body_chunked<R>(self, src: &'a mut R) -> RequestBuilder<'a, C, ChunkedBody<'a, R>, S>
-    where
-        R: TrBuffRead<u8> + TrConsumerState,
-    {
-        let mut next = RequestBuilder {
-            client_: self.client_,
-            alloc_: self.alloc_,
-            prefix_: self.prefix_,
-            dock_: self.dock_,
-            body_: ChunkedBody { src_: src },
-            suffix_: self.suffix_,
-        };
-        set_chunked_header_(&mut next.prefix_, next.alloc_.clone());
-        next
-    }
-
-    /// 请求后缀流（`Push` / `Call`）。
-    pub fn suffix<R>(self, src: &'a mut R) -> RequestBuilder<'a, C, B, Suffix<'a, R>>
-    where
-        R: TrBuffRead<u8> + TrConsumerState,
-    {
-        RequestBuilder {
-            client_: self.client_,
-            alloc_: self.alloc_,
-            prefix_: self.prefix_,
-            dock_: self.dock_,
-            body_: self.body_,
-            suffix_: Suffix { src_: src },
-        }
     }
 
     /// 发送请求并读回复前缀。

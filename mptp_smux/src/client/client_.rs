@@ -28,8 +28,12 @@
 //! [`MptpClient::request_to_dock_async`](super::MptpClient::request_to_dock_async)。`MptpClient`
 //! **自己不持有任何垛口**：本端每次由连接安排，远端每次由调用决定。
 
-use alloc::{boxed::Box, string::ToString};
-use core::{alloc::AllocatorClone, mem::MaybeUninit, ops::Deref};
+use alloc::{alloc::Global, string::ToString};
+use core::{
+    alloc::{Allocator, AllocatorClone},
+    mem::MaybeUninit,
+    ops::Deref,
+};
 
 use abs_cancel::{TrCancellationToken, TrMayCancel};
 use abs_mm::res_man::{TrAllocBy, TrUnique};
@@ -69,21 +73,19 @@ type SharedConn<C> = <C as abs_mptp::client::config::TrConfig>::SharedConn;
 /// `MptpClient` **不**自己持有一份长期 arena。一次请求从 [`MptpClient::request`] 开始
 /// 创建**新的** per-request arena：它随请求前缀进入 `RequestBuilder`，最终由
 /// `MptpSession` 持有；请求结束（会话 drop）时整个 arena 随之释放。
-pub struct MptpClient<C>
+pub struct MptpClient<C, A = Global>
 where
     C: TrConfig,
+    A: Allocator + Send,
 {
     /// 共享连接。
     conn_: SharedConn<C>,
 
     /// 所有 per-request arena 的 root；它的地址由 `Box` 固定。
-    root_: Box<BumpListAlloc>,
-
-    /// 新建 per-request arena 时使用的页大小。
-    page_size_: PageSize,
+    bump_: BumpListAlloc<A>,
 }
 
-impl<C> MptpClient<C>
+impl<C> MptpClient<C, Global>
 where
     C: TrConfig,
 {
@@ -99,52 +101,41 @@ where
     /// 构造客户端 root arena 时 panic。需要显式处理时用
     /// [`MptpClient::new_with_page_size`]。
     pub fn new(conn: SharedConn<C>) -> Self {
-        Self::new_with_page_size(conn, PageSize::P2K).expect("PageSize::P2K 应当在当前平台受支持")
+        let bump = BumpListAlloc::new(PageSize::P2K)
+            .expect("PageSize::P2K 应当在当前平台受支持");
+        Self::new_in(conn, bump)
     }
+}
 
-    /// 由共享连接与页大小构造客户端。
-    ///
-    /// # Errors
-    ///
-    /// 页大小在当前平台不受支持时返回 [`BumpListAllocError::UnsupportedPageSize`]。
-    pub fn new_with_page_size(
+impl<C, A> MptpClient<C, A>
+where
+    C: TrConfig,
+    A: Allocator + Send,
+{
+    pub const fn new_in(
         conn: SharedConn<C>,
-        page_size: PageSize,
-    ) -> Result<Self, BumpListAllocError> {
-        // root 在构造时不申请 Page；它的地址由 `Box` 固定，之后可以安全地
-        // 分配 per-request `BumpListAlloc` 和它们的 Arc 控制块。
-        let root_ = Box::new(BumpListAlloc::new(page_size)?);
-        Result::Ok(MptpClient {
+        bump: BumpListAlloc<A>,
+    ) -> Self {
+        MptpClient {
             conn_: conn,
-            root_,
-            page_size_: page_size,
-        })
+            bump_: bump,
+        }
     }
 
-    /// 本客户端使用的页大小。
-    pub const fn page_size(&self) -> PageSize {
-        self.page_size_
-    }
-
-    /// 为一次请求创建新的 per-request arena 句柄。
-    ///
-    /// 内层 `BumpListAlloc` 由 Arc 拥有，Arc 控制块从本客户端的 root 分配；句柄带
-    /// `&self` 的生命周期，因此不会活过客户端。
-    ///
-    /// # Panics
-    ///
-    /// 只会在构造客户端时已经验证过的页大小上失败，因此正常路径不会 panic。
-    pub fn new_request_alloc<'a>(&'a self) -> RequestAlloc<'a> {
-        new_request_alloc(&self.root_, self.page_size_)
-            .expect("客户端构造时已经验证过该页大小受支持")
+    pub(crate) fn bump(&self) -> &BumpListAlloc<A> {
+        &self.bump_
     }
 
     /// 统一入口：显式方法 + 位置。
-    pub fn request<'a>(&'a self, method: AccessMethod, location: &str) -> RequestBuilder<'a, C> {
-        let alloc_ = self.new_request_alloc();
+    pub fn request<'f>(
+        &'f self,
+        method: AccessMethod,
+        location: &str,
+    ) -> RequestBuilder<'f, C> {
+        let alloc = self.bump().clone();
         RequestBuilder::new_(
             self,
-            messaging::RequestPrefix::new_in(method, location, alloc_.clone()),
+            messaging::RequestPrefix::new_in(method, location, alloc),
             alloc_,
         )
     }

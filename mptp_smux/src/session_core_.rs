@@ -24,7 +24,10 @@ use crate::{
 };
 
 /// 一次会话的共享核心。
-pub(crate) struct SessionCore<Tx, Rx, A: AllocatorClone> {
+pub(crate) struct SessionCore<Tx, Rx, A>
+where
+    A: AllocatorClone,
+{
     /// 本次请求的前缀。服务端只用体边界，不读前缀，因此允许在 `server`-only 构建里
     /// 保留这个字段。
     #[allow(dead_code)]

@@ -51,11 +51,6 @@ pub trait TrHeaders {
     /// value.
     type Entry: Borrow<Self::Key> + Borrow<Self::Val>;
 
-    /// 全部条目的迭代器。
-    ///
-    /// The iterator over all entries.
-    type EntriesIter: IntoIterator<Item = Self::Entry>;
-
     /// 按标准头键查询；键不存在时返回 `None`。
     ///
     /// 标准头属于协议保留键，与用户自定义键共存于同一张表。该查询独立于
@@ -76,11 +71,6 @@ pub trait TrHeaders {
     fn try_get_header<K>(&self, key: K) -> Option<&Self::Val>
     where
         K: Borrow<Self::Key>;
-
-    /// 交出全部条目。
-    ///
-    /// Hand out all entries.
-    fn into_entries(self) -> Self::EntriesIter;
 }
 
 /// 可变的 MPTP 头表：在 [`TrHeaders`] 之上补出增、改、删。
@@ -95,7 +85,7 @@ where
     /// Insert without overwriting: `Ok` carries the stored entry, `Err` carries the key
     /// that was already present.
     fn try_add_header<K>(
-        self,
+        &mut self,
         key: K,
         factory: impl FnOnce(K) -> Self::Val,
     ) -> Result<Self::Entry, K>
@@ -105,7 +95,11 @@ where
     /// 添加或者替换键值对，返回被替代的 Key 和 val （如果存在）
     ///
     /// Insert or replace, returning the replaced key/value pair when there was one.
-    fn add_or_set_header<K, V>(self, key: K, val: V) -> Option<(Self::Key, Self::Val)>
+    fn add_or_set_header<K, V>(
+        &mut self,
+        key: K,
+        val: V,
+    ) -> Option<(Self::Key, Self::Val)>
     where
         K: Into<Self::Key>,
         V: Into<Self::Val>;
@@ -113,7 +107,12 @@ where
     /// 删除一个键，返回被删掉的键值对（如果存在）。
     ///
     /// Remove a key, returning the removed pair when there was one.
-    fn remove_header(self, key: impl Borrow<Self::Key>) -> Option<(Self::Key, Self::Val)>;
+    fn remove_header<K>(
+        &mut self,
+        key: K,
+    ) -> Option<(Self::Key, Self::Val)>
+    where
+        K: Borrow<Self::Key>;
 }
 
 /// 两端都必须认识的标准头键。

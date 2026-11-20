@@ -9,7 +9,6 @@
 //! module provides `MptpServlet` for one connection, `ServingSession` for one request,
 //! and the response helpers.
 
-mod connection_;
 mod handler_;
 mod prep_ctx_;
 mod servlet_;
@@ -17,7 +16,6 @@ mod session_;
 
 pub mod config;
 
-pub use connection_::MptpConnection;
 pub use handler_::{LegacyHandler, TrServeHandler};
 pub use prep_ctx_::ServingPrepCtx;
 pub use servlet_::{

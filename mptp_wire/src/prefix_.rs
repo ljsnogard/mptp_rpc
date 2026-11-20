@@ -64,19 +64,6 @@ where
     pub(crate) headers_: Option<Headers<A>>,
 }
 
-impl<A> Clone for RequestPrefix<A>
-where
-    A: AllocatorClone,
-{
-    fn clone(&self) -> Self {
-        RequestPrefix {
-            method_: self.method_,
-            location_: self.location_.clone(),
-            headers_: self.headers_.clone(),
-        }
-    }
-}
-
 impl<A> fmt::Debug for RequestPrefix<A>
 where
     A: AllocatorClone,
@@ -283,25 +270,12 @@ where
     pub(crate) headers_: Option<Headers<A>>,
 }
 
-impl<A> Clone for ResponsePrefix<A>
-where
-    A: AllocatorClone,
-{
-    fn clone(&self) -> Self {
-        ResponsePrefix {
-            status_: self.status_,
-            headers_: self.headers_.clone(),
-        }
-    }
-}
-
 impl<A> fmt::Debug for ResponsePrefix<A>
 where
     A: AllocatorClone,
 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ResponsePrefix")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResponsePrefix")
             .field("status", &self.status_)
             .field("headers", &self.headers_)
             .finish()

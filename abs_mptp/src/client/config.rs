@@ -21,13 +21,9 @@ pub trait TrConfig: 'static {
     /// 本客户端发送的请求类型。
     ///
     /// 带生命周期：前缀里的 location / 头表可以借用 per-request arena。
-    type ReqPrefix<'a>: crate::messaging::TrRequestPrefix
-    where
-        Self: 'a;
+    type ReqPrefix<'f>: crate::messaging::TrRequestPrefix where Self: 'f;
 
-    type RespPrefix<'a>: crate::messaging::TrResponsePrefix
-    where
-        Self: 'a;
+    type RespPrefix<'f>: crate::messaging::TrResponsePrefix where Self: 'f;
 }
 
 //-- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----

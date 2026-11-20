@@ -26,23 +26,15 @@ pub trait TrConfig: 'static {
     /// `Data` 收紧为 `u8`：MPTP 的报文前缀与报文体的线上编码都以字节为单位。
     type MuxConn: TrConnection<Config: TrMuxConfig<Data = u8>>;
 
-    type ReqHeaders<'a>: TrHeaders
-    where
-        Self: 'a;
+    type ReqHeaders<'f>: TrHeaders where Self: 'f;
 
-    type RespHeaders<'a>: TrHeadersMut
-    where
-        Self: 'a;
+    type RespHeaders<'f>: TrHeadersMut where Self: 'f;
 
     /// 本服务端**接收**的请求类型。
-    type ReqPrefix<'a>: crate::messaging::TrRequestPrefix
-    where
-        Self: 'a;
+    type ReqPrefix<'f>: crate::messaging::TrRequestPrefix where Self: 'f;
 
     /// 本服务端**发出**的响应类型。
-    type RespPrefix<'a>: crate::messaging::TrResponsePrefix
-    where
-        Self: 'a;
+    type RespPrefix<'f>: crate::messaging::TrResponsePrefix where Self: 'f;
 }
 
 
